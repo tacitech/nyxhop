@@ -50,9 +50,9 @@ Budget an hour the first time.
   On the bench, 1–3 m apart is fine.
 * A PC on the same Ethernet as the boards, with Python 3 (`pip install paramiko`) for the
   flashing tool. A USB camera on the transmitting side.
-* This repository: it carries the prebuilt board images in `deploy/`. The apps are prebuilt in
-  **Releases** (Windows executables and the Android APK), or build them yourself with Rust 1.85+
-  and `cargo build --release`.
+* This repository: it carries the prebuilt board images in `deploy/`. The apps you build
+  yourself, with Rust 1.85 or newer: `cargo build --release` at the repository root, once, for
+  all of them.
 
 ### 1. An OS on the board
 
@@ -95,9 +95,9 @@ with role and address, no password needed.
 
 ### 3. The apps
 
-The executables are in the Releases archive, or in `target/release/` if you built them
-yourself. Ground side, the PC that shows the video (or the Android app: on first start tap the
-screen and enter the same address):
+`cargo build --release` at the repository root puts them in `target/release/`. Ground side, the
+PC that shows the video (or the Android app: on first start tap the screen and enter the same
+address):
 
 ```bash
 nyx-rx --channel 192.168.0.12:7011
@@ -109,6 +109,10 @@ Transmitting side, the PC or small Linux board that has the camera:
 nyx-tx --channel 192.168.0.10:7010
 nyx-tx --channel 192.168.0.10:7010 --headless     # no window, e.g. on an SBC next to the camera
 ```
+
+The Android app is its own build: `python apps/video/build_apk.py` writes a signed APK to
+`apps/video/android/out/`, and needs the Android SDK and NDK, `cargo-ndk` and the
+`aarch64-linux-android` Rust target. You do not need it: the ground app on a PC does the same job.
 
 Then, once in the life of a pair of boards, **pair them**: press **Link aircraft** in the ground
 app. A board that has never been paired accepts on its own, both pills turn *linked*, and the
@@ -234,7 +238,7 @@ docs/         licence terms, SDK notes, legal
 | what | licence |
 |---|---|
 | Source code in this repository: `link/`, `apps/`, `docs/` | [MIT](LICENSE) |
-| Binaries in `deploy/` and in Releases: FPGA design, radio daemon, board images | [EULA](docs/EULA.md), not MIT |
+| Binaries in `deploy/`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md), not MIT |
 | Third-party components inside the board images (U-Boot, BusyBox and others) | their own licences, see [THIRD-PARTY.md](docs/THIRD-PARTY.md) |
 
 Radio use is subject to the laws of your country: you are responsible for the frequencies and the

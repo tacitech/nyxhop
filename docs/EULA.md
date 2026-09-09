@@ -1,8 +1,8 @@
 # End-user licence agreement — NyxHop binaries
 
-This agreement covers the NyxHop binaries: the board images in `deploy/` in this repository and
-in Releases (FPGA design, radio daemon and the files flashed with them), and the prebuilt apps
-in Releases. The source code published in this repository is covered by the MIT licence instead,
+This agreement covers the NyxHop binaries: the board images in `deploy/` in this repository
+(FPGA design, radio daemon and the files flashed with them). The source code published in this
+repository is covered by the MIT licence instead,
 and third-party components inside the board images keep their own licences (THIRD-PARTY.md).
 
 1. **Grant.** You may install and use the binaries on boards for which you hold a NyxHop licence
