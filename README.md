@@ -15,6 +15,11 @@ your local rules allow.
 
 On the bench it carries an H.264 camera stream at **30 fps**, **61 ms** from camera to screen.
 
+![The ground app: video on the left, the channel tables on the right](docs/img/ground-app.png)
+
+*The ground app holding 5795 MHz out of its video table, with the control channel on its own
+table down at 2.4 GHz.*
+
 If you know the OcuSync-style digital links on commercial drones, this is the same idea:
 hopping OFDM, a separate control channel, adaptive modulation, retransmission of what got
 lost. Built from boards anyone can buy, with the apps and the protocol in the open.
@@ -188,6 +193,10 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
 
 Either board can be either end, and two of the same kind work. Ethernet between each board
 and its computer, 12 V supplies, antennas of your choice.
+
+<img src="docs/img/bench.jpg" width="420" alt="An ADRV9364-Z7020 and an ANTSDR E200 on the bench">
+
+*A pair on the bench: ADRV9364-Z7020 on the left, ANTSDR E200 on the right.*
 
 Another board, or one you would like to see on this list? Write to **tacitechvn@gmail.com**.
 
