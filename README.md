@@ -198,6 +198,11 @@ and its computer, 12 V supplies, antennas of your choice.
 
 *A pair on the bench: ADRV9364-Z7020 on the left, ANTSDR E200 on the right.*
 
+The boards transmit at the power their own front end gives, which is enough for a bench and not
+much more. For distance, add the RF yourself: an antenna with gain at both ends, a power
+amplifier on the transmitting side, a low-noise amplifier on the receiving side. That part is
+outside NyxHop, and the power you end up radiating is yours to keep within your local rules.
+
 Another board, or one you would like to see on this list? Write to **tacitechvn@gmail.com**.
 
 ## General purpose, not a video product
