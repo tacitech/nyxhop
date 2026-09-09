@@ -507,6 +507,8 @@ pub struct App {
     tex_ver: u64,
     /// v40.34: the settings drawer (gear).
     drawer_open: bool,
+    /// v40.42: the plates over the video (drawer header switch).
+    hud_plates: bool,
     addr_buf: String,
     board: nyx_common::boardctl::BoardCtl,
     /// v40.33: pasted licence text + last result
@@ -535,6 +537,7 @@ impl App {
             tex: None,
             tex_ver: u64::MAX,
             drawer_open: false,
+            hud_plates: true,
             addr_buf,
             board,
             lic_buf: String::new(),
@@ -619,11 +622,14 @@ impl eframe::App for App {
             banner: None,
             title: "NYXHOP".into(),
             empty_text: "waiting for video…".into(),
+            plates: self.hud_plates,
         };
         let tex = self.tex.clone();
         let mut open = self.drawer_open;
-        nu::screen(root, &mut open, "Settings", |ui| self.drawer(ui), |ui| nu::hud(ui, tex.as_ref(), &data));
+        let mut plates = self.hud_plates;
+        nu::screen(root, &mut open, &mut plates, "Settings", |ui| self.drawer(ui), |ui| nu::hud(ui, tex.as_ref(), &data));
         self.drawer_open = open;
+        self.hud_plates = plates;
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
