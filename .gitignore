@@ -1,0 +1,7 @@
+.nyx-public-export
+target/
+logs/
+*.log
+__pycache__/
+*.pyc
+apps/video/android/out/

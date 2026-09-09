@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NyxHop mobile (RX). App KHÔNG có code Java: NativeActivity nằm sẵn
+     trong framework, mọi thứ chạy trong libnyx_mobile.so (Rust).
+     hasCode="false" -> khỏi cần classes.dex. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.nyxhop.mobile"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="34" />
+
+    <!-- nối daemon board qua WiFi hoặc USB-C→Ethernet -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- màn không tắt khi đang xem video -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:label="NyxHop"
+        android:hasCode="false"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="NyxHop"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
+            android:screenOrientation="sensorLandscape"
+            android:launchMode="singleTask">
+            <!-- tên .so (bỏ tiền tố lib và đuôi .so) -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="nyx_mobile" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

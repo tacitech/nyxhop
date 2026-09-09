@@ -1,0 +1,20 @@
+[package]
+name = "nyx-common"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["h264"]
+# h264 = openh264 (C++ qua cc) — TAT cho Android/no-std-ish build
+# (MJPEG thuan Rust qua `image` van chay).
+h264 = ["dep:openh264", "dep:openh264-sys2"]
+webcam = ["dep:nokhwa"]
+
+[dependencies]
+egui = "0.35.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+nokhwa = { version = "0.10.11", optional = true, features = ["input-native"] }
+nyx-proto = { path = "../nyx-proto" }
+openh264 = { version = "0.9.3", optional = true }
+# v40.25: SetOption(BITRATE) doi rate KHONG dung lai encoder (openh264 khong boc)
+openh264-sys2 = { version = "0.9.6", optional = true }

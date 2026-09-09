@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "link/nyx-proto",
+    "link/nyx-link",
+    "link/nyx-common",
+    "link/nyx-board",
+    "apps/video/nyx-tx",
+    "apps/video/nyx-rx",
+    "apps/video/nyx-mobile",
+]
+
+[workspace.dependencies]
+num-complex = "0.4"
+crc32fast = "1"
+
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"

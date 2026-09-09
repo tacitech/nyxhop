@@ -1,0 +1,20 @@
+[package]
+name = "nyx-tx"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["webcam"]
+webcam = ["nyx-common/webcam"]
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu", # v40.21: OpenGL (glow) crash trong igxelpgicd64.dll Intel — 5 lan/6 ngay (3/9)
+] }
+egui = "0.35.0"
+num-complex = { workspace = true }
+nyx-link = { path = "../../../link/nyx-link" }
+nyx-proto = { path = "../../../link/nyx-proto" }
+nyx-common = { path = "../../../link/nyx-common" }

@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NyxHop Ground Station</title>
+<style>
+  :root {
+    --bg:#0a0e14; --panel:#101722; --panel2:#0d131d; --line:#1c2634;
+    --txt:#dbe4f0; --dim:#6d7d95; --good:#35d99a; --warn:#ffb454;
+    --bad:#ff5d5d; --cyan:#4aa8ff; --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--txt);
+         font:14px/1.45 'Segoe UI',system-ui,sans-serif; height:100vh;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel2); }
+  .logo { font:700 17px var(--mono); letter-spacing:2px; }
+  .logo b { color:var(--cyan); }
+  .sub { color:var(--dim); font-size:11px; letter-spacing:3px; margin-top:1px; }
+  .spacer { flex:1; }
+  .pill { font:600 12px var(--mono); padding:4px 12px; border-radius:20px;
+          border:1px solid var(--line); background:var(--panel); color:var(--dim); }
+  .pill.live { color:var(--good); border-color:#1d4635; }
+  .pill.dead { color:var(--bad); border-color:#54222b; }
+  .pill .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+               background:currentColor; margin-right:7px;
+               animation:blink 1.6s infinite; }
+  @keyframes blink { 50% { opacity:.25; } }
+  main { flex:1; display:flex; gap:12px; padding:12px 14px; min-height:0; }
+  .vwrap { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .vpane { flex:1; background:#000; border:1px solid var(--line);
+           border-radius:10px; position:relative; overflow:hidden;
+           display:flex; align-items:center; justify-content:center; }
+  .vpane img { max-width:100%; max-height:100%; object-fit:contain; }
+  .overlay { position:absolute; left:12px; bottom:10px; font:12px var(--mono);
+             color:#cfe3ff; background:rgba(8,12,20,.55); padding:4px 10px;
+             border-radius:6px; backdrop-filter:blur(3px); }
+  .side { width:330px; display:flex; flex-direction:column; gap:10px;
+          overflow-y:auto; }
+  .card { background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:10px 13px; }
+  .card h3 { font:600 10px var(--mono); color:var(--dim); letter-spacing:2px;
+             margin-bottom:6px; }
+  .big { font:700 26px var(--mono); }
+  .unit { font:400 13px var(--mono); color:var(--dim); }
+  .row { display:flex; align-items:baseline; justify-content:space-between; }
+  .kv { display:flex; justify-content:space-between; font:12.5px var(--mono);
+        padding:2px 0; color:var(--dim); }
+  .kv b { color:var(--txt); font-weight:600; }
+  canvas.spark { width:100%; height:38px; display:block; margin-top:4px; }
+  .ctrl { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .ctrl-full { grid-column:1/-1; }
+  select,button,input[type=range] {
+    width:100%; background:var(--panel2); color:var(--txt);
+    border:1px solid var(--line); border-radius:7px; padding:6px 8px;
+    font:13px var(--mono); cursor:pointer; }
+  button:hover, select:hover { border-color:var(--cyan); }
+  button.on { color:var(--good); border-color:#1d4635; }
+  label.small { font:10px var(--mono); color:var(--dim); letter-spacing:1px;
+                display:block; margin-bottom:3px; }
+  .events { max-height:180px; overflow-y:auto; }
+  .ev { font:11.5px var(--mono); padding:3px 0; border-bottom:1px solid #141c29;
+        display:flex; gap:8px; }
+  .ev .t { color:var(--dim); flex-shrink:0; }
+  .ev.good { color:var(--good); } .ev.warn { color:var(--warn); }
+  .ev.bad { color:var(--bad); } .ev.info { color:var(--cyan); }
+  body.kiosk .ctrlcard, body.kiosk #jam { display:none; }
+  body.kiosk .side { width:360px; }
+  body.kiosk .big { font-size:34px; }
+  #jam { border-color:#54222b; color:var(--warn); }
+  #toast { position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+           background:var(--panel); border:1px solid var(--line);
+           padding:7px 16px; border-radius:8px; font:12px var(--mono);
+           color:var(--dim); opacity:0; transition:opacity .25s; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="logo">NYX<b>HOP</b></div>
+    <div class="sub">GROUND STATION</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="chan">CH —</span>
+  <span class="pill" id="mcs">MCS —</span>
+  <span class="pill dead" id="link"><span class="dot"></span>NO LINK</span>
+</header>
+<main>
+  <div class="vwrap">
+    <div class="vpane">
+      <img id="video" src="/video" alt="">
+      <div class="overlay" id="vinfo">— fps · — kbps</div>
+    </div>
+  </div>
+  <div class="side">
+    <div class="card">
+      <div class="row"><h3>SNR</h3><span class="unit" id="snrpk"></span></div>
+      <div class="row"><span class="big" id="snr">—</span><span class="unit">dB</span></div>
+      <canvas class="spark" id="snrspark"></canvas>
+    </div>
+    <div class="card">
+      <h3>BLER</h3>
+      <div class="row"><span class="big" id="bler">—</span><span class="unit">%</span></div>
+      <canvas class="spark" id="blerspark"></canvas>
+    </div>
+    <div class="card">
+      <h3>LINK</h3>
+      <div class="kv"><span>video fps</span><b id="fps">—</b></div>
+      <div class="kv"><span>goodput</span><b id="gp">—</b></div>
+      <div class="kv"><span>frames rx / lost</span><b id="fr">—</b></div>
+      <div class="kv"><span>segs ok / lost</span><b id="segs">—</b></div>
+      <div class="kv"><span>sig fail</span><b id="sf">—</b></div>
+    </div>
+    <div class="card">
+      <h3>EVENTS</h3>
+      <div class="events" id="events"></div>
+    </div>
+    <div class="card ctrlcard">
+      <h3>CONTROLS</h3>
+      <div class="ctrl">
+        <div>
+          <label class="small">SOURCE</label>
+          <select id="src" onchange="cmd('tx','set source '+this.value)">
+            <option value="pattern">Pattern</option>
+            <option value="webcam">Webcam</option>
+          </select>
+        </div>
+        <div>
+          <label class="small">RATE</label>
+          <select id="rate" onchange="setRate(this.value)">
+            <option value="auto">Auto MCS</option>
+            <option value="5">Pin MCS5</option>
+            <option value="3">Pin MCS3</option>
+            <option value="1">Pin MCS1</option>
+          </select>
+        </div>
+        <div>
+          <label class="small">REPEAT ×</label>
+          <select id="rep" onchange="cmd('tx','set rep '+this.value)">
+            <option>1</option><option>2</option><option>3</option>
+          </select>
+        </div>
+        <div>
+          <label class="small">VIDEO CH</label>
+          <button id="dfs" onclick="toggleDfs()">DFS: —</button>
+        </div>
+        <div>
+          <label class="small">AGC (board B)</label>
+          <select id="agc" onchange="setAgc(this.value)">
+            <option value="soft">softagc</option>
+            <option value="fabric">fabric (HW)</option>
+          </select>
+        </div>
+        <div>
+          <label class="small">TX GAIN A <span id="txgv">0</span> dB</label>
+          <input type="range" id="txg" min="-40" max="0" value="0" step="1"
+                 onchange="cmd('a','txgain '+this.value)"
+                 oninput="document.getElementById('txgv').textContent=this.value">
+        </div>
+        <div class="ctrl-full">
+          <button id="pause" onclick="togglePause()">⏸ PAUSE</button>
+        </div>
+        <div class="ctrl-full">
+          <button id="jam" onclick="simJam()"
+                  title="Kill TX 5s — watch auto-recovery">⚡ SIMULATE JAM (5s)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let paused=false, dfsOn=false;
+// ---- kiosk mode: ?kiosk -> man hinh demo sach (an controls) ----
+if (new URLSearchParams(location.search).has('kiosk'))
+  document.body.classList.add('kiosk');
+
+// ---- event ticker ----
+const evs=[];
+function event(cls, txt){
+  const now=new Date(), ts=now.toTimeString().slice(0,8);
+  evs.unshift({cls,txt,ts});
+  if(evs.length>30) evs.pop();
+  $('events').innerHTML = evs.map(e=>
+    '<div class="ev '+e.cls+'"><span class="t">'+e.ts+'</span><span>'+e.txt+'</span></div>').join('');
+}
+// ---- jam simulation (operator only) ----
+let jamming=false;
+async function simJam(){
+  if(jamming) return; jamming=true;
+  $('jam').textContent='⚡ JAMMING…';
+  event('bad','⚡ Interference injected (TX muted 5s)');
+  await cmd('a','txgain -89');
+  setTimeout(async ()=>{
+    await cmd('a','txgain 0');
+    event('info','Interference cleared');
+    $('jam').textContent='⚡ SIMULATE JAM (5s)'; jamming=false;
+  }, 5000);
+}
+
+function toast(t){ const e=$('toast'); e.textContent=t; e.style.opacity=1;
+  clearTimeout(e._t); e._t=setTimeout(()=>e.style.opacity=0,1800); }
+
+async function cmd(t,c){
+  try{
+    const r=await fetch('/cmd/'+t+'/'+encodeURIComponent(c));
+    const x=await r.text();
+    toast(t+': '+c+' → '+(x.includes('ok')?'ok':x.slice(0,40)));
+    return x;
+  }catch(e){ toast('error: '+e); return ''; }
+}
+function setRate(v){ v==='auto' ? cmd('tx','set auto 1')
+  : cmd('tx','set auto 0').then(()=>cmd('tx','set mcs '+v)); }
+function setAgc(v){
+  if(v==='fabric') cmd('b','fabricagc 1');
+  else cmd('b','fabricagc 0').then(()=>cmd('b','softagc 1'));
+}
+function togglePause(){ paused=!paused; cmd('tx','set pause '+(paused?1:0));
+  $('pause').textContent = paused?'▶ RESUME':'⏸ PAUSE';
+  $('pause').classList.toggle('on',paused); }
+function toggleDfs(){ dfsOn=!dfsOn;
+  cmd('b', dfsOn?'hop auto58 rx':'hop off');
+  $('dfs').classList.toggle('on',dfsOn); }
+
+function spark(cv, data, color, max){
+  const c=cv.getContext('2d'), W=cv.width=cv.clientWidth*2,
+        H=cv.height=cv.clientHeight*2;
+  c.clearRect(0,0,W,H);
+  if(!data.length) return;
+  const m = max ?? Math.max(...data,1e-6);
+  c.beginPath();
+  data.forEach((v,i)=>{ const x=i/(data.length-1||1)*W,
+    y=H-2-(Math.min(v,m)/m)*(H-6);
+    i?c.lineTo(x,y):c.moveTo(x,y); });
+  c.strokeStyle=color; c.lineWidth=2.5; c.stroke();
+  c.lineTo(W,H); c.lineTo(0,H); c.closePath();
+  c.fillStyle=color+'18'; c.fill();
+}
+
+async function poll(){
+  try{
+    const s=await (await fetch('/stats')).json();
+    $('snr').textContent=s.snr.toFixed(1);
+    $('snr').style.color = s.snr>=20?'var(--good)':(s.snr>=12?'var(--warn)':'var(--bad)');
+    $('bler').textContent=(s.bler*100).toFixed(1);
+    $('bler').style.color = s.bler<.05?'var(--good)':(s.bler<.2?'var(--warn)':'var(--bad)');
+    $('fps').textContent=s.rx_fps.toFixed(1);
+    $('gp').textContent=s.goodput.toFixed(0)+' kbps';
+    $('fr').textContent=s.frames_rx+' / '+s.frames_lost;
+    $('segs').textContent=s.segs_ok+' / '+s.segs_lost;
+    $('sf').textContent=s.sig_fail;
+    $('vinfo').textContent=s.rx_fps.toFixed(1)+' fps · '+s.goodput.toFixed(0)+' kbps';
+    $('mcs').textContent='MCS '+(s.mcs>=0?s.mcs:'—');
+    const live=s.connected && s.rx_fps>1;
+    $('link').className='pill '+(live?'live':'dead');
+    $('link').innerHTML='<span class="dot"></span>'+(live?'LIVE':'NO LINK');
+    spark($('snrspark'), s.snr_hist, '#35d99a', 35);
+    spark($('blerspark'), s.bler_hist, '#ff5d5d', 1);
+    trackEvents(s);
+  }catch(e){ $('link').className='pill dead';
+    $('link').innerHTML='<span class="dot"></span>NO RX'; }
+}
+// ---- phat hien su kien tu stats/hop (client-side) ----
+let ev_mcs=null, ev_live=null, ev_lost_at=0, ev_snrlow=false, ev_chan=null;
+function trackEvents(s){
+  if(ev_mcs!==null && s.mcs>=0 && s.mcs!==ev_mcs){
+    if(s.mcs<ev_mcs) event('warn','Link adapting: MCS '+ev_mcs+' → '+s.mcs+' (robust mode)');
+    else event('good','Link improved: MCS '+ev_mcs+' → '+s.mcs);
+  }
+  if(s.mcs>=0) ev_mcs=s.mcs;
+  const live = s.rx_fps>=5;
+  if(ev_live!==null && !live && ev_live){
+    ev_lost_at=Date.now();
+    event('bad','⚠ LINK LOST — auto-recovering…');
+  }
+  if(ev_live!==null && live && !ev_live && ev_lost_at){
+    const secs=((Date.now()-ev_lost_at)/1000).toFixed(1);
+    event('good','✓ LINK RECOVERED ('+secs+'s outage)');
+  }
+  ev_live=live;
+  if(!ev_snrlow && s.snr>0 && s.snr<15 && live){
+    ev_snrlow=true; event('warn','Signal degraded (SNR '+s.snr.toFixed(0)+' dB)');
+  }
+  if(ev_snrlow && s.snr>=20){
+    ev_snrlow=false; event('good','Signal strong (SNR '+s.snr.toFixed(0)+' dB)');
+  }
+}
+async function pollChan(){
+  try{
+    const t=await (await fetch('/cmd/b/'+encodeURIComponent('hop'))).text();
+    const hz=/hop_cur_hz=(\d+)/.exec(t), md=/hop_mode=(\w+)/.exec(t);
+    if(hz && +hz[1]>0){
+      const mhz=(+hz[1]/1e6).toFixed(0);
+      if(ev_chan!==null && mhz!==ev_chan)
+        event('info','📡 Channel switch → '+mhz+' MHz');
+      ev_chan=mhz;
+      $('chan').textContent='CH '+mhz;
+    }
+    else $('chan').textContent='CH 5745';
+    if(md){ dfsOn = md[1].startsWith('auto');
+      $('dfs').textContent='DFS: '+(dfsOn?md[1]:'off');
+      $('dfs').classList.toggle('on',dfsOn); }
+  }catch(e){}
+}
+setInterval(poll,500); poll();
+setInterval(pollChan,3000); pollChan();
+</script>
+</body>
+</html>

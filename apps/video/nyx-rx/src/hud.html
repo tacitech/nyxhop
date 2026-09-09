@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NyxHop HUD</title>
+<style>
+  :root { --good:#35d99a; --warn:#ffb454; --bad:#ff5d5d; --cyan:#5db4ff;
+          --mono:ui-monospace,'Cascadia Mono',Consolas,monospace; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#000; height:100vh; overflow:hidden;
+         font-family:var(--mono); color:#e9f1fb; cursor:none; }
+  #video { position:absolute; inset:0; width:100%; height:100%;
+           object-fit:contain; }
+  .osd { position:absolute; text-shadow:0 1px 8px rgba(0,0,0,.95);
+         letter-spacing:.5px; z-index:2; }
+  /* khung góc kiểu camera */
+  .c { position:absolute; width:36px; height:36px; z-index:1;
+       border:0 solid rgba(150,195,255,.35); }
+  .c.tl { top:18px; left:18px; border-top-width:2px; border-left-width:2px; }
+  .c.tr { top:18px; right:18px; border-top-width:2px; border-right-width:2px; }
+  .c.bl { bottom:18px; left:18px; border-bottom-width:2px; border-left-width:2px; }
+  .c.br { bottom:18px; right:18px; border-bottom-width:2px; border-right-width:2px; }
+  /* thanh mờ nền cho cụm chữ */
+  .plate { background:rgba(6,10,16,.45); backdrop-filter:blur(3px);
+           border-radius:8px; padding:8px 14px; }
+  #brand { top:30px; left:34px; font-weight:700; font-size:15px; }
+  #brand b { color:var(--cyan); }
+  #brand .live { margin-left:14px; font-size:13px; color:var(--good); }
+  #brand .live.dead { color:var(--bad); }
+  #brand .dot { display:inline-block; width:9px; height:9px;
+                border-radius:50%; background:currentColor; margin-right:6px;
+                animation:blink 1.5s infinite; }
+  @keyframes blink { 50% { opacity:.2; } }
+  #right { top:30px; right:34px; text-align:right; font-weight:600;
+           font-size:14px; }
+  #right .mcs { color:var(--cyan); margin-left:16px; }
+  #sig { bottom:30px; left:34px; font-size:14px; font-weight:600; }
+  #sig .lbl { color:#9fb2cc; font-size:11px; font-weight:400;
+              letter-spacing:2px; }
+  #sig .val { font-size:22px; font-weight:700; }
+  .bar { width:150px; height:5px; background:rgba(255,255,255,.16);
+         border-radius:3px; margin:6px 0 10px; }
+  .bar i { display:block; height:100%; border-radius:3px;
+           background:var(--good); width:0%; transition:width .4s,background .4s; }
+  #rate { bottom:30px; right:34px; text-align:right; font-size:14px;
+          font-weight:600; }
+  #rate .val { font-size:22px; font-weight:700; }
+  #rate .lbl { color:#9fb2cc; font-size:11px; letter-spacing:2px;
+               font-weight:400; }
+  /* banner cảnh báo giữa-trên */
+  #alert { top:9%; left:50%; transform:translateX(-50%); display:none;
+           font-size:19px; font-weight:700; padding:10px 26px;
+           border-radius:9px; background:rgba(8,12,20,.7);
+           backdrop-filter:blur(4px); white-space:nowrap; }
+  #alert.bad  { color:var(--bad);  border:1px solid #7a2230;
+                animation:blink 1s infinite; }
+  #alert.good { color:var(--good); border:1px solid #1d4635; }
+  #alert.info { color:var(--cyan); border:1px solid #1f3a5e; }
+  #alert.warn { color:var(--warn); border:1px solid #6b4a1a; }
+</style>
+</head>
+<body>
+<img id="video" src="/video" alt="">
+<div class="c tl"></div><div class="c tr"></div>
+<div class="c bl"></div><div class="c br"></div>
+
+<div class="osd plate" id="brand">
+  NYX<b>HOP</b>
+  <span class="live dead" id="live"><span class="dot"></span>NO LINK</span>
+</div>
+<div class="osd plate" id="right">
+  <span id="ch">CH ----</span><span class="mcs" id="mcs">MCS -</span>
+</div>
+<div class="osd plate" id="sig">
+  <div class="lbl">SIGNAL</div>
+  <div><span class="val" id="snr">--.-</span> dB</div>
+  <div class="bar"><i id="snrbar"></i></div>
+  <div style="font-size:12px"><span style="color:#9fb2cc">BLER</span>
+    <span id="bler">-.-</span>%</div>
+</div>
+<div class="osd plate" id="rate">
+  <div class="lbl">VIDEO</div>
+  <div><span class="val" id="fps">--</span> FPS</div>
+  <div style="font-size:13px; margin-top:4px"><span id="mbps">-.--</span> Mbps</div>
+</div>
+<div class="osd" id="alert"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+let alertTimer=null;
+function showAlert(cls, txt, sticky){
+  const a=$('alert');
+  a.className='osd'; a.classList.add(cls);
+  a.textContent=txt; a.style.display='block';
+  clearTimeout(alertTimer);
+  if(!sticky) alertTimer=setTimeout(()=>a.style.display='none', 4000);
+}
+function hideAlert(){ clearTimeout(alertTimer); $('alert').style.display='none'; }
+
+let ev_mcs=null, ev_live=null, ev_lost_at=0, ev_chan=null;
+async function poll(){
+  try{
+    const s=await (await fetch('/stats')).json();
+    const live = s.connected && s.rx_fps>=5;
+    $('snr').textContent=s.snr.toFixed(1);
+    const g = s.snr>=20?'var(--good)':(s.snr>=12?'var(--warn)':'var(--bad)');
+    $('snr').style.color=g;
+    $('snrbar').style.width=Math.min(100, s.snr/35*100)+'%';
+    $('snrbar').style.background=g;
+    $('bler').textContent=(s.bler*100).toFixed(1);
+    $('fps').textContent=s.rx_fps.toFixed(0);
+    $('fps').style.color = live?'var(--good)':'var(--bad)';
+    $('mbps').textContent=(s.goodput/1000).toFixed(2);
+    $('mcs').textContent='MCS '+(s.mcs>=0?s.mcs:'-');
+    $('live').className='live '+(live?'':'dead');
+    $('live').innerHTML='<span class="dot"></span>'+(live?'LIVE':'NO LINK');
+
+    // ---- sự kiện: kể chuyện tự-xử-lý trên banner ----
+    if(ev_mcs!==null && s.mcs>=0 && s.mcs!==ev_mcs){
+      if(s.mcs<ev_mcs) showAlert('warn','LINK ADAPTING · MCS '+ev_mcs+' → '+s.mcs);
+      else showAlert('good','LINK IMPROVED · MCS '+ev_mcs+' → '+s.mcs);
+    }
+    if(s.mcs>=0) ev_mcs=s.mcs;
+    if(ev_live!==null && !live && ev_live){
+      ev_lost_at=Date.now();
+      showAlert('bad','⚠ SIGNAL LOST — AUTO-RECOVERING', true);
+    }
+    if(ev_live!==null && live && !ev_live && ev_lost_at){
+      const secs=((Date.now()-ev_lost_at)/1000).toFixed(1);
+      showAlert('good','✓ LINK RECOVERED · '+secs+'s');
+    }
+    ev_live=live;
+  }catch(e){
+    $('live').className='live dead';
+    $('live').innerHTML='<span class="dot"></span>NO RX';
+  }
+}
+async function pollChan(){
+  try{
+    const t=await (await fetch('/cmd/b/'+encodeURIComponent('hop'))).text();
+    const hz=/hop_cur_hz=(\d+)/.exec(t);
+    let mhz = (hz && +hz[1]>0) ? (+hz[1]/1e6).toFixed(0) : '5745';
+    if(ev_chan!==null && mhz!==ev_chan)
+      showAlert('info','📡 CHANNEL SWITCH → '+mhz+' MHz');
+    ev_chan=mhz;
+    $('ch').textContent='CH '+mhz;
+  }catch(e){}
+}
+setInterval(poll,500); poll();
+setInterval(pollChan,3000); pollChan();
+</script>
+</body>
+</html>

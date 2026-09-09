@@ -1,0 +1,43 @@
+[package]
+name = "nyx-mobile"
+version = "0.1.0"
+edition = "2024"
+
+# cdylib = thư viện Android nạp qua NativeActivity; rlib + bin để chạy thử
+# trên PC (cùng code, khỏi phải cắm máy mới biết logic đúng chưa).
+[lib]
+name = "nyx_mobile"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "nyx-mobile-desktop"
+path = "src/main.rs"
+
+[dependencies]
+egui = "0.35.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+# h264 BẬT: đã kiểm openh264 (C++ qua cc) CROSS-COMPILE ĐƯỢC bằng NDK cho
+# aarch64-linux-android — khỏi cần MediaCodec/JNI. MJPEG (image, thuần Rust)
+# vẫn dùng được song song.
+nyx-common = { path = "../../../link/nyx-common", default-features = false, features = ["h264"] }
+nyx-link = { path = "../../../link/nyx-link" }
+nyx-proto = { path = "../../../link/nyx-proto" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "android-native-activity",
+] }
+winit = { version = "0.30", features = ["android-native-activity"] }
+android_logger = "0.14"
+# Bind the process to the WIRED network (see prefer_wired): the only way to stop
+# Android sending app sockets out WiFi when both are up.
+jni = "0.21"
+log = "0.4"
