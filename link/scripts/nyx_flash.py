@@ -44,6 +44,17 @@ def md5(b):
     return hashlib.md5(b).hexdigest()
 
 
+def drop_old_role_mode(b, home, role):
+    """The channel mode a board remembers (nyx-hopmode.txt) names the role it was chosen
+    under. Flashing the board into the other role must not replay it: an E200 moved from
+    receiver to transmitter came up as a second receiver that way (10/9). Tables, pairing
+    and licence stay; only the mode goes, and the new cfg sets it again."""
+    old = b.sh(f"cat {home}/nyx-role 2>/dev/null").strip().upper()
+    if old and old != role:
+        b.sh(f"rm -f {home}/nyx-hopmode.txt")
+        print(f"  role {old} -> {role}: the remembered channel mode is dropped (it named the old role)")
+
+
 # ------------------------------------------------------------------- finding ----
 def console(host, cmd, timeout=2.0):
     """One line to a board's console, and its reply. Empty when nothing answers."""
@@ -252,6 +263,7 @@ def flash_adrv(a, host, role):
     if os.path.exists(os.path.join(d, "u-dma-buf.ko")):
         b.put_file(os.path.join(d, "u-dma-buf.ko"), "/home/root/u-dma-buf.ko")
     b.put_file(os.path.join(d, f"nyx-radio-{role}.cfg"), "/home/root/nyx-radio.cfg")
+    drop_old_role_mode(b, "/home/root", role)
     b.put_text(role + "\n", "/home/root/nyx-role")
     b.put_file(os.path.join(d, "nyxhop.service"), "/etc/systemd/system/nyxhop.service")
     b.put_text("options uio_pdrv_genirq of_id=generic-uio\n", "/etc/modprobe.d/nyxhop-uio.conf")
@@ -334,6 +346,7 @@ def flash_e200(a, host, role):
     for f in files:
         b.put_file(os.path.join(nyxhop, f), "/mnt/sd/nyxhop/" + f)
     b.put_file(os.path.join(d, f"nyx-radio-{role}-e200.cfg"), "/mnt/sd/nyxhop/nyx-radio.cfg")
+    drop_old_role_mode(b, "/mnt/sd/nyxhop", role)
     b.put_text(role + "\n", "/mnt/sd/nyxhop/nyx-role")
     b.sh("rm -f /mnt/sd/nyxhop/ip")  # left by an earlier version of this tool
     print(f"  /nyxhop/: {len(files)} files + nyx-radio.cfg + nyx-role (role {role})")
