@@ -131,7 +131,10 @@ pub struct TxConfig {
 impl Default for TxConfig {
     fn default() -> Self {
         TxConfig {
-            source: SourceKind::Pattern,
+            // v40.44z: the camera when the build has one (the public build has no nyx-tx.cfg to say
+            // so, and a customer following the README got the test pattern); the worker falls back
+            // to the pattern when no camera opens.
+            source: if cfg!(feature = "webcam") { SourceKind::Webcam } else { SourceKind::Pattern },
             codec: Codec::H264,
             width: 480,
             height: 360,

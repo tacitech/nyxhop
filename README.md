@@ -112,7 +112,8 @@ address):
 nyx-rx --channel 192.168.0.12:7011
 ```
 
-Transmitting side, the PC or small Linux board that has the camera:
+Transmitting side, the PC or small Linux board that has the camera (the app starts on the USB
+camera; with none plugged in it sends a test pattern, and *Source* in its settings switches):
 
 ```bash
 nyx-tx --channel 192.168.0.10:7010

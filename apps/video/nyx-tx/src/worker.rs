@@ -285,6 +285,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut status = StatusLogger::new(1.0);
     // Breadcrumbs for the very first frame — pinpoints startup hangs.
     let mut first_frame = true;
+    // v40.44z: how long the camera has given nothing; past 3 s with an open error the
+    // source drops to the pattern so a box without a camera still sends a picture.
+    let mut webcam_wait = 0u32;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -673,8 +676,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             SourceKind::Webcam => {
                 let raw = shared.webcam.frame.lock().unwrap().clone();
                 match raw {
-                    Some(raw) => Some(resize_rgb(&raw, aw, ah)),
+                    Some(raw) => {
+                        webcam_wait = 0;
+                        Some(resize_rgb(&raw, aw, ah))
+                    }
                     None => {
+                        webcam_wait += 1;
+                        if webcam_wait >= 30 && shared.webcam.status().starts_with("open error") {
+                            log("webcam: no camera opens - sending the test pattern instead (Source in the settings switches back)");
+                            shared.config.lock().unwrap().source = SourceKind::Pattern;
+                            webcam_wait = 0;
+                        }
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
                     }
