@@ -2,7 +2,8 @@
 
 **A frequency-hopping OFDM radio link for drones and robots, on off-the-shelf SDR boards.**
 
-![licence MIT](https://img.shields.io/badge/licence-MIT-blue)
+![apps and protocol MIT](https://img.shields.io/badge/apps%20and%20protocol-MIT-blue)
+![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
