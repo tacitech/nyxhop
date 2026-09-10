@@ -24,7 +24,10 @@ If you know the OcuSync-style digital links on commercial drones, this is the sa
 hopping OFDM, a separate control channel, adaptive modulation, retransmission of what got
 lost. Built from boards anyone can buy, with the apps and the protocol in the open.
 
-The software is MIT licensed. Use it, change it, ship it in your product.
+The apps and the protocol in this repository are MIT: use them, change them, ship them in
+your product. The board images in `deploy/` are binaries under a separate licence, and the
+boards need a licence file to run - the [Licensing](#licensing) table at the bottom says
+exactly which is which.
 
 ## How it fits together
 
