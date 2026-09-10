@@ -14,7 +14,7 @@ blocks of bytes; what you put in them is your business: video, telemetry, files,
 protocol, all at once if you like. Anywhere between 70 MHz and 6 GHz that your hardware and
 your local rules allow.
 
-On the bench it carries an H.264 camera stream at **30 fps**, **61 ms** from camera to screen.
+On the bench it carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
 ![The ground app: video on the left, the channel tables on the right](docs/img/ground-app.png)
 

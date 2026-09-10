@@ -170,7 +170,9 @@ impl Default for TxConfig {
             pl_syms: 16,
             rep_count: 1, // default off (reactive ARQ only)
             fec: true,
-            simulcast: true,
+            // v40.44z: off by default (user, 10/9): the base layer costs ~30 ms of glass-to-glass
+            // latency (61 vs 28 ms measured); turn it on for reach through fades.
+            simulcast: false,
             base_mcs: 0, // default MCS0; `set basemcs 6` for the +3 dB lifebuoy
         }
     }
@@ -580,10 +582,10 @@ ok");
             Some("get") => {
                 let c = shared.config.lock().unwrap().clone();
                 format!(
-                    "source={:?}\ncodec={:?}\nres={}x{}\nfps={}\nquality={}\nmcs={}\nauto={}\narq={}\nir={}\nrep={}\nbasemcs={}\npause={}\nchanmem={}\nok",
+                    "source={:?}\ncodec={:?}\nres={}x{}\nfps={}\nquality={}\nmcs={}\nauto={}\narq={}\nir={}\nrep={}\nsimulcast={}\nbasemcs={}\npause={}\nchanmem={}\nok",
                     c.source, c.codec, c.width, c.height, c.fps, c.jpeg_quality,
                     c.mcs.index(), c.auto_mcs, c.arq, c.harq_ir, c.rep_count,
-                    c.base_mcs, c.paused, c.chan_mem
+                    c.simulcast, c.base_mcs, c.paused, c.chan_mem
                 )
             }
             Some("stats") => {
@@ -739,6 +741,17 @@ impl TxApp {
                     log(if cfg.paused { "paused" } else { "resumed" });
                 }
             });
+            // v40.44z: the base layer itself, so the trade can be made from the cockpit: with it
+            // the picture survives a fade (soak 72 % vs 59 % of the time with a picture), without
+            // it the glass-to-glass latency drops 61 -> 28 ms (10/9, the base blocks queue ahead
+            // of the main ones). Console `set simulcast 0|1` sets the same flag.
+            if ui
+                .checkbox(&mut cfg.simulcast, "Simulcast base layer")
+                .on_hover_text("Send a small MCS0 stream beside the main one; the receiver shows it when the main layer is late. Keeps a picture through fades, costs ~30 ms of latency.")
+                .changed()
+            {
+                log(if cfg.simulcast { "simulcast on" } else { "simulcast off" });
+            }
             // v40: the long-reach lifebuoy: pin the simulcast base layer to the QPSK x2 repeat step
             ui.add_enabled_ui(cfg.simulcast, |ui| {
                 let mut far = cfg.base_mcs == 6;

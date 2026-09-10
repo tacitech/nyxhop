@@ -3,7 +3,8 @@
 ## 1.0 (first public release, planned)
 
 * Video link: H.264, adaptive bitrate and modulation, retransmission of lost frames, two-layer
-  simulcast for the low end.
+  simulcast for the low end (off by default: it adds ~30 ms of latency; switch it on in the
+  aircraft app for reach through fades).
 * Channels: user-defined tables over 70 MHz–6 GHz, Auto policy (hold the best channel, re-scan
   when it degrades or the link drops), fixed-channel mode, tables sent to the aircraft over the air.
 * Control link on its own channel pool, frequency hopping in 125 ms slots, paired links with a

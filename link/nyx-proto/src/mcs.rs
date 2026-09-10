@@ -123,7 +123,9 @@ pub fn conv_frames(cm: usize, block_len: usize) -> usize {
 /// `Msg::TxBlock` flags.
 /// Conv path: the board fragments the block and conv-encodes every frame.
 pub const TXB_CONV: u8 = 1;
-/// LDPC path with the board's own encoder (otherwise the daemon encodes).
+/// The board hardware encoder codes the frames (otherwise the daemon codes them on the
+/// ARM): the LDPC path, and with `TXB_CONV` MCS 0-5 when the bitstream supports it (mod
+/// version >= 7; older ones fall back to the ARM). The fabric conv path writes seq 0 in SIG.
 pub const TXB_FABRIC: u8 = 2;
 /// The payload holds two blocks sent as a pair.
 pub const TXB_PAIR: u8 = 4;
