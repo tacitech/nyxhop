@@ -136,11 +136,13 @@ impl Default for TxConfig {
             // to the pattern when no camera opens.
             source: if cfg!(feature = "webcam") { SourceKind::Webcam } else { SourceKind::Pattern },
             codec: Codec::H264,
-            width: 480,
-            height: 360,
+            // v40.44z: the bench setting; at 480x360 the same camera and link gave 20 fps and a
+            // display that dipped to 10, at 640x480 a steady 30 (10/9, public build, no cfg).
+            width: 640,
+            height: 480,
             // The hardware loopback sustains ~29 fps end-to-end (measured);
             // 24 keeps headroom for ARQ retransmissions.
-            fps: 24.0,
+            fps: 30.0, // v40.44z: what the README promises; the camera mode picked is >= 24 fps
             jpeg_quality: 60,
             mcs: Mcs::Qpsk12,
             auto_mcs: true,
