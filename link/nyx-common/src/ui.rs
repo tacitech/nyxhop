@@ -369,7 +369,9 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
             if v == "auto" {
                 board.send("hop auto rx 1000".to_string());
             } else {
-                board.send("hop manual rx".to_string());
+                // `hop manual` takes an optional MHz, not a role: with "rx" the daemon answered
+                // "err usage" and Off never took (10/9, the Android app)
+                board.send("hop manual".to_string());
             }
         }
         ui.add_space(4.0);
