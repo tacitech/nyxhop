@@ -64,6 +64,8 @@ struct Prep {
 
 struct App {
     mode: Mode,
+    /// the end this window is showing, once it hosts a screen
+    hosted: Option<Role>,
     board: String,
     set_role: bool,
     /// the board's own answer to `role`, refreshed while the start screen is up
@@ -127,6 +129,7 @@ impl App {
         }
         let app = App {
             mode: Mode::Choose,
+            hosted: None,
             board,
             set_role,
             board_role: Arc::new(Mutex::new(None)),
@@ -255,6 +258,12 @@ impl App {
     fn take_over(&mut self, role: Role) {
         let channel = format!("{}:{}", self.board.trim(), role.port());
         log(&format!("{}: channel {channel}", role.label()));
+        self.hosted = Some(role);
+        // the role poll resumes: the hosted screen has a "Board role" switch, and this
+        // window follows the board when it comes back as the other end. The slot still
+        // names the end the board was before the switch: overwrite it first.
+        *self.board_role.lock().unwrap() = Some(role.board_role().to_string());
+        self.busy.store(false, Ordering::Relaxed);
         self.mode = match role {
             Role::Ground => {
                 let shared = nyx_rx::setup(&Opts::from_list(["--channel", channel.as_str()]));
@@ -330,6 +339,31 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if let Some(mine) = self.hosted {
+            // The board changed ends (the switch in the drawer, the other computer, a
+            // console): this window follows by starting over as the other end. A fresh
+            // process, so every thread and port of the old screen is gone for certain.
+            let other = match self.board_role.lock().unwrap().as_deref() {
+                Some("tx") if mine == Role::Ground => Some(Role::Aircraft),
+                Some("rx") if mine == Role::Aircraft => Some(Role::Ground),
+                _ => None,
+            };
+            if let Some(other) = other {
+                log(&format!("board {} is now the {} end: starting over as {}", self.board.trim(), other.board_role(), other.label()));
+                self.save_choice(other);
+                if let Ok(exe) = std::env::current_exe() {
+                    let r = std::process::Command::new(exe)
+                        .args(["--mode", other.board_role(), "--board", self.board.trim()])
+                        .spawn();
+                    if let Err(e) = r {
+                        log(&format!("could not start over: {e}"));
+                    }
+                }
+                self.hosted = None;
+                root.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
         match &mut self.mode {
             Mode::Rx(app, _) => app.ui(root, frame),
             Mode::Tx(app, _) => app.ui(root, frame),

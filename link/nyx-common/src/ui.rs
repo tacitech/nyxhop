@@ -361,6 +361,30 @@ pub fn link_section(ui: &mut egui::Ui, st: &BoardState, role: Role, board: &Boar
 /// Channel policy (ground end only): Off = one channel you pick, Auto = the receiver picks.
 /// The tables (video channels, control pool) are the operator's: any MHz between 70 and 6000,
 /// edited here; the aircraft receives them over the air.
+/// Which end the board is (`role` on its console), with the switch. Changing it makes the
+/// board rewrite its cfg and restart its daemon (about ten seconds); channel tables, pairing
+/// and licence stay. Returns the role just asked for, so a host that can follow (nyxhop)
+/// does; a plain ground or aircraft app just shows the board's answer.
+pub fn role_section(ui: &mut egui::Ui, st: &BoardState, board: &BoardCtl) -> Option<String> {
+    let mut chosen = None;
+    th::section(ui, "Board role", true, |ui| {
+        let cur = st.kv.get("role").cloned().unwrap_or_default();
+        th::row(ui, "This board is", |ui| {
+            if let Some(v) = segmented(ui, &[("Aircraft (tx)", "tx"), ("Ground (rx)", "rx")], &cur) {
+                board.send(format!("role {v}"));
+                chosen = Some(v);
+            }
+        });
+        let note = if cur.is_empty() {
+            "the board has not said yet (an older daemon does not know `role`)"
+        } else {
+            "changing it restarts the board's radio daemon, about ten seconds; tables, pairing and licence stay"
+        };
+        ui.label(egui::RichText::new(note).small().color(th::DIM));
+    });
+    chosen
+}
+
 pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, board: &BoardCtl) {
     th::section(ui, "Channel", true, |ui| {
         let mode = st.kv.get("hop_mode").cloned().unwrap_or_default();

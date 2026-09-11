@@ -118,6 +118,11 @@ aircraft screen. It remembers the choice; `nyxhop --mode rx --board 192.168.0.12
 `--mode tx --board 192.168.0.10` skips the question. So a pair of boards can change ends from
 the apps alone: choose the other end on each computer, and both boards follow.
 
+The settings drawer of every screen (the gear, or `H`) has a **Board role** switch too:
+**Aircraft (tx)** / **Ground (rx)**. It sends the same command; the board restarts in its new
+role, and a `nyxhop` window follows by opening the other screen on its own. Change both boards
+and the link comes back the other way round, tables, pairing and licence untouched.
+
 The two screens are also programs of their own, for scripts and headless boxes:
 
 ```bash

@@ -2548,7 +2548,7 @@ impl RxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.11");
                 format!("{host}:7202")
             }),
-            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license"],
+            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role"],
         );
         RxApp {
             shared,
@@ -2620,6 +2620,7 @@ impl RxApp {
         let connected = self.shared.connected.load(Ordering::Relaxed);
 
         nu::link_section(ui, &st, nu::Role::Ground, &self.board);
+        nu::role_section(ui, &st, &self.board);
         nu::channel_section(ui, &st, &mut self.chan_form, &self.board);
         {
             let far = self.shared.far_lic.lock().unwrap().clone();

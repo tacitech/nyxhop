@@ -688,7 +688,7 @@ impl TxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.10");
                 format!("{host}:7202")
             }),
-            &["get", "stats", "hop status", "license"],
+            &["get", "stats", "hop status", "license", "role"],
         );
         TxApp {
             shared,
@@ -809,6 +809,7 @@ impl TxApp {
         });
 
         nu::link_section(ui, &st, nu::Role::Aircraft, &self.board);
+        nu::role_section(ui, &st, &self.board);
         nu::licence_section(ui, &st, None, &mut self.lic_buf, &mut self.lic_status, &self.board);
         nu::radio_section(ui, &st, nu::Role::Aircraft, &mut self.form, &self.board, &mut |hz| {
             crate::set_samp_hz(hz);

@@ -529,7 +529,7 @@ impl App {
                 let host = addr.split(':').next().unwrap_or("192.168.0.10");
                 format!("{host}:7202")
             }),
-            &["get", "trig", "softagc", "hop status", "license"],
+            &["get", "trig", "softagc", "hop status", "license", "role"],
         );
         let addr_buf = sh.addr.lock().unwrap().clone();
         App {
@@ -554,6 +554,7 @@ impl App {
         let st = self.board.snapshot();
         let connected = self.sh.connected.load(Ordering::Relaxed);
         nu::link_section(ui, &st, nu::Role::Ground, &self.board);
+        nu::role_section(ui, &st, &self.board);
         nu::channel_section(ui, &st, &mut self.chan_form, &self.board);
         {
             let far = self.sh.far_lic.lock().unwrap().clone();
