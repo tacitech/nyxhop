@@ -2,7 +2,7 @@
 
 **A frequency-hopping OFDM radio link for drones and robots, on off-the-shelf SDR boards.**
 
-![apps and protocol MIT](https://img.shields.io/badge/apps%20and%20protocol-MIT-blue)
+![source available](https://img.shields.io/badge/source-source--available-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
@@ -23,12 +23,14 @@ table down at 2.4 GHz.*
 
 If you know the OcuSync-style digital links on commercial drones, this is the same idea:
 hopping OFDM, a separate control channel, adaptive modulation, retransmission of what got
-lost. Built from boards anyone can buy, with the apps and the protocol in the open.
+lost. Built from boards anyone can buy, with the source of the apps and the protocol here to
+read and build on.
 
-The apps and the protocol in this repository are MIT: use them, change them, ship them in
-your product. The board images in `deploy/` are binaries under a separate licence, and the
-boards need a licence file to run - the [Licensing](#licensing) table at the bottom says
-exactly which is which.
+This is not open source. The source code in this repository is under the
+[NyxHop Source Licence](LICENSE): read it, build it, change it, build your own applications
+on it and sell them, as long as they run over a NyxHop link. The board images in `deploy/` are
+binaries under a separate [EULA](docs/EULA.md), and the boards need a licence file to run -
+the [Licensing](#licensing) table at the bottom says exactly which is which.
 
 ## How it fits together
 
@@ -284,8 +286,8 @@ docs/         licence terms, SDK notes, legal
 
 | what | licence |
 |---|---|
-| Source code in this repository: `link/`, `apps/`, `docs/` | [MIT](LICENSE) |
-| Binaries in `deploy/`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md), not MIT |
+| Source code in this repository: `link/`, `apps/`, `docs/` | [NyxHop Source Licence](LICENSE): source-available, not open source |
+| Binaries in `deploy/`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md) |
 | Third-party components inside the board images (U-Boot, BusyBox and others) | their own licences, see [THIRD-PARTY.md](docs/THIRD-PARTY.md) |
 
 Radio use is subject to the laws of your country: you are responsible for the frequencies and the

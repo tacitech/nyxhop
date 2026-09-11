@@ -4,8 +4,8 @@ Prebuilt, per board type. The flashing tool `../link/scripts/nyx_flash.py` write
 onto a board over SSH and verifies it: it does not build anything. These are the product
 binaries (FPGA design, radio daemon, boot files); their source is not in this repository.
 
-**Licensing.** Everything in this folder is covered by the EULA (`../docs/EULA.md`), NOT by the
-MIT licence that covers the source code in this repository. The board images also contain
+**Licensing.** Everything in this folder is covered by the EULA (`../docs/EULA.md`), not by the
+NyxHop Source Licence that covers the source code in this repository. The board images also contain
 third-party components (U-Boot, BusyBox and others) under their own licences, listed with their
 source locations in `../docs/THIRD-PARTY.md`.
 

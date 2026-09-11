@@ -46,7 +46,8 @@ bitrate, channel. Poll it from a script to log a flight.
 
 ## Crates for your own software
 
-All Rust, MIT licensed, in `link/`:
+All Rust, in `link/`, under the NyxHop Source Licence (build your own applications on them,
+for use over a NyxHop link):
 
 * `nyx-proto` — the message protocol between the apps and the boards: video blocks, feedback,
   channel tables, licence messages, the UDP pipe. Enough to write your own ground station.
