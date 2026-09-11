@@ -285,6 +285,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut status = StatusLogger::new(1.0);
     // Breadcrumbs for the very first frame — pinpoints startup hangs.
     let mut first_frame = true;
+    let mut said_acquiring = false;
     // v40.44z: how long the camera has given nothing; past 3 s with an open error the
     // source drops to the pattern so a box without a camera still sends a picture.
     let mut webcam_wait = 0u32;
@@ -675,7 +676,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         crate::conv_tx::CUR_MCS.store(mcs.index() as u64, Ordering::Relaxed);
 
         // ------------------------------------------------------- source
-        if first_frame {
+        if first_frame && !said_acquiring {
+            // once: with no camera yet the loop comes back here every 100 ms
+            said_acquiring = true;
             log("worker: first iteration — acquiring source");
         }
         let video_frame: Option<RgbFrame> = match cfg.source {

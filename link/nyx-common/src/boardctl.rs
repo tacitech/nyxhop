@@ -82,7 +82,12 @@ fn worker(
     let mut conn: Option<(TcpStream, String)> = None;
     let mut last_poll = Instant::now() - Duration::from_secs(10);
     loop {
-        let user_cmd = cmd_rx.recv_timeout(Duration::from_millis(250)).ok();
+        // The BoardCtl was dropped (its screen closed): the sender is gone, so leave.
+        let user_cmd = match cmd_rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(c) => Some(c),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
         let mut batch: Vec<String> = Vec::new();
         if let Some(c) = user_cmd {
             batch.push(c);

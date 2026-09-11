@@ -16,7 +16,8 @@ impl SourceKind {
     pub fn label(self) -> &'static str {
         match self {
             SourceKind::Pattern => "Test pattern",
-            SourceKind::Webcam => "Webcam",
+            // the same slot: on the phone its own camera feeds it (nyx-mobile), on the PC nokhwa
+            SourceKind::Webcam => if cfg!(target_os = "android") { "Phone camera" } else { "Webcam" },
             SourceKind::Rtsp => "IP camera (RTSP)",
             SourceKind::RandomData => "Random data",
         }
@@ -160,6 +161,9 @@ pub struct WebcamShared {
     pub stop: std::sync::atomic::AtomicBool,
     pub frame: std::sync::Mutex<Option<RgbFrame>>,
     pub status: std::sync::Mutex<String>,
+    /// The capture size the host would like, `(w << 32) | h`; 0 = the source's own choice.
+    /// The phone camera opens the smallest mode that covers it.
+    pub want_wh: std::sync::atomic::AtomicU64,
 }
 
 impl WebcamShared {
@@ -169,11 +173,96 @@ impl WebcamShared {
             stop: std::sync::atomic::AtomicBool::new(false),
             frame: std::sync::Mutex::new(None),
             status: std::sync::Mutex::new(String::from("idle")),
+            want_wh: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
     pub fn status(&self) -> String {
         self.status.lock().unwrap().clone()
+    }
+
+    pub fn set_want(&self, w: usize, h: usize) {
+        self.want_wh.store(((w as u64) << 32) | (h as u64 & 0xffff_ffff), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn want(&self) -> Option<(usize, usize)> {
+        let v = self.want_wh.load(std::sync::atomic::Ordering::Relaxed);
+        (v != 0).then(|| ((v >> 32) as usize, (v & 0xffff_ffff) as usize))
+    }
+}
+
+// ------------------------------------------------------------------- yuv --
+
+/// The three planes of a YUV 4:2:0 picture as a camera hands them over (Android's
+/// YUV_420_888: each plane with its own row stride, chroma possibly interleaved with a
+/// pixel stride of 2).
+pub struct Yuv420<'a> {
+    pub y: &'a [u8],
+    pub y_stride: usize,
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub uv_stride: usize,
+    pub uv_pixel_stride: usize,
+}
+
+/// YUV 4:2:0 (BT.601, limited range) -> RGB8, optionally turned by 180 degrees (a phone
+/// held the other way round: the sensor does not turn with the screen).
+pub fn yuv420_to_rgb(p: &Yuv420, w: usize, h: usize, rotate180: bool) -> RgbFrame {
+    let mut rgb = vec![0u8; w * h * 3];
+    let clip = |v: i32| v.clamp(0, 255) as u8;
+    for y in 0..h {
+        let yrow = &p.y[y * p.y_stride..y * p.y_stride + w];
+        let uvrow = (y / 2) * p.uv_stride;
+        // the output row: the same row, or the mirrored one when turning
+        let orow = if rotate180 { h - 1 - y } else { y };
+        for x in 0..w {
+            let c = i32::from(yrow[x]) - 16;
+            let ci = uvrow + (x / 2) * p.uv_pixel_stride;
+            let d = i32::from(p.u[ci]) - 128;
+            let e = i32::from(p.v[ci]) - 128;
+            let r = clip((298 * c + 409 * e + 128) >> 8);
+            let g = clip((298 * c - 100 * d - 208 * e + 128) >> 8);
+            let b = clip((298 * c + 516 * d + 128) >> 8);
+            let ox = if rotate180 { w - 1 - x } else { x };
+            let o = (orow * w + ox) * 3;
+            rgb[o] = r;
+            rgb[o + 1] = g;
+            rgb[o + 2] = b;
+        }
+    }
+    RgbFrame { width: w, height: h, rgb }
+}
+
+#[cfg(test)]
+mod yuv_tests {
+    use super::*;
+
+    #[test]
+    fn grey_and_red_pixels_come_out_right() {
+        // 4x2: left half mid grey (Y 128, U/V 128), right half red (Y 81, U 90, V 240)
+        let y = [128u8, 128, 81, 81, 128, 128, 81, 81];
+        let u = [128u8, 90];
+        let v = [128u8, 240];
+        let p = Yuv420 { y: &y, y_stride: 4, u: &u, v: &v, uv_stride: 2, uv_pixel_stride: 1 };
+        let f = yuv420_to_rgb(&p, 4, 2, false);
+        assert_eq!(&f.rgb[0..3], &[130, 130, 130]);
+        let red = &f.rgb[6..9];
+        assert!(red[0] > 230 && red[1] < 30 && red[2] < 30, "{red:?}");
+        // turned by 180 degrees the red half comes first
+        let t = yuv420_to_rgb(&p, 4, 2, true);
+        assert!(t.rgb[0] > 230 && t.rgb[1] < 30, "{:?}", &t.rgb[0..3]);
+        assert_eq!(&t.rgb[6..9], &[130, 130, 130]);
+    }
+
+    #[test]
+    fn interleaved_chroma_with_pixel_stride_two() {
+        // NV12-like: U and V interleaved, pixel stride 2, the V slice starts one byte later
+        let y = [128u8, 128, 128, 128];
+        let uv = [128u8, 128, 90, 240]; // (u,v) for the left pair, (u,v) for the right pair
+        let p = Yuv420 { y: &y, y_stride: 4, u: &uv[0..], v: &uv[1..], uv_stride: 4, uv_pixel_stride: 2 };
+        let f = yuv420_to_rgb(&p, 4, 1, false);
+        assert_eq!(&f.rgb[0..3], &[130, 130, 130]);
+        assert!(f.rgb[6] > f.rgb[0], "right pair should lean red: {:?}", &f.rgb[6..9]);
     }
 }
 

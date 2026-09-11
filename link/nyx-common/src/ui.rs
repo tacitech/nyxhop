@@ -14,7 +14,7 @@ use egui::{Color32, Stroke};
 
 /// Which end of the link this app sits on: it decides the labels and which
 /// link / channel buttons make sense.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     /// Video receiver (ground station / RC): owns the channel schedule, links.
     Ground,

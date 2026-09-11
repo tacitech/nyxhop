@@ -15,6 +15,11 @@ use crate::logging::log;
 pub type Handler = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 pub fn spawn(addr: String, handler: Handler) {
+    // `--ctl 0`: no console at all (the phone hosts the screen in-process and may build it
+    // more than once; a listener that stays bound would refuse the second time).
+    if addr == "0" || addr.is_empty() {
+        return;
+    }
     std::thread::Builder::new()
         .name("ctl".into())
         .spawn(move || {

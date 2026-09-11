@@ -135,13 +135,19 @@ The aircraft screen starts on the USB camera; with none plugged in it sends a te
 *Source* in its settings also takes an **IP camera**: choose *IP camera (RTSP)* and type the
 camera's URL, `rtsp://user:password@192.168.1.64:554/stream1` for instance (the address and
 path are in the camera's manual; a 640x480 sub-stream is the right size). The camera's picture
-is decoded and sent on like the webcam's, so the link's rate control applies to it. The Android
-app is the ground end only: on first start tap the screen and enter the receiving board's
-address.
+is decoded and sent on like the webcam's, so the link's rate control applies to it.
+
+**The Android app** is the same thing on a phone: it starts on the same choice, Ground station
+or Aircraft, with the board's address, puts the board into the role and shows that end's
+screen. As the ground end it shows the video; as the aircraft end it sends the phone's own
+camera (the app asks for the camera permission once) or an IP camera (*Source* in the
+settings, then the URL). The phone talks to the board over USB-C Ethernet or Wi-Fi. It
+remembers the choice in `Android/data/com.nyxhop.mobile/files/nyxhop.cfg`, a plain text file
+`adb` can edit (`board 192.168.0.12`, `mode tx`, `source phone|rtsp`, `rtsp <url>`).
 
 The Android app is its own build: `python apps/video/build_apk.py` writes a signed APK to
 `apps/video/android/out/`, and needs the Android SDK and NDK, `cargo-ndk` and the
-`aarch64-linux-android` Rust target. You do not need it: the ground app on a PC does the same job.
+`aarch64-linux-android` Rust target. You do not need it: the apps on a PC do the same job.
 
 Then, once in the life of a pair of boards, **pair them**: press **Link aircraft** in the ground
 app. A board that has never been paired accepts on its own, both pills turn *linked*, and the
@@ -238,7 +244,7 @@ Applications sit on top of it and each lives in its own folder:
 
 | folder | what it does |
 |---|---|
-| `apps/video/` | the apps: H.264 from a USB camera one way, a ground app, a transmitting app and an Android app. They also carry the two-way UDP pipe (MAVLink or any datagrams) |
+| `apps/video/` | the apps: H.264 from a USB, IP or phone camera one way, a ground app, a transmitting app and an Android app for either end. They also carry the two-way UDP pipe (MAVLink or any datagrams) |
 | `apps/nyxhop/` | the one app for either end: asks Ground or Aircraft, sets the board's role, then hosts the screen |
 | `apps/data/` | `mav_sim.py`, which measures that pipe |
 

@@ -22,6 +22,11 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 nyx-common = { path = "../../../link/nyx-common", default-features = false, features = ["h264"] }
 nyx-link = { path = "../../../link/nyx-link" }
 nyx-proto = { path = "../../../link/nyx-proto" }
+# The aircraft screen: the PC transmitter as a library. No webcam (nokhwa is Windows
+# only; the phone camera feeds the same slot from cam.rs), no PC modulator; the IP camera
+# (RTSP, pure Rust) comes along.
+nyx-tx = { path = "../nyx-tx", default-features = false, features = ["rtsp"] }
+log = "0.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.35.0", default-features = false, features = [
@@ -37,7 +42,8 @@ eframe = { version = "0.35.0", default-features = false, features = [
 ] }
 winit = { version = "0.30", features = ["android-native-activity"] }
 android_logger = "0.14"
-# Bind the process to the WIRED network (see prefer_wired): the only way to stop
-# Android sending app sockets out WiFi when both are up.
+# Bind the process to the WIRED network (see prefer_wired), ask for the camera
+# permission, read the display rotation: all through JNI on the NativeActivity.
 jni = "0.21"
-log = "0.4"
+# camera2 + AImageReader through the NDK (the phone's own camera as the video source)
+ndk-sys = { version = "0.6", features = ["media"] }

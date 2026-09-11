@@ -705,6 +705,11 @@ impl TxApp {
         }
     }
 
+    /// The settings drawer open or closed (the phone starts with the picture).
+    pub fn set_drawer_open(&mut self, open: bool) {
+        self.drawer_open = open;
+    }
+
     /// Everything behind the gear.
     fn drawer(&mut self, ui: &mut egui::Ui) {
         use nyx_common::theme as th;

@@ -13,6 +13,12 @@ struct Logger {
 }
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
+/// An extra sink for every line (the Android app hands lines to logcat: it has no stdout).
+static HOOK: OnceLock<fn(&str)> = OnceLock::new();
+
+pub fn set_hook(f: fn(&str)) {
+    let _ = HOOK.set(f);
+}
 
 /// Call once at startup. Creates `logs/<app>.log` next to the CWD.
 pub fn init(app: &'static str) {
@@ -39,10 +45,16 @@ fn timestamp() -> String {
 pub fn log(msg: &str) {
     let Some(l) = LOGGER.get() else {
         println!("{msg}");
+        if let Some(h) = HOOK.get() {
+            h(msg);
+        }
         return;
     };
     let line = format!("[{}] [{}] {}", timestamp(), l.app, msg);
     println!("{line}");
+    if let Some(h) = HOOK.get() {
+        h(msg);
+    }
     if let Some(f) = &l.file
         && let Ok(mut f) = f.lock()
     {

@@ -1,12 +1,18 @@
-//! nyx-mobile: NyxHop RX/TX on ANDROID, replacing the PC. The phone connects to a board (Wi-Fi or
-//! USB-C -> Ethernet), receives the video itself and shows the HUD.
+//! nyx-mobile: NyxHop on ANDROID, either end. The phone connects to a board (Wi-Fi or
+//! USB-C -> Ethernet) and is the ground station (receives the video itself and shows the
+//! HUD) or the aircraft end (its own camera or an IP camera, encoded here, sent to the
+//! transmitting board).
 //!
-//! Stage 1 (this version): the RX role: TCP to the receiving board's daemon (:7011), receive
-//! DecFrames (already decoded in the fabric), reassemble blocks, decode video, show a DJI-style
-//! HUD; send Feedback back so OLLA/AGC on the TX side keep adapting. Video: H264 (openh264,
-//! VERIFIED to cross-compile with the NDK, no MediaCodec/JNI) AND MJPEG (image crate, pure Rust):
-//! both are accepted, whichever codec the TX sets. A camera (for the TX role) is later work: nokhwa
-//! is Windows-only, Android needs CameraX/ndk-camera through JNI.
+//! The start screen (shared with `nyxhop` on the PC: `nyx_common::start`) asks which end
+//! this phone is, puts the board into the matching role and hands over to:
+//!   * the ground screen (`RxApp`, this crate): TCP to the receiving board's daemon
+//!     (:7011), DecFrames (already decoded in the fabric) -> reassemble -> decode video
+//!     (H.264 through openh264, VERIFIED to cross-compile with the NDK; MJPEG through the
+//!     image crate) -> HUD; Feedback goes back so OLLA/AGC on the far end keep adapting.
+//!   * the aircraft screen (`nyx_tx::TxApp`, the PC transmitter hosted as a library):
+//!     source = the phone's camera (camera2 through the NDK, `cam.rs`) or an IP camera
+//!     (RTSP, the PC code), H.264 encode, blocks to the board's :7010.
+//! Both screens follow the board when it is switched to the other end.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
@@ -16,127 +22,148 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nyx_common::codec::VideoDecoder;
-use nyx_common::{RgbFrame, decode_jpeg, theme as th, to_color_image};
+use nyx_common::logging::log;
+use nyx_common::source::SourceKind;
+use nyx_common::start::{Chooser, Event, Role};
+use nyx_common::{RgbFrame, decode_jpeg, theme as th, to_color_image, Opts};
 use nyx_link::{Reassembler, SourceType, parse_block};
 use nyx_proto::{Msg, read_msg, write_msg};
 
-pub const DEFAULT_BOARD: &str = "192.168.0.10:7011";
-
-/// Android hands every app socket to the DEFAULT network, which is WiFi whenever
-/// WiFi has internet and the wired link does not. The board hangs off USB-C
-/// Ethernet, so on a phone with both up the app tried to reach 192.168.0.10 over
-/// WiFi and failed, even though eth0 pinged the board in 0.8 ms. Routing cannot
-/// fix it from our side: the per-uid rules key off the socket fwmark, not the
-/// source address, and SO_BINDTODEVICE needs CAP_NET_RAW. The supported way is
-/// ConnectivityManager.bindProcessToNetwork() on the Ethernet network, which is
-/// what prefer_wired() does over JNI. Called before every connect so plugging the
-/// cable in later also works.
 #[cfg(target_os = "android")]
-mod wired {
-    use std::sync::atomic::{AtomicPtr, Ordering};
+mod cam;
+#[cfg(target_os = "android")]
+mod jni_ctx;
 
-    static VM: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
-    static ACTIVITY: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+pub const DEFAULT_BOARD: &str = "192.168.0.12";
 
-    pub fn remember(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
-        VM.store(vm, Ordering::Relaxed);
-        ACTIVITY.store(activity, Ordering::Relaxed);
-    }
-
-    /// Bind this process to the Ethernet network. Ok(true) = bound.
-    pub fn bind() -> Result<bool, jni::errors::Error> {
-        use jni::objects::{JObject, JObjectArray, JValue};
-        let vmp = VM.load(Ordering::Relaxed);
-        let actp = ACTIVITY.load(Ordering::Relaxed);
-        if vmp.is_null() || actp.is_null() {
-            return Ok(false);
-        }
-        let vm = unsafe { jni::JavaVM::from_raw(vmp.cast()) }?;
-        let mut env = vm.attach_current_thread()?;
-        let activity = unsafe { JObject::from_raw(actp.cast()) };
-        let name = env.new_string("connectivity")?;
-        let cm = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        let nets = env
-            .call_method(&cm, "getAllNetworks", "()[Landroid/net/Network;", &[])?
-            .l()?;
-        let nets = JObjectArray::from(nets);
-        let n = env.get_array_length(&nets)?;
-        for i in 0..n {
-            let net = env.get_object_array_element(&nets, i)?;
-            let caps = env
-                .call_method(
-                    &cm,
-                    "getNetworkCapabilities",
-                    "(Landroid/net/Network;)Landroid/net/NetworkCapabilities;",
-                    &[JValue::Object(&net)],
-                )?
-                .l()?;
-            if caps.is_null() {
-                continue;
-            }
-            // NetworkCapabilities.TRANSPORT_ETHERNET = 3
-            if env.call_method(&caps, "hasTransport", "(I)Z", &[JValue::Int(3)])?.z()? {
-                return env
-                    .call_method(
-                        &cm,
-                        "bindProcessToNetwork",
-                        "(Landroid/net/Network;)Z",
-                        &[JValue::Object(&net)],
-                    )?
-                    .z();
-            }
-        }
-        Ok(false)
-    }
-}
-
-/// Prefer the wired link when one is present (Android only; no-op elsewhere).
-fn prefer_wired(sh: &Arc<Shared>) {
+/// Prefer the wired link when one is present (Android only; no-op elsewhere). Called
+/// before every connect so plugging the cable in later also works.
+fn prefer_wired(say: &dyn Fn(String)) {
     #[cfg(target_os = "android")]
     {
-        static SAID: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        match wired::bind() {
-            Ok(true) => {
-                if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    sh.say("network: bound to wired (Ethernet)");
+        static SAID: AtomicBool = AtomicBool::new(false);
+        match jni_ctx::bind_wired() {
+            Some(true) => {
+                if !SAID.swap(true, Ordering::Relaxed) {
+                    say("network: bound to wired (Ethernet)".into());
                 }
             }
-            Ok(false) => {}
-            Err(e) => sh.say(format!("network: wired bind failed: {e}")),
+            Some(false) | None => {}
         }
     }
     #[cfg(not(target_os = "android"))]
-    let _ = sh;
+    let _ = say;
 }
 
-/// Board address override, read at startup from a plain text file so the IP can
-/// be set without typing it on a phone screen:
-///   adb shell "echo 192.168.1.101:7011 > ///     /sdcard/Android/data/com.nyxhop.mobile/files/board.txt"
-/// That directory belongs to the app, so no storage permission is needed. Falls
-/// back to DEFAULT_BOARD when the file is missing or empty.
+// ------------------------------------------------------------- settings --
+
+/// What the phone remembers between starts: a plain `key value` file the app writes and
+/// `adb` can edit (the directory belongs to the app, no storage permission needed):
+///   adb shell "cat /sdcard/Android/data/com.nyxhop.mobile/files/nyxhop.cfg"
+/// `board.txt` in the same directory (the old way of setting the address) is still read
+/// when the cfg names no board.
+#[derive(Clone, PartialEq)]
+pub struct MobileCfg {
+    pub board: String,
+    pub mode: Option<Role>,
+    pub set_role: bool,
+    /// aircraft end: `phone` (the camera), `rtsp` (an IP camera), `pattern`
+    pub source: String,
+    pub rtsp: String,
+    /// the camera capture size (the encoder's own resolution is set in the drawer)
+    pub cap_w: usize,
+    pub cap_h: usize,
+}
+
+impl Default for MobileCfg {
+    fn default() -> Self {
+        MobileCfg {
+            board: String::new(),
+            mode: None,
+            set_role: true,
+            source: "phone".into(),
+            rtsp: String::new(),
+            cap_w: 640,
+            cap_h: 480,
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+const FILES_DIR: &str = "/sdcard/Android/data/com.nyxhop.mobile/files";
+#[cfg(not(target_os = "android"))]
+const FILES_DIR: &str = ".";
+
+fn cfg_path() -> std::path::PathBuf {
+    std::path::Path::new(FILES_DIR).join(if cfg!(target_os = "android") { "nyxhop.cfg" } else { "nyxhop-mobile.cfg" })
+}
+
+/// The board address the old way: `board.txt` with `ip[:port]`.
 pub fn board_addr() -> String {
-    #[cfg(target_os = "android")]
-    const PATHS: [&str; 1] = ["/sdcard/Android/data/com.nyxhop.mobile/files/board.txt"];
-    #[cfg(not(target_os = "android"))]
-    const PATHS: [&str; 1] = ["board.txt"];
-    for p in PATHS {
-        if let Ok(t) = std::fs::read_to_string(p) {
-            let t = t.trim();
-            if !t.is_empty() {
-                return t.to_string();
-            }
+    let p = std::path::Path::new(FILES_DIR).join("board.txt");
+    if let Ok(t) = std::fs::read_to_string(&p) {
+        let t = t.trim().split(':').next().unwrap_or("").trim().to_string();
+        if !t.is_empty() {
+            return t;
         }
     }
     DEFAULT_BOARD.to_string()
 }
+
+impl MobileCfg {
+    pub fn load() -> Self {
+        let mut c = MobileCfg::default();
+        if let Ok(text) = std::fs::read_to_string(cfg_path()) {
+            for line in text.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                let mut it = line.splitn(2, char::is_whitespace);
+                let (Some(k), Some(v)) = (it.next(), it.next().map(str::trim)) else { continue };
+                match k {
+                    "board" => c.board = v.to_string(),
+                    "mode" => c.mode = Role::from_word(v),
+                    "set_role" => c.set_role = v != "0",
+                    "source" => c.source = v.to_ascii_lowercase(),
+                    "rtsp" => c.rtsp = v.to_string(),
+                    "capture" => {
+                        if let Some((w, h)) = v.split_once(['x', 'X']) {
+                            if let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse()) {
+                                c.cap_w = w;
+                                c.cap_h = h;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if c.board.is_empty() {
+            c.board = board_addr();
+        }
+        c
+    }
+
+    pub fn save(&self) {
+        let text = format!(
+            "# NyxHop on this phone: the last choice (the app rewrites this file)\nboard {}\nmode {}\nset_role {}\nsource {}\nrtsp {}\ncapture {}x{}\n",
+            self.board.trim(),
+            self.mode.map_or("", |r| r.board_role()),
+            u8::from(self.set_role),
+            self.source,
+            self.rtsp,
+            self.cap_w,
+            self.cap_h
+        );
+        let p = cfg_path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Err(e) = std::fs::write(&p, text) {
+            log(&format!("{} not saved: {e}", p.display()));
+        }
+    }
+}
+
+// ------------------------------------------------------------ RX shared --
 
 #[derive(Default, Clone)]
 pub struct Metrics {
@@ -181,8 +208,7 @@ impl Shared {
     }
     pub fn say(&self, s: impl Into<String>) {
         let s = s.into();
-        #[cfg(not(target_os = "android"))]
-        eprintln!("[mobile] {s}");
+        log(&format!("[mobile] {s}"));
         let mut l = self.log.lock().unwrap();
         l.push_back(s);
         while l.len() > 6 {
@@ -203,7 +229,7 @@ pub fn spawn_net(sh: Arc<Shared>) {
                 }
                 let addr = sh.addr.lock().unwrap().clone();
                 sh.say(format!("connecting {addr}…"));
-                prefer_wired(&sh);
+                prefer_wired(&|s| sh.say(s));
                 let Ok(mut s) = TcpStream::connect(&addr) else {
                     sh.connected.store(false, Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(2));
@@ -214,6 +240,9 @@ pub fn spawn_net(sh: Arc<Shared>) {
                 sh.say(format!("connected {addr}"));
                 session(&sh, &mut s);
                 sh.connected.store(false, Ordering::Relaxed);
+                if sh.stop.load(Ordering::Relaxed) {
+                    return;
+                }
                 sh.say("disconnected — retry 2s");
                 std::thread::sleep(Duration::from_secs(2));
             }
@@ -499,9 +528,9 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
     }
 }
 
-// ------------------------------------------------------------------ UI --
+// ------------------------------------------------------------ RX screen --
 
-pub struct App {
+pub struct RxApp {
     sh: Arc<Shared>,
     tex: Option<egui::TextureHandle>,
     tex_ver: u64,
@@ -520,7 +549,7 @@ pub struct App {
     show_log: bool,
 }
 
-impl App {
+impl RxApp {
     pub fn new(sh: Arc<Shared>) -> Self {
         let a = sh.clone();
         let board = nyx_common::boardctl::BoardCtl::spawn(
@@ -532,7 +561,7 @@ impl App {
             &["get", "trig", "softagc", "hop status", "license", "role"],
         );
         let addr_buf = sh.addr.lock().unwrap().clone();
-        App {
+        RxApp {
             sh,
             tex: None,
             tex_ver: u64::MAX,
@@ -590,7 +619,7 @@ impl App {
     }
 }
 
-impl eframe::App for App {
+impl eframe::App for RxApp {
     fn ui(&mut self, root: &mut egui::Ui, _f: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         let ver = self.sh.frame_ver.load(Ordering::Relaxed);
@@ -621,7 +650,7 @@ impl eframe::App for App {
             mcs: m.mcs.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
             pills: vec![nu::link_pill(&st), nu::licence_pill(&st), nu::mode_pill(&st)],
             banner: None,
-            title: "NYXHOP".into(),
+            title: "NYXHOP · GROUND".into(),
             empty_text: "waiting for video…".into(),
             plates: self.hud_plates,
         };
@@ -635,6 +664,146 @@ impl eframe::App for App {
     }
 }
 
+// ----------------------------------------------------------------- host --
+
+enum Mode {
+    Choose,
+    Rx(RxApp, Arc<Shared>),
+    Tx(nyx_tx::TxApp, Arc<nyx_tx::Shared>),
+}
+
+/// The window: the start screen, then the chosen end's screen; follows the board.
+pub struct Host {
+    mode: Mode,
+    chooser: Chooser,
+    cfg: MobileCfg,
+    /// the aircraft screen's source/URL are written back to the cfg once a second
+    cfg_checked: Instant,
+}
+
+impl Host {
+    pub fn new(board_override: Option<String>) -> Self {
+        let mut cfg = MobileCfg::load();
+        if let Some(b) = board_override {
+            cfg.board = b;
+        }
+        let chooser = Chooser::new(cfg.board.clone(), cfg.set_role, "this phone");
+        // The wired network, for every socket of this process (the role poll, the video, the
+        // console): bound as soon as a cable is there, checked again every few seconds so
+        // plugging it in later works too. Binding is process-wide and sticks.
+        std::thread::Builder::new()
+            .name("wired".into())
+            .spawn(|| loop {
+                prefer_wired(&|m| log(&m));
+                std::thread::sleep(Duration::from_secs(3));
+            })
+            .expect("spawn wired");
+        Host { mode: Mode::Choose, chooser, cfg, cfg_checked: Instant::now() }
+    }
+
+    /// Stop whatever screen runs and go back to the start screen.
+    fn shutdown_mode(&mut self) {
+        match std::mem::replace(&mut self.mode, Mode::Choose) {
+            Mode::Rx(_, sh) => sh.stop.store(true, Ordering::Relaxed),
+            Mode::Tx(_, sh) => nyx_tx::shutdown(&sh),
+            Mode::Choose => {}
+        }
+        self.chooser.leave();
+    }
+
+    /// The board is in the role: build that end's screen in this window.
+    fn take_over(&mut self, role: Role) {
+        let board = self.chooser.board.trim().to_string();
+        let channel = format!("{board}:{}", role.port());
+        log(&format!("{}: channel {channel}", role.label()));
+        self.mode = match role {
+            Role::Ground => {
+                let sh = Shared::new(channel);
+                spawn_net(sh.clone());
+                Mode::Rx(RxApp::new(sh.clone()), sh)
+            }
+            Role::Aircraft => {
+                // no console/telemetry ports on the phone: the screen may be built more than
+                // once in this process, and a listener left bound would refuse the second time
+                let sh = nyx_tx::setup(&Opts::from_list(["--channel", channel.as_str(), "--ctl", "0", "--tlm-in", "0", "--tlm-out", "0"]));
+                {
+                    let mut c = sh.config.lock().unwrap();
+                    c.source = match self.cfg.source.as_str() {
+                        "rtsp" | "ipcam" => SourceKind::Rtsp,
+                        "pattern" => SourceKind::Pattern,
+                        _ => SourceKind::Webcam,
+                    };
+                    c.rtsp_url = self.cfg.rtsp.clone();
+                }
+                sh.webcam.set_want(self.cfg.cap_w, self.cfg.cap_h);
+                #[cfg(target_os = "android")]
+                cam::spawn(sh.webcam.clone());
+                let mut app = nyx_tx::TxApp::new(sh.clone());
+                app.set_drawer_open(false);
+                Mode::Tx(app, sh)
+            }
+        };
+        self.chooser.take_over(role);
+    }
+
+    /// The aircraft screen's Source/Camera URL, remembered when they change.
+    fn remember_tx_settings(&mut self) {
+        if self.cfg_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.cfg_checked = Instant::now();
+        if let Mode::Tx(_, sh) = &self.mode {
+            let c = sh.config.lock().unwrap();
+            let source = match c.source {
+                SourceKind::Rtsp => "rtsp",
+                SourceKind::Pattern => "pattern",
+                _ => "phone",
+            };
+            if self.cfg.source != source || self.cfg.rtsp != c.rtsp_url {
+                self.cfg.source = source.into();
+                self.cfg.rtsp = c.rtsp_url.clone();
+                drop(c);
+                self.cfg.save();
+            }
+        }
+    }
+}
+
+impl eframe::App for Host {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // The board changed ends (the Board role switch, the other computer, a console):
+        // this window follows by starting over as the other end.
+        if let Some(other) = self.chooser.follow() {
+            log(&format!("board {} is now the {} end: starting over as {}", self.chooser.board.trim(), other.board_role(), other.label()));
+            self.shutdown_mode();
+            self.cfg.mode = Some(other);
+            self.cfg.save();
+            self.chooser.start(other);
+        }
+        match &mut self.mode {
+            Mode::Rx(app, _) => app.ui(root, frame),
+            Mode::Tx(app, _) => app.ui(root, frame),
+            Mode::Choose => match self.chooser.ui(root) {
+                Some(Event::Chosen(role)) => {
+                    self.cfg.board = self.chooser.board.trim().to_string();
+                    self.cfg.set_role = self.chooser.set_role;
+                    self.cfg.mode = Some(role);
+                    self.cfg.save();
+                }
+                Some(Event::Ready(role)) => self.take_over(role),
+                None => {}
+            },
+        }
+        self.remember_tx_settings();
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.shutdown_mode();
+    }
+}
+
 /// Android entry point (NativeActivity calls this directly).
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -642,9 +811,9 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
-    wired::remember(app.vm_as_ptr().cast(), app.activity_as_ptr().cast());
-    let sh = Shared::new(board_addr());
-    spawn_net(sh.clone());
+    // every nyx_common log line to logcat as well (`adb logcat -s nyxhop`)
+    nyx_common::logging::set_hook(|s| log::info!(target: "nyxhop", "{s}"));
+    jni_ctx::remember(app.vm_as_ptr().cast(), app.activity_as_ptr().cast());
     let opts = eframe::NativeOptions {
         android_app: Some(app),
         ..Default::default()
@@ -654,7 +823,7 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
         opts,
         Box::new(move |cc| {
             nyx_common::ui::touch_style(&cc.egui_ctx);
-            Ok(Box::new(App::new(sh)))
+            Ok(Box::new(Host::new(None)))
         }),
     );
 }

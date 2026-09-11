@@ -13,6 +13,8 @@ pub mod logging;
 pub mod plots;
 pub mod rng;
 pub mod source;
+/// The start screen of the combined apps (which end, which board, put it into the role).
+pub mod start;
 pub mod theme;
 
 /// An RGB8 frame passed between threads and to the GUI.
