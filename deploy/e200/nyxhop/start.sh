@@ -9,7 +9,7 @@
 #   5. apply nyx-radio.cfg through the console on port 7202
 D=/tmp/nyxhop
 LOG=$D/radio.out
-DA="--fir $D/fir10MHz.ftr --mod-base 0x43C30000 --demod-base 0x43C40000 --trig-base 0x43C00000 --video-hz 5745000000 --gpreg-base 0x41200000 --dac-base 0x79024000 --vcxo-base 0x43C70000 --state-dir /tmp/nyxhop --sd-dev /dev/mmcblk0p1 --lic-mtd /dev/mtd3:0x1df0000"
+DA="--fir $D/fir10MHz.ftr --mod-base 0x43C30000 --demod-base 0x43C40000 --trig-base 0x43C00000 --video-hz 5745000000 --gpreg-base 0x41200000 --dac-base 0x79024000 --vcxo-base 0x43C70000 --state-dir /tmp/nyxhop --sd-dev /dev/mmcblk0p1 --lic-mtd /dev/mtd3:0x1df0000 --restart-cmd \"setsid sh -c 'sleep 1; $D/start.sh restart' >/dev/null 2>&1 &\""
 # The licence hour record lives in the last 64 KB sector of the QSPI Linux partition; it is
 # named explicitly so the daemon may erase what is there. This FPGA design has no hardware
 # AGC block, so no --agc-base is passed: the daemon uses its software AGC instead.

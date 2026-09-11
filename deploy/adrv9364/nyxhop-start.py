@@ -31,6 +31,10 @@ ROLES = {
 }
 BASE_ARGS = ("--fir {home}/fir10MHz.ftr --mod-base 0x43C30000 --demod-base 0x43C40000 "
              "--trig-base 0x43C00000 --agc-base 0x43C60000 --video-hz 5745000000")
+# `role tx|rx` from an app: the daemon rewrites nyx-radio.cfg and runs this to restart. A
+# transient systemd timer does it from outside our cgroup, so the request survives the
+# service being stopped. Passed as one argument (args.split() would cut it up).
+RESTART_CMD = "systemd-run --on-active=2 --timer-property=AccuracySec=100ms /bin/systemctl restart nyxhop"
 
 
 def log(s):
@@ -152,7 +156,8 @@ def main():
     subprocess.run(["killall", "nyx-radio-node"], capture_output=True)
     time.sleep(1)
     out = open(LOG, "ab")
-    proc = subprocess.Popen([DAEMON] + args.split(), cwd=HOME, stdout=out, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen([DAEMON] + args.split() + ["--restart-cmd", RESTART_CMD],
+                            cwd=HOME, stdout=out, stderr=subprocess.STDOUT)
 
     if os.path.exists(CFG):
         for line in open(CFG, encoding="utf-8", errors="replace"):
