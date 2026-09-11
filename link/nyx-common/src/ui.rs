@@ -122,7 +122,7 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
         &[(d.title.clone(), 17.0, th::CYAN), (live_txt.into(), 13.0, live_col)],
     );
     // pills across the top, right of the title, left of the gear
-    let mut x = rect.right() - pad - 52.0;
+    let mut x = rect.right() - pad - 60.0;
     for (text, col) in d.pills.iter().rev() {
         let g = p.layout_no_wrap(text.clone(), egui::FontId::monospace(12.5), *col);
         let w = g.size().x + 18.0;
@@ -162,12 +162,17 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
             &[(txt.clone(), 15.0, *col)],
         );
     }
-    // gear, top-right
-    let gear = egui::Rect::from_min_size(egui::pos2(rect.right() - pad - 44.0, rect.top() + pad), egui::vec2(44.0, 44.0));
-    let resp = ui.interact(gear, ui.id().with("gear"), egui::Sense::click());
-    p.rect_filled(gear, 22.0, Color32::from_black_alpha(if resp.hovered() { 180 } else { 120 }));
-    p.text(gear.center(), egui::Align2::CENTER_CENTER, "\u{2699}", egui::FontId::proportional(24.0), th::TXT);
-    resp.clicked()
+    // gear, top-right: drawn 48 pt, but a finger gets 72 pt around it (v40.44z: on a
+    // phone the 44 pt disc was hard to hit, sitting in the corner the system reserves)
+    let gear = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - pad - 24.0, rect.top() + pad + 24.0), egui::vec2(48.0, 48.0));
+    let hit = egui::Rect::from_center_size(gear.center(), egui::vec2(72.0, 72.0));
+    let resp = ui.interact(hit, ui.id().with("gear"), egui::Sense::click());
+    p.rect_filled(gear, 24.0, Color32::from_black_alpha(if resp.hovered() { 180 } else { 120 }));
+    // a finger that wobbles a few pixels is a drag to egui, not a click: take that too
+    let tapped = resp.clicked() || (resp.drag_stopped() && resp.hovered());
+    p.text(gear.center(), egui::Align2::CENTER_CENTER, "\u{2699}", egui::FontId::proportional(26.0), th::TXT);
+    tapped
 }
 
 // ---------------------------------------------------------------- drawer
