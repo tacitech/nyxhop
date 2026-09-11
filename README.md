@@ -104,21 +104,35 @@ with role and address, no password needed.
 
 ### 3. The apps
 
-`cargo build --release` at the repository root puts them in `target/release/`. Ground side, the
-PC that shows the video (or the Android app: on first start tap the screen and enter the same
-address):
+`cargo build --release` at the repository root puts them in `target/release/`. One app serves
+either end:
 
 ```bash
-nyx-rx --channel 192.168.0.12:7011
+nyxhop
 ```
 
-Transmitting side, the PC or small Linux board that has the camera (the app starts on the USB
-camera; with none plugged in it sends a test pattern, and *Source* in its settings switches):
+It asks which end this computer is (**Ground station**: this computer shows the video;
+**Aircraft**: this computer has the camera) and which board it is plugged into, puts the board
+into the matching role (the board restarts, about ten seconds), and opens the ground or the
+aircraft screen. It remembers the choice; `nyxhop --mode rx --board 192.168.0.12` or
+`--mode tx --board 192.168.0.10` skips the question. So a pair of boards can change ends from
+the apps alone: choose the other end on each computer, and both boards follow.
+
+The two screens are also programs of their own, for scripts and headless boxes:
 
 ```bash
-nyx-tx --channel 192.168.0.10:7010
+nyx-rx --channel 192.168.0.12:7011                # ground: the receiving board's address
+nyx-tx --channel 192.168.0.10:7010                # aircraft: the transmitting board's address
 nyx-tx --channel 192.168.0.10:7010 --headless     # no window, e.g. on an SBC next to the camera
 ```
+
+The aircraft screen starts on the USB camera; with none plugged in it sends a test pattern.
+*Source* in its settings also takes an **IP camera**: choose *IP camera (RTSP)* and type the
+camera's URL, `rtsp://user:password@192.168.1.64:554/stream1` for instance (the address and
+path are in the camera's manual; a 640x480 sub-stream is the right size). The camera's picture
+is decoded and sent on like the webcam's, so the link's rate control applies to it. The Android
+app is the ground end only: on first start tap the screen and enter the receiving board's
+address.
 
 The Android app is its own build: `python apps/video/build_apk.py` writes a signed APK to
 `apps/video/android/out/`, and needs the Android SDK and NDK, `cargo-ndk` and the
@@ -135,7 +149,8 @@ key on either end.
 
 Everything else is in the apps' settings drawer (tap the video or press `H`):
 
-* **Video** (transmitting app): camera or test pattern, resolution, fps, quality, codec.
+* **Video** (aircraft): USB camera, IP camera (RTSP, a URL) or test pattern, resolution, fps,
+  quality, codec, the simulcast base layer for reach through fades.
 * **Channel**: your tables. *Video MHz* and *Control MHz* take any channels from 70 to 6000 MHz,
   comma separated; **Apply** sends them to the board, which passes them to the other end over
   the air. *Auto* holds the best channel and re-scans when it degrades; *Off* pins one channel.
@@ -146,8 +161,9 @@ Everything else is in the apps' settings drawer (tap the video or press `H`):
 * **Readouts** in the drawer header (or the `O` key) turns the figures over the video off,
   leaving the picture and the status pills. `H` opens and closes the drawer.
 
-The headless transmitting app takes the same settings on its console (TCP 7204 by default):
-`set source webcam`, `set fps 20`, `set quality 60`, `stats`.
+The headless transmitting app takes the same settings on its console (TCP 7201 by default):
+`set source webcam`, `set source rtsp` with `set rtsp rtsp://...`, `set fps 20`,
+`set quality 60`, `stats`; a `nyx-tx.cfg` next to the program holds them across starts.
 
 **Telemetry and data**: the link also carries a two-way UDP pipe. Send datagrams into `nyx-rx`
 UDP 14555 and they come out of `nyx-tx` UDP 14556 (commands, RC); send into `nyx-tx` UDP 14557
@@ -218,6 +234,7 @@ Applications sit on top of it and each lives in its own folder:
 | folder | what it does |
 |---|---|
 | `apps/video/` | the apps: H.264 from a USB camera one way, a ground app, a transmitting app and an Android app. They also carry the two-way UDP pipe (MAVLink or any datagrams) |
+| `apps/nyxhop/` | the one app for either end: asks Ground or Aircraft, sets the board's role, then hosts the screen |
 | `apps/data/` | `mav_sim.py`, which measures that pipe |
 
 Write your own the same way: take `nyx-proto` and `nyx-link` from `link/`, hand the link your

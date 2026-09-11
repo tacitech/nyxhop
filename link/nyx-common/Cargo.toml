@@ -9,6 +9,9 @@ default = ["h264"]
 # (MJPEG thuan Rust qua `image` van chay).
 h264 = ["dep:openh264", "dep:openh264-sys2"]
 webcam = ["dep:nokhwa"]
+# IP camera over RTSP (retina: pure Rust, so it builds for Android too). Decodes with
+# openh264, hence h264.
+rtsp = ["h264", "dep:retina", "dep:tokio", "dep:futures", "dep:url"]
 
 [dependencies]
 egui = "0.35.0"
@@ -18,3 +21,7 @@ nyx-proto = { path = "../nyx-proto" }
 openh264 = { version = "0.9.3", optional = true }
 # v40.25: SetOption(BITRATE) doi rate KHONG dung lai encoder (openh264 khong boc)
 openh264-sys2 = { version = "0.9.6", optional = true }
+retina = { version = "0.4", optional = true }
+tokio = { version = "1", optional = true, features = ["rt", "time", "net", "macros"] }
+futures = { version = "0.3", optional = true }
+url = { version = "2", optional = true }

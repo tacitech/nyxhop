@@ -46,3 +46,36 @@ pub fn decode_jpeg(data: &[u8]) -> Option<RgbFrame> {
 pub fn to_color_image(f: &RgbFrame) -> egui::ColorImage {
     egui::ColorImage::from_rgb([f.width, f.height], &f.rgb)
 }
+
+/// Command-line style options an app runs with. The standalone binaries take them from the
+/// process (`from_env`); the combined app makes them up after the operator's choice
+/// (`from_list`), so the same `setup()` serves both.
+#[derive(Clone, Debug, Default)]
+pub struct Opts {
+    args: Vec<String>,
+}
+
+impl Opts {
+    pub fn from_env() -> Self {
+        Opts { args: std::env::args().skip(1).collect() }
+    }
+
+    pub fn from_list<S: Into<String>>(args: impl IntoIterator<Item = S>) -> Self {
+        Opts { args: args.into_iter().map(Into::into).collect() }
+    }
+
+    /// `--name value`, or the default.
+    pub fn arg(&self, name: &str, default: &str) -> String {
+        self.args
+            .iter()
+            .position(|a| a == name)
+            .and_then(|i| self.args.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// `--name` present at all.
+    pub fn flag(&self, name: &str) -> bool {
+        self.args.iter().any(|a| a == name)
+    }
+}

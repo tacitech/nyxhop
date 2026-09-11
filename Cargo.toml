@@ -8,6 +8,7 @@ members = [
     "apps/video/nyx-tx",
     "apps/video/nyx-rx",
     "apps/video/nyx-mobile",
+    "apps/nyxhop",
 ]
 
 [workspace.dependencies]

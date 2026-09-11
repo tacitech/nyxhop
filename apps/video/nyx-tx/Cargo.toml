@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["webcam"]
+default = ["webcam", "rtsp"]
 webcam = ["nyx-common/webcam"]
+rtsp = ["nyx-common/rtsp"]
 
 [dependencies]
 eframe = { version = "0.35.0", default-features = false, features = [

@@ -298,6 +298,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             .webcam
             .wanted
             .store(cfg.source == SourceKind::Webcam, Ordering::Relaxed);
+        shared.rtsp.wanted.store(cfg.source == SourceKind::Rtsp, Ordering::Relaxed);
+        if cfg.source == SourceKind::Rtsp {
+            let mut u = shared.rtsp.url.lock().unwrap();
+            if *u != cfg.rtsp_url {
+                *u = cfg.rtsp_url.clone();
+            }
+        }
 
         if cfg.paused || !shared.connected.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(60));
@@ -687,6 +694,21 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             shared.config.lock().unwrap().source = SourceKind::Pattern;
                             webcam_wait = 0;
                         }
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                }
+            }
+            SourceKind::Rtsp => {
+                // Paced by this loop's tick like the webcam, not by the camera: taking
+                // pictures as they arrived sent them in the bursts RTSP delivers them
+                // in, the receiver's hold timer read the gaps as loss and asked for
+                // IDRs, and the rate controller walked down to MCS0 (10/9). A tick
+                // faster than the camera re-encodes the same picture, which is cheap.
+                let raw = shared.rtsp.frame.lock().unwrap().clone();
+                match raw {
+                    Some(raw) => Some(resize_rgb(&raw, aw, ah)),
+                    None => {
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
                     }

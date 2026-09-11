@@ -291,22 +291,25 @@ impl VideoDecoder {
     /// Decode one access unit; None until a decodable picture (e.g. while
     /// waiting for an IDR after loss).
     pub fn decode(&mut self, data: &[u8]) -> Option<RgbFrame> {
+        self.decode_checked(data).ok().flatten()
+    }
+
+    /// `decode` that says why there was no picture: Ok(None) = the decoder wants more
+    /// data, Err = the bitstream was rejected (it then waits for the next IDR).
+    pub fn decode_checked(&mut self, data: &[u8]) -> Result<Option<RgbFrame>, String> {
         if self.dec.is_none() {
             self.dec = Decoder::new().ok();
         }
-        let dec = self.dec.as_mut()?;
+        let dec = self.dec.as_mut().ok_or_else(|| "no decoder".to_string())?;
         match dec.decode(data) {
             Ok(Some(yuv)) => {
                 let (w, h) = yuv.dimensions();
                 let mut rgb = vec![0u8; w * h * 3];
                 yuv.write_rgb8(&mut rgb);
-                Some(RgbFrame { width: w, height: h, rgb })
+                Ok(Some(RgbFrame { width: w, height: h, rgb }))
             }
-            Ok(None) => None,
-            Err(_) => {
-                // Bitstream corrupted mid-GOP; wait for the next IDR.
-                None
-            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
         }
     }
 }

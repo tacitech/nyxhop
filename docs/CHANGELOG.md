@@ -10,6 +10,8 @@
 * Control link on its own channel pool, frequency hopping in 125 ms slots, paired links with a
   key per pair, clock fallback when the aircraft loses the receiver.
 * Telemetry: two-way UDP pipe (MAVLink or any datagrams).
-* Apps: ground app (Windows), Android app, aircraft app (Windows / Linux, headless).
+* Apps: one app for either end (`nyxhop`: choose Ground or Aircraft, the board takes the matching
+  role), the ground and aircraft screens as programs of their own (Windows / Linux, headless),
+  an Android ground app. The aircraft end takes a USB camera or an IP camera (RTSP).
 * Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card).
 * Licence per board, checked offline; free tier.

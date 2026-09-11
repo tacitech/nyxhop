@@ -231,7 +231,7 @@ ADRV_HOME = [("nyx-radio-node", "0755"), ("fir10MHz.ftr", None),
 def flash_adrv(a, host, role):
     d = need(a.payload, "adrv9364",
              ["BOOT.BIN", "devicetree.dtb", "nyx-radio-node", "fir10MHz.ftr",
-              "nyxhop-start.py", "nyxctl.py", "nyxhop.service", f"nyx-radio-{role}.cfg"])
+              "nyxhop-start.py", "nyxctl.py", "nyxhop.service", "nyx-radio-A.cfg", "nyx-radio-B.cfg"])
     if a.dry_run:
         print(f"[dry-run] ADRV9364 {host} role {role}")
         print(f"  /boot/BOOT.BIN, /boot/devicetree.dtb   (from {d})")
@@ -263,6 +263,9 @@ def flash_adrv(a, host, role):
     if os.path.exists(os.path.join(d, "u-dma-buf.ko")):
         b.put_file(os.path.join(d, "u-dma-buf.ko"), "/home/root/u-dma-buf.ko")
     b.put_file(os.path.join(d, f"nyx-radio-{role}.cfg"), "/home/root/nyx-radio.cfg")
+    # both roles' cfgs stay on the board: `role tx|rx` from an app switches between them
+    for r in ("A", "B"):
+        b.put_file(os.path.join(d, f"nyx-radio-{r}.cfg"), f"/home/root/nyx-radio-{r}.cfg")
     drop_old_role_mode(b, "/home/root", role)
     b.put_text(role + "\n", "/home/root/nyx-role")
     b.put_file(os.path.join(d, "nyxhop.service"), "/etc/systemd/system/nyxhop.service")
@@ -324,7 +327,7 @@ E200_SD = ["nyx.bit", "uEnv.txt", "uramdisk.image.gz"]
 
 
 def flash_e200(a, host, role):
-    d = need(a.payload, "e200", E200_SD + ["nyxhop", f"nyx-radio-{role}-e200.cfg"])
+    d = need(a.payload, "e200", E200_SD + ["nyxhop", "nyx-radio-A-e200.cfg", "nyx-radio-B-e200.cfg"])
     nyxhop = os.path.join(d, "nyxhop")
     files = sorted(os.listdir(nyxhop))
     if a.dry_run:
@@ -346,6 +349,8 @@ def flash_e200(a, host, role):
     for f in files:
         b.put_file(os.path.join(nyxhop, f), "/mnt/sd/nyxhop/" + f)
     b.put_file(os.path.join(d, f"nyx-radio-{role}-e200.cfg"), "/mnt/sd/nyxhop/nyx-radio.cfg")
+    for r in ("A", "B"):  # both, so `role tx|rx` can switch without the tool
+        b.put_file(os.path.join(d, f"nyx-radio-{r}-e200.cfg"), f"/mnt/sd/nyxhop/nyx-radio-{r}-e200.cfg")
     drop_old_role_mode(b, "/mnt/sd/nyxhop", role)
     b.put_text(role + "\n", "/mnt/sd/nyxhop/nyx-role")
     b.sh("rm -f /mnt/sd/nyxhop/ip")  # left by an earlier version of this tool
