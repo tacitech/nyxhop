@@ -5,7 +5,7 @@ onto a board over SSH and verifies it: it does not build anything. These are the
 binaries (FPGA design, radio daemon, boot files); their source is not in this repository.
 
 **Licensing.** Everything in this folder is covered by the EULA (`../docs/EULA.md`), not by the
-NyxHop Source Licence that covers the source code in this repository. The board images also contain
+public-domain dedication (Unlicense) that covers the source code in this repository. The board images also contain
 third-party components (U-Boot, BusyBox and others) under their own licences, listed with their
 source locations in `../docs/THIRD-PARTY.md`.
 

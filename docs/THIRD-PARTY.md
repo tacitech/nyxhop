@@ -2,7 +2,7 @@
 
 The board images under `deploy/` are not built from nothing: they wrap the board vendor's boot
 loader and Linux userland around the NyxHop FPGA design and radio daemon. Those parts keep their
-own licences, which are not the NyxHop Source Licence covering this repository's source and not the EULA
+own licences, which are not the public-domain dedication covering this repository's source and not the EULA
 covering the NyxHop binaries.
 
 | component | where it is | licence |

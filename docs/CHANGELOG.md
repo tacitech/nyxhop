@@ -17,5 +17,5 @@
   every settings drawer turns a board into the other end; the apps follow it.
 * Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card).
 * Licence per board, checked offline; free tier.
-* Licensing of the repository: the source is source-available under the NyxHop Source Licence
-  (not open source); the board images stay under the EULA.
+* Licensing of the repository: the source code is public domain (Unlicense), no licence needed;
+  the board images stay under the EULA.

@@ -1,33 +1,24 @@
-NyxHop Source Licence 1.0
+This is free and unencumbered software released into the public domain.
 
-Copyright (c) 2026 NyxHop
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
 
-This is not an open-source licence. The source code in this repository (the apps, the
-protocol crates, the tools and the documentation: everything outside deploy/) is published
-so that you can read it, build it and change it for use with NyxHop. The board images in
-deploy/ (the FPGA design, the radio daemon and the files flashed with them) are binaries
-under the end-user licence agreement in docs/EULA.md, not under this licence.
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
 
-You may:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
 
-1. Read, build and run this source code.
-2. Change it and build your own applications on it, including products you sell, as long
-   as they run over a NyxHop link (NyxHop boards holding a NyxHop licence file).
-3. Share your changes, with this licence and this notice kept on them.
-
-You may not:
-
-4. Use this source code, or anything derived from it, to build or help build a radio link,
-   modem or product that replaces NyxHop or its board images.
-5. Remove, weaken or work around the licence checks, or publish ways to do so.
-6. Present this source code or your changes as open source, or put them under another
-   licence.
-
-"NyxHop" is the name of this product; do not use it as the name of yours. No patent or
-trademark rights are granted beyond what the uses above need.
-
-The source code is provided "as is", without warranty of any kind, express or implied. In
-no event are the authors or copyright holders liable for any claim, damages or other
-liability arising from the source code or its use.
-
-Anything not allowed here needs written permission: ask at https://nyxhop.com.
+For more information, please refer to <https://unlicense.org>
