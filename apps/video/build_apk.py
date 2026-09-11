@@ -105,13 +105,22 @@ def main():
     if not os.path.exists(SO):
         sys.exit(f".so not found: {SO}")
 
-    # 2) a debug keystore, made once
+    # 2) a debug keystore, made once. A keystore from before the rename opens with the old
+    #    password; keep using it, so an installed app updates in place instead of
+    #    refusing a build signed with a new key.
     if not os.path.exists(KS):
         run([KEYTOOL, "-genkeypair", "-v", "-keystore", KS,
              "-alias", "nyx", "-keyalg", "RSA", "-keysize", "2048",
              "-validity", "10000", "-storepass", "nyxhop",
              "-keypass", "nyxhop",
              "-dname", "CN=NyxHop, OU=Dev, O=NyxHop, C=VN"])
+    ks_pass = "nyxhop"
+    for cand in ("nyxhop", "nyxlink"):
+        r = subprocess.run([KEYTOOL, "-list", "-keystore", KS, "-storepass", cand],
+                           capture_output=True, env=ENV)
+        if r.returncode == 0:
+            ks_pass = cand
+            break
 
     # 3) the bare APK: manifest only; hasCode=false, so no classes.dex
     base = os.path.join(OUT, "base.apk")
@@ -150,7 +159,7 @@ def main():
         os.remove(final)
     shutil.copy(aligned, final)
     run([f"{BT}/apksigner.bat", "sign", "--ks", KS,
-         "--ks-pass", "pass:nyxhop", "--key-pass", "pass:nyxhop",
+         "--ks-pass", f"pass:{ks_pass}", "--key-pass", f"pass:{ks_pass}",
          "--v1-signing-enabled", "true", "--v2-signing-enabled", "true",
          final])
     run([f"{BT}/apksigner.bat", "verify", final])
