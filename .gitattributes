@@ -1,0 +1,23 @@
+# Scripts and configs go to Linux boards as they are: keep them LF on every checkout.
+*.sh text eol=lf
+*.cfg text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.service text eol=lf
+*.conf text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+# Board images and prebuilt binaries: never touched.
+*.bit -text
+*.BIN -text
+*.bin -text
+*.dtb -text
+*.gz -text
+*.ko -text
+*.ftr -text
+*.apk -text
+*.png -text
+*.jpg -text
+deploy/**/nyx-radio-node -text
+deploy/**/nyxctl -text

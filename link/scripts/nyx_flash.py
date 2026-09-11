@@ -182,7 +182,13 @@ class Board:
             self.sh(f"chmod {mode} '{remote}'")
 
     def put_file(self, local, remote, mode=None):
-        self.put(open(local, "rb").read(), remote, mode)
+        data = open(local, "rb").read()
+        # A Windows clone (core.autocrlf) checks scripts and cfgs out with CRLF; the E200's
+        # busybox sh then stops at the first `case`, and every cfg line grows a stray CR.
+        # Text goes to the board with LF whatever the checkout did to it.
+        if local.lower().endswith((".sh", ".cfg", ".py", ".txt", ".service", ".conf")):
+            data = data.replace(b"\r\n", b"\n")
+        self.put(data, remote, mode)
 
     def put_text(self, text, remote, mode=None):
         self.put(text.replace("\r\n", "\n").encode(), remote, mode)
