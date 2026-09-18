@@ -53,6 +53,17 @@ struct RxMetrics {
     bicm_runs: u64,
     bicm_rescues: u64,
     sig_failures: u64,
+    /// 17/9 smoothness: gaps between shown main-layer pictures over the last 10 s (ms), and
+    /// how many of them were hitches (longer than twice the typical gap).
+    disp_gap_p50: f32,
+    disp_gap_p95: f32,
+    disp_gap_max: f32,
+    hitches_10s: u32,
+    /// 17/9 delay: from the counter burned into the picture at the transmitting end to the
+    /// decoded picture here, over the last 10 s (ms; 0 = the pictures carry no counter). Only
+    /// meaningful when both ends run on one computer (one clock).
+    lat_p50: f32,
+    lat_p95: f32,
 }
 
 #[derive(Default)]
@@ -92,6 +103,10 @@ pub struct Shared {
     dropped: AtomicU64,
     /// Runtime-tunable receiver options (control console).
     bicm_enabled: AtomicBool,
+    /// 18/9: decode on through a hole (error concealment) instead of showing nothing until the
+    /// next key frame. `set conceal 0|1`. It matters most for a camera passed through, which
+    /// cannot be asked for a key frame at all.
+    conceal: AtomicBool,
     ldpc_iters: std::sync::atomic::AtomicUsize,
     /// I/Q format probe (0=asis 1=conj 2=swap 3=swap+conj 4=negI).
     iq_mode: std::sync::atomic::AtomicUsize,
@@ -204,6 +219,7 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         net_tx,
         udp_out: Mutex::new(None),
         udp_mode: AtomicBool::new(!opts.arg("--udp", "").is_empty()),
+        conceal: AtomicBool::new(opts.arg("--conceal", "1") != "0"),
         dropped: AtomicU64::new(0),
         bicm_enabled: AtomicBool::new(true),
         ldpc_iters: std::sync::atomic::AtomicUsize::new(30),
@@ -405,23 +421,26 @@ ok");
                 out
             }
             Some("get") => format!(
-                "bicm={}\niters={}\niqmode={}\nconnected={}\nok",
+                "bicm={}\niters={}\niqmode={}\nconceal={}\nconnected={}\nok",
                 shared.bicm_enabled.load(Ordering::Relaxed),
                 shared.ldpc_iters.load(Ordering::Relaxed),
                 shared.iq_mode.load(Ordering::Relaxed),
+                u8::from(shared.conceal.load(Ordering::Relaxed)),
                 shared.connected.load(Ordering::Relaxed)
             ),
             Some("stats") => {
                 let m = shared.ui.lock().unwrap().metrics.clone();
                 format!(
-                    "mcs={:?}\nsnr={:.1}\ncfo={:.0}\nbler={:.3}\nsegs_ok={}\nsegs_lost={}\nframes_rx={}\nframes_lost={}\nrx_fps={:.1}\ndisp_fps={:.1}\nlayer={}\npics={}/{}\ngoodput_kbps={:.0}\nharq={}/{}\nbicm={}/{}\nsig_fail={}\nok",
+                    "mcs={:?}\nsnr={:.1}\ncfo={:.0}\nbler={:.3}\nsegs_ok={}\nsegs_lost={}\nframes_rx={}\nframes_lost={}\nrx_fps={:.1}\ndisp_fps={:.1}\nlayer={}\npics={}/{}\ngoodput_kbps={:.0}\nharq={}/{}\nbicm={}/{}\nsig_fail={}\ndisp_gap_ms={:.0}/{:.0}/{:.0}\nhitches_10s={}\nlat_ms={:.0}/{:.0}\nok",
                     m.active_mcs.map(|x| x.index()),
                     m.snr_db, m.cfo_hz, m.bler_recent, m.segs_ok, m.segs_lost,
                     m.frames_rx, m.frames_lost, m.rx_fps, m.disp_fps,
                     if m.layer_main { "main" } else { "base" },
                     m.pics_ok, m.pics_fail, m.goodput_kbps,
                     m.harq_combines, m.harq_recovered, m.bicm_runs, m.bicm_rescues,
-                    m.sig_failures
+                    m.sig_failures,
+                    m.disp_gap_p50, m.disp_gap_p95, m.disp_gap_max, m.hitches_10s,
+                    m.lat_p50, m.lat_p95
                 )
             }
             Some("set") => {
@@ -448,6 +467,9 @@ ok");
                         .parse::<u64>()
                         .map(|v| shared.jitter_ms.store(v.min(400), Ordering::Relaxed))
                         .is_ok(),
+                    "conceal" => parse_bool(val)
+                        .map(|v| shared.conceal.store(v, Ordering::Relaxed))
+                        .is_some(),
                     _ => return format!("err unknown key {key}"),
                 };
                 if ok {
@@ -1467,15 +1489,35 @@ fn demod_loop(
     let mut last_base_id: Option<u32> = None;
     let mut fps_events: VecDeque<Instant> = VecDeque::new();
     let mut disp_events: VecDeque<Instant> = VecDeque::new(); // v36.1
+    // 17/9 smoothness and delay meters (main layer): (when, gap ms / delay ms), last 10 s
+    let mut gap_win: VecDeque<(Instant, f32)> = VecDeque::new();
+    let mut lat_win: VecDeque<(Instant, f32)> = VecDeque::new();
+    let mut last_main_disp: Option<(Instant, usize, bool)> = None;
+    let mut meter_at = Instant::now();
+    // camera pass-through 18/9: the transmit end says `video=pass` in its Info frames while it passes a camera
+    // through. Then no key frame can be asked for, so a hole is worth waiting longer for: giving
+    // up on it costs the picture until the camera's own next key frame (`cam_gop_ms`).
+    let mut pass_info_at: Option<Instant> = None;
+    let mut cam_gop_ms: u32 = 0;
+    let (mut gap_p50, mut gap_p95, mut gap_max, mut hitches) = (0f32, 0f32, 0f32, 0u32);
+    let (mut lat_p50, mut lat_p95) = (0f32, 0f32);
     let mut layer_main = true;
     let mut last_disp: Option<Instant> = None; // v14: for the EMA of the playout period
     let mut goodput: VecDeque<(Instant, usize)> = VecDeque::new();
     let mut last_feedback = Instant::now();
     let mut need_idr = false;
-    let mut vdec = VideoDecoder::new();
+    let new_dec = |shared: &Shared| {
+        if shared.conceal.load(Ordering::Relaxed) {
+            VideoDecoder::new_concealing()
+        } else {
+            VideoDecoder::new()
+        }
+    };
+    let mut conceal_now = shared.conceal.load(Ordering::Relaxed);
+    let mut vdec = new_dec(&shared);
     // v36 simulcast: a separate decoder for the BASE layer (H264Base). Always decode to keep its
     // state fresh; only SHOW it when the main layer is late (layer choice at the receiver).
-    let mut vdec_base = VideoDecoder::new();
+    let mut vdec_base = new_dec(&shared);
     let mut last_main = std::time::Instant::now();
     // v40.24: after a TX restart the H264 decoder (OpenH264) can reject EVERY frame, IDRs included
     // (measured: rx_fps 25, pics_ok flat, pics_fail +13/s, TX sent 313 IDRs, disp 0 fps for 150 s;
@@ -2142,7 +2184,7 @@ fn demod_loop(
                     }
                     if behind {
                         log(&format!("base: TX renumbered (id {id}, was {n}) -> resyncing"));
-                        vdec_base = VideoDecoder::new();
+                        vdec_base = new_dec(&shared);
                     }
                 }
                 last_base_id = Some(id);
@@ -2169,8 +2211,8 @@ fn demod_loop(
                 pending.insert(id, (src, data, Instant::now()));
                 next_deliver_id = Some(id);
                 // v40.24: new encoder -> the old decoder rejects even IDRs; recreate it right away
-                vdec = VideoDecoder::new();
-                vdec_base = VideoDecoder::new();
+                vdec = new_dec(&shared);
+                vdec_base = new_dec(&shared);
                 vdec_reset_at = Instant::now();
                 vdec_fail_at_reset = pics_fail;
                 vdec_resets += 1;
@@ -2189,6 +2231,21 @@ fn demod_loop(
                 last_base_id = None;
                 log(&format!("vdec: TX renumbered (id {id}) -> recreating the decoder (#{vdec_resets}) and resyncing seq/NACK/HARQ/reassembly"));
             }
+        }
+        // How long a hole may hold the line up. A camera passed through cannot send a key frame
+        // on request, so waiting out another retransmission beats skipping: up to a third of the
+        // camera's key-frame interval, which is what skipping would cost.
+        let hold = match pass_info_at {
+            Some(t) if t.elapsed() < Duration::from_secs(10) => {
+                Duration::from_millis(u64::from(cam_gop_ms / 3).clamp(400, 800))
+            }
+            _ => HOLD,
+        };
+        if shared.conceal.load(Ordering::Relaxed) != conceal_now {
+            conceal_now = !conceal_now;
+            vdec = new_dec(&shared);
+            vdec_base = new_dec(&shared);
+            log(&format!("vdec: error concealment {}", if conceal_now { "on" } else { "off" }));
         }
         let mut ready: Vec<(u32, SourceType, Vec<u8>)> = Vec::new();
         while let Some(n) = next_deliver_id {
@@ -2214,12 +2271,12 @@ fn demod_loop(
                 next_deliver_id = Some(n.wrapping_add(1));
             } else if pending
                 .values()
-                .any(|(_, _, t)| t.elapsed() > HOLD)
+                .any(|(_, _, t)| t.elapsed() > hold)
             {
                 // The hole at `n` is not coming back in time: skip to the
                 // oldest frame we do have and mark the loss.
                 let (&skip_to, _) = pending.iter().next().unwrap();
-                log(&format!("reorder: frame {n} not recovered within {} ms -> skipping to {skip_to}, asking for a keyframe", HOLD.as_millis()));
+                log(&format!("reorder: frame {n} not recovered within {} ms -> skipping to {skip_to}, asking for a keyframe", hold.as_millis()));
                 frames_lost += skip_to.wrapping_sub(n) as u64;
                 need_idr = true;
                 next_deliver_id = Some(skip_to);
@@ -2277,7 +2334,7 @@ fn demod_loop(
                                 && vdec_reset_at.elapsed() > Duration::from_secs(10)
                                 && pics_fail >= vdec_fail_at_reset + 40
                             {
-                                vdec = VideoDecoder::new();
+                                vdec = new_dec(&shared);
                                 vdec_reset_at = Instant::now();
                                 vdec_fail_at_reset = pics_fail;
                                 vdec_resets += 1;
@@ -2312,7 +2369,16 @@ fn demod_loop(
                 }
                 SourceType::Info => {
                     // v40.33: lic_* lines of the transmit end - shown, never forwarded
-                    *shared.far_lic.lock().unwrap() = String::from_utf8_lossy(&data).into_owned();
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    if text.contains("video=pass") {
+                        pass_info_at = Some(Instant::now());
+                        cam_gop_ms = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("cam_gop_ms="))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                    *shared.far_lic.lock().unwrap() = text;
                     None
                 }
                 SourceType::Data => {
@@ -2327,6 +2393,30 @@ fn demod_loop(
                     None
                 }
             };
+            if let (Some(pic), true) = (&d, src == SourceType::H264 || src == SourceType::Jpeg) {
+                let now = Instant::now();
+                let key = src == SourceType::H264
+                    && data.windows(4).take(4096).any(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1F == 5);
+                if let Some((prev, prev_len, prev_key)) = last_main_disp {
+                    let gap = now.duration_since(prev).as_secs_f32() * 1000.0;
+                    gap_win.push_back((now, gap));
+                    // a long gap: say what came before and what ended it (a big key frame on
+                    // air, a hole waiting for its retransmission)
+                    if gap > 120.0 {
+                        log(&format!(
+                            "disp gap {gap:.0} ms before id={_id} (this {} B key={}, previous {prev_len} B key={})",
+                            data.len(), u8::from(key), u8::from(prev_key)
+                        ));
+                    }
+                }
+                last_main_disp = Some((now, data.len(), key));
+                if let Some(ms) = nyx_common::stamp::read(pic) {
+                    let lat = (nyx_common::stamp::counter_ms() + 1_000_000 - ms) % 1_000_000;
+                    if lat < 5_000 {
+                        lat_win.push_back((now, lat as f32));
+                    }
+                }
+            }
             if d.is_some() {
                 disp_events.push_back(Instant::now());
                 layer_main = !matches!(src, SourceType::H264Base);
@@ -2350,6 +2440,34 @@ fn demod_loop(
             while disp_events.front().is_some_and(|&t| t < cut) {
                 disp_events.pop_front();
             }
+        }
+        if meter_at.elapsed() >= Duration::from_millis(500) {
+            meter_at = Instant::now();
+            if let Some(cut10) = Instant::now().checked_sub(Duration::from_secs(10)) {
+                while gap_win.front().is_some_and(|&(t, _)| t < cut10) {
+                    gap_win.pop_front();
+                }
+                while lat_win.front().is_some_and(|&(t, _)| t < cut10) {
+                    lat_win.pop_front();
+                }
+            }
+            let pct = |v: &mut Vec<f32>, q: f32| -> f32 {
+                if v.is_empty() {
+                    return 0.0;
+                }
+                v.sort_by(|a, b| a.total_cmp(b));
+                v[((v.len() - 1) as f32 * q).round() as usize]
+            };
+            let mut g: Vec<f32> = gap_win.iter().map(|&(_, x)| x).collect();
+            gap_p50 = pct(&mut g, 0.5);
+            gap_p95 = pct(&mut g, 0.95);
+            gap_max = g.last().copied().unwrap_or(0.0);
+            hitches = g.iter().filter(|&&x| x > 2.0 * gap_p50.max(1.0)).count() as u32;
+            let mut l: Vec<f32> = lat_win.iter().map(|&(_, x)| x).collect();
+            lat_p50 = pct(&mut l, 0.5);
+            lat_p95 = pct(&mut l, 0.95);
+        }
+        if let Some(cut) = Instant::now().checked_sub(Duration::from_secs(2)) {
             while goodput.front().is_some_and(|&(t, _)| t < cut) {
                 goodput.pop_front();
             }
@@ -2411,6 +2529,12 @@ fn demod_loop(
                     m.frames_lost = frames_lost;
                     m.rx_fps = rx_fps;
                     m.disp_fps = disp_events.len() as f32 / 2.0;
+                    m.disp_gap_p50 = gap_p50;
+                    m.disp_gap_p95 = gap_p95;
+                    m.disp_gap_max = gap_max;
+                    m.hitches_10s = hitches;
+                    m.lat_p50 = lat_p50;
+                    m.lat_p95 = lat_p95;
                     m.layer_main = layer_main;
                     m.pics_ok = pics_ok;
                     m.pics_fail = pics_fail;
@@ -2536,6 +2660,10 @@ pub struct RxApp {
     ev_live: Option<bool>,
     ev_lost_at: Option<Instant>,
     ev_banner: Option<(String, egui::Color32, Instant, bool)>,
+    /// v40.46 latency test: the millisecond counter under the video (drawer), and the counter
+    /// value the picture was frozen at (F / the button)
+    counter_on: bool,
+    frozen: Option<u32>,
 }
 
 impl RxApp {
@@ -2567,6 +2695,8 @@ impl RxApp {
             ev_live: None,
             ev_lost_at: None,
             ev_banner: None,
+            counter_on: false,
+            frozen: None,
         }
     }
 
@@ -2612,6 +2742,14 @@ impl RxApp {
         }
     }
 
+    /// Latency test: stop the picture and the counter at the same instant, or run again.
+    fn toggle_freeze(&mut self) {
+        self.frozen = match self.frozen {
+            Some(_) => None,
+            None => Some(nyx_common::stamp::counter_ms()),
+        };
+    }
+
     /// Everything behind the gear.
     fn drawer(&mut self, ui: &mut egui::Ui) {
         use nyx_common::theme as th;
@@ -2619,6 +2757,24 @@ impl RxApp {
         let st = self.board.snapshot();
         let connected = self.shared.connected.load(Ordering::Relaxed);
 
+        th::section(ui, "Latency test", true, |ui| {
+            if ui
+                .checkbox(&mut self.counter_on, "Counter on screen")
+                .on_hover_text("A millisecond counter under the video with a Freeze button (F).")
+                .changed()
+                && !self.counter_on
+            {
+                self.frozen = None;
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Turn on \"Counter in the picture\" in the aircraft app (or film this counter with its \
+                     camera). Freeze stops the picture and the counter together: the difference is the delay.",
+                )
+                .small()
+                .color(th::DIM),
+            );
+        });
         nu::link_section(ui, &st, nu::Role::Ground, &self.board);
         nu::role_section(ui, &st, &self.board);
         nu::channel_section(ui, &st, &mut self.chan_form, &self.board);
@@ -2737,7 +2893,8 @@ impl eframe::App for RxApp {
                 None
             }
         };
-        if let Some((_ver, f)) = pending {
+        // frozen (latency test): the picture on screen stays the one frozen with the counter
+        if let Some((_ver, f)) = pending.filter(|_| self.frozen.is_none()) {
             // v40.25: nyx-rx died with a wgpu panic "Texture invalid" when the picture kept
             // switching 480x360 <-> 320x240. A 0x0 frame or a byte-count mismatch -> drop; a size
             // change -> a NEW handle instead of set() on the same id.
@@ -2762,6 +2919,10 @@ impl eframe::App for RxApp {
         // O: the readouts over the video, the same switch as in the drawer header.
         if ctx.input(|i| i.key_pressed(egui::Key::O)) {
             self.hud_plates = !self.hud_plates;
+        }
+        // F: freeze the picture and the counter together (latency test)
+        if self.counter_on && ctx.input(|i| i.key_pressed(egui::Key::F)) {
+            self.toggle_freeze();
         }
 
         use nyx_common::ui as nu;
@@ -2788,7 +2949,21 @@ impl eframe::App for RxApp {
         let tex = self.tex.clone();
         let mut open = self.drawer_open;
         let mut plates = self.hud_plates;
-        nu::screen(root, &mut open, &mut plates, "Settings", |ui| self.drawer(ui), |ui| nu::hud(ui, tex.as_ref(), &data));
+        let counter = self
+            .counter_on
+            .then(|| nyx_common::stamp::fmt(self.frozen.unwrap_or_else(nyx_common::stamp::counter_ms)));
+        let frozen = self.frozen.is_some();
+        let mut freeze_tap = false;
+        nu::screen(root, &mut open, &mut plates, "Settings", |ui| self.drawer(ui), |ui| {
+            let gear = nu::hud(ui, tex.as_ref(), &data);
+            if let Some(t) = &counter {
+                freeze_tap = nu::counter_box(ui, t, frozen);
+            }
+            gear
+        });
+        if freeze_tap {
+            self.toggle_freeze();
+        }
         self.drawer_open = open;
         self.hud_plates = plates;
         ctx.request_repaint_after(std::time::Duration::from_millis(16));

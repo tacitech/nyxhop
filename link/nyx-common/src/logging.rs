@@ -10,6 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct Logger {
     app: &'static str,
     file: Option<Mutex<File>>,
+    /// `NYX_LOG_MAX_MB`: past this size the log moves to `<app>.log.old` and starts again
+    /// (a board runs for days on a small disk; unset = grow as before).
+    max_bytes: u64,
+    lines: std::sync::atomic::AtomicU64,
 }
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
@@ -29,7 +33,16 @@ pub fn init(app: &'static str) {
             .open(format!("logs/{app}.log"))
             .ok()
     });
-    let _ = LOGGER.set(Logger { app, file: file.map(Mutex::new) });
+    let max_bytes = std::env::var("NYX_LOG_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(0, |mb| mb.max(1) * 1024 * 1024);
+    let _ = LOGGER.set(Logger {
+        app,
+        file: file.map(Mutex::new),
+        max_bytes,
+        lines: std::sync::atomic::AtomicU64::new(0),
+    });
     log(&format!("=== {app} started (pid {}) ===", std::process::id()));
 }
 
@@ -59,6 +72,14 @@ pub fn log(msg: &str) {
         && let Ok(mut f) = f.lock()
     {
         let _ = writeln!(f, "{line}");
+        let n = l.lines.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if l.max_bytes > 0 && n % 500 == 0 && f.metadata().is_ok_and(|m| m.len() > l.max_bytes) {
+            let path = format!("logs/{}.log", l.app);
+            let _ = std::fs::rename(&path, format!("{path}.old"));
+            if let Ok(nf) = OpenOptions::new().create(true).append(true).open(&path) {
+                *f = nf;
+            }
+        }
     }
 }
 

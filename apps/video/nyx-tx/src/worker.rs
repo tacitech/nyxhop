@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nyx_common::codec::VideoEncoder;
 use nyx_common::logging::{StatusLogger, log};
-use nyx_common::source::{DataGen, PatternGen, SourceKind, bytes_to_image, resize_rgb};
+use nyx_common::source::{DataGen, PatternGen, RtspAu, RtspShared, SourceKind, bytes_to_image, resize_rgb};
 use nyx_common::{RgbFrame, encode_jpeg};
 use nyx_link::{BLOCK_BYTES as FRAME_PAYLOAD_BYTES, SourceType, packetize, packetize_fec};
 use nyx_proto::{Mcs, Msg, RV_SEQUENCE, TXB_FABRIC, TXB_PAIR, conv_frames};
@@ -21,10 +21,26 @@ use crate::{Codec, Rolling, Shared, TxConfig};
 /// log-MAP demap and phase-slope fix (AWGN waterfalls now 4/4/6/9/14/16 dB
 /// channel SNR; the RX estimate reads ~2 dB above channel SNR).
 const MCS_SNR_THRESH: [f32; 6] = [0.0, 4.0, 7.0, 10.5, 15.5, 17.5];
+/// v40.45 interference regime: the receiver reports an SNR this far above the
+/// current rung's threshold and still loses blocks. That loss is not the fading
+/// channel (a lower rung would not fix it) but something else on the air - a
+/// WiFi burst, another radio - hitting whole frames. Stepping down then only
+/// lengthens the airtime of every block (more exposure) and costs bitrate.
+/// Measured 16/9 on 2437 MHz next to a WiFi AP: SNR 24-29 dB, 15-22 % of the
+/// video frames lost, minstrel walked MCS 5 -> 1, fps 30 -> 15, 1.9 Mbps ->
+/// 0.18 Mbps, and the loss did not move. General rule, any band.
+const INTERF_MARGIN_DB: f32 = 6.0;
+/// ...and the current rung's block success below this counts as "losing".
+const INTERF_LOSS_PROB: f32 = 0.9;
 /// How many recent PHY frames stay cached for ARQ.
 const ARQ_CACHE: usize = 256;
 /// Max retransmissions per PHY frame (each combine at RX is worth ~+3 dB).
 const MAX_RETX: u8 = 3;
+/// v40.45c interference regime: more attempts per block (the frame is still alive at the
+/// receiver, the air is just being hit), and every retransmission and every parity block
+/// gets a SECOND copy this much later - a WiFi burst that ate the first one has moved on.
+const MAX_RETX_INTERF: u8 = 6;
+const DUP_GAP: Duration = Duration::from_millis(12);
 
 /// AIRTIME CEILING of the fabric conv path, in bit/s: how much the air can CARRY.
 ///
@@ -79,6 +95,118 @@ fn conv_air_ceiling_bps(
     blocks_ps * payload_bits * 0.85
 }
 
+/// camera pass-through: how far behind the camera the sending may fall before whole frames are
+/// dropped (up to the newest key frame). A camera frame waits here while the frames before it
+/// are still on air; past this the picture at the ground is late enough to be useless.
+const PASS_MAX_LAG: Duration = Duration::from_millis(400);
+
+/// camera bitrate over ONVIF: the camera's bitrate is set to this share of what the link carries. The rest is
+/// room for the camera's key frames (several times a P frame, on air in one burst), the parity
+/// block of every frame, retransmissions and the rate probes.
+const CAM_HEADROOM: f32 = 0.6;
+/// ...and never below this (kbit/s): a camera starved further gives nothing worth seeing.
+const CAM_MIN_KBPS: u32 = 250;
+
+/// State of the pass-through reader (`pass_next`).
+struct PassState {
+    /// an access unit was lost: drop until a key frame
+    wait_key: bool,
+    /// camera frame interval (EMA of RTP time steps), for pacing bursts out
+    interval_s: f32,
+    last_ts: Option<i64>,
+    last_out: Option<Instant>,
+    drop_late: u64,
+    drop_nokey: u64,
+}
+
+impl PassState {
+    fn new() -> Self {
+        PassState {
+            wait_key: true,
+            interval_s: 1.0 / 25.0,
+            last_ts: None,
+            last_out: None,
+            drop_late: 0,
+            drop_nokey: 0,
+        }
+    }
+}
+
+/// The next camera access unit to send, or None after waiting a little (nothing due).
+///
+/// The camera's H.264 cannot be thinned: every P frame needs the frames before it. So nothing is
+/// dropped one frame at a time. A frame older than `PASS_MAX_LAG` means the link is carrying
+/// less than the camera makes; everything up to the newest key frame goes, and if there is none,
+/// everything goes and sending resumes at the next key frame. RTSP over TCP delivers in bursts
+/// (10/9: sending a burst as it came read as loss at the receiver), so frames leave no closer
+/// than half the camera's frame interval unless a backlog is building.
+fn pass_next(r: &RtspShared, st: &mut PassState) -> Option<RtspAu> {
+    let mut q = r.aus.lock().unwrap();
+    if q.is_empty() {
+        // woken by a new access unit or by a NACK (net.rs); no polling: on the board the radio
+        // daemon needs the CPU (17/9: a 4 ms poll took 19 % of a core and the link got worse)
+        q = r.aus_cv.wait_timeout(q, Duration::from_millis(50)).unwrap().0;
+    }
+    if r.aus_broken.swap(false, Ordering::Relaxed) {
+        st.wait_key = true;
+    }
+    if q.front().is_some_and(|a| a.at.elapsed() > PASS_MAX_LAG) {
+        let n0 = q.len();
+        match q.iter().rposition(|a| a.key && a.at.elapsed() <= PASS_MAX_LAG) {
+            Some(k) => {
+                q.drain(..k);
+                st.wait_key = false;
+            }
+            None => {
+                q.clear();
+                st.wait_key = true;
+            }
+        }
+        let n = (n0 - q.len()) as u64;
+        if st.drop_late / 50 != (st.drop_late + n) / 50 || st.drop_late == 0 {
+            log(&format!(
+                "pass: camera frames {} ms old, dropped {n} to the next key frame (total {})",
+                PASS_MAX_LAG.as_millis(), st.drop_late + n
+            ));
+        }
+        st.drop_late += n;
+    }
+    if st.wait_key {
+        while q.front().is_some_and(|a| !a.key) {
+            q.pop_front();
+            st.drop_nokey += 1;
+        }
+        if q.is_empty() {
+            return None;
+        }
+        st.wait_key = false;
+    }
+    if q.is_empty() {
+        return None;
+    }
+    if q.len() < 3
+        && let Some(t) = st.last_out
+    {
+        let gap = Duration::from_secs_f32((st.interval_s * 0.5).clamp(0.004, 0.1));
+        let el = t.elapsed();
+        if el < gap {
+            let _ = r.aus_cv.wait_timeout(q, gap - el).unwrap();
+            return None;
+        }
+    }
+    let au = q.pop_front()?;
+    drop(q);
+    if let Some(prev) = st.last_ts {
+        let d = (au.ts90k - prev) as f32 / 90_000.0;
+        if d > 0.0 && d < 1.0 {
+            st.interval_s = 0.9 * st.interval_s + 0.1 * d;
+        }
+    }
+    st.last_ts = Some(au.ts90k);
+    st.last_out = Some(Instant::now());
+    Some(au)
+}
+
 pub fn spawn(shared: Arc<Shared>, net: Arc<Net>) {
     std::thread::Builder::new()
         .name("tx-worker".into())
@@ -128,6 +256,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut probe_rr: u64 = 0; // xoay vong bac probe
     let mut up_want: Option<usize> = None; // v32.2: climbing needs 2 windows in agreement
     let mut up_confirm = 0u32;
+    let mut interf_on = false; // v40.45: interference regime (logged on change)
+    let mut surv_cnt = 0u32;   // v40.45: consecutive dead windows while in it
+    let mut clean_cnt = 0u32;  // v40.45: consecutive clean windows before leaving it
+    // v40.45c: delayed second copies (parity blocks, retransmissions) while under interference
+    let mut dup_q: std::collections::VecDeque<(Instant, u64, [u8; nyx_link::BLOCK_BYTES])> =
+        std::collections::VecDeque::new();
+    let mut dups_sent: u64 = 0;
     let mut sent_last: u64 = 0; // v30.1: CQ_IN last time (for sent_rate)
     let mut base_in_last: u64 = 0; // v37: base stream kept separate
     let mut ok_base_last: u16 = 0;
@@ -289,23 +424,60 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // v40.44z: how long the camera has given nothing; past 3 s with an open error the
     // source drops to the pattern so a box without a camera still sends a picture.
     let mut webcam_wait = 0u32;
+    // camera pass-through: the camera's access units sent as they are
+    let mut pst = PassState::new();
+    let mut pass_fps_roll = Rolling::new(2.0);
+    let mut pass_byte_roll = Rolling::new(2.0);
+    let mut pass_idr_req: u64 = 0;
+    let mut pass_was = false;
+    // camera bitrate over ONVIF: the bitrate the camera is asked for, and when it last looked worth raising
+    let mut cam_want: u32 = 0;
+    let mut cam_tick = Instant::now();
+    let mut cam_up_since: Option<Instant> = None;
+    let mut cam_late0: u64 = 0;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
         let cfg: TxConfig = shared.config.lock().unwrap().clone();
+        // on-board camera app: the board is the receiving end - no camera, nothing to send
+        if shared.standby.load(Ordering::Relaxed) {
+            shared.webcam.wanted.store(false, Ordering::Relaxed);
+            shared.rtsp.wanted.store(false, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(200));
+            next_frame = Instant::now();
+            continue;
+        }
         shared
             .webcam
             .wanted
             .store(cfg.source == SourceKind::Webcam, Ordering::Relaxed);
         shared.rtsp.wanted.store(cfg.source == SourceKind::Rtsp, Ordering::Relaxed);
+        let pass = cfg.source == SourceKind::Rtsp && cfg.rtsp_pass;
+        shared.rtsp.pass.store(pass, Ordering::Relaxed);
+        if pass != pass_was {
+            pass_was = pass;
+            shared.rtsp.clear_aus();
+            pst = PassState::new();
+            log(if pass {
+                "pass: sending the camera's H.264 as it is (no re-encode)"
+            } else {
+                "pass: off"
+            });
+        }
         if cfg.source == SourceKind::Rtsp {
             let mut u = shared.rtsp.url.lock().unwrap();
             if *u != cfg.rtsp_url {
                 *u = cfg.rtsp_url.clone();
             }
+            drop(u);
+            let mut o = shared.rtsp.onvif_url.lock().unwrap();
+            if *o != cfg.onvif_url {
+                *o = cfg.onvif_url.clone();
+            }
         }
+        shared.rtsp.onvif_adapt.store(cfg.cam_adapt, Ordering::Relaxed);
 
         if cfg.paused || !shared.connected.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(60));
@@ -377,12 +549,16 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             afps
         };
 
-        let now = Instant::now();
-        if now < next_frame {
-            std::thread::sleep(next_frame - now);
+        if pass {
+            next_frame = Instant::now();
+        } else {
+            let now = Instant::now();
+            if now < next_frame {
+                std::thread::sleep(next_frame - now);
+            }
+            let period = Duration::from_secs_f32(1.0 / afps.clamp(1.0, 60.0));
+            next_frame = Instant::now().max(next_frame + period);
         }
-        let period = Duration::from_secs_f32(1.0 / afps.clamp(1.0, 60.0));
-        next_frame = Instant::now().max(next_frame + period);
 
         // ------------------------------------------------- MCS adaptation
         let fb = shared.feedback.lock().unwrap().clone();
@@ -496,15 +672,54 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     mn_dbg = mn_dbg.wrapping_add(1);
                     if mn_dbg % 5 == 0 {
                         log(&format!(
-                            "mn: cur={} prob=[{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}] base_s/ok={dbase_sent}/{dbase_ok}",
+                            "mn: cur={} prob=[{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}] base_s/ok={dbase_sent}/{dbase_ok} snr={:.1} interf={}",
                             auto_mcs.index(),
                             mn_prob[0], mn_prob[1], mn_prob[2],
                             mn_prob[3], mn_prob[4], mn_prob[5],
+                            fb.snr_db, u8::from(interf_on),
                         ));
                     }
                     let cur = auto_mcs.index();
                     let fresh =
                         |i: usize| mn_age[i].elapsed().as_secs_f32() < 10.0;
+                    // v40.45: interference regime - SNR says this rung is fine, the
+                    // counters say blocks die anyway. Hold the rung: no prior-driven
+                    // step down, survival only after several dead windows in a row.
+                    let snr_margin = fb.snr_db - MCS_SNR_THRESH[cur];
+                    // Hysteresis: WiFi is bursty second to second (block ok swung 0.7..1.0
+                    // every window on 2437 MHz, 42 on/off flips in 3 min without it). Enter on
+                    // one losing window with the margin; leave only after 3 clean windows in a
+                    // row, or when the margin is gone (then it IS an SNR problem).
+                    let enter = mn_prob[cur] >= 0.0
+                        && mn_prob[cur] < INTERF_LOSS_PROB
+                        && snr_margin >= INTERF_MARGIN_DB;
+                    let clean = mn_prob[cur] >= 0.97;
+                    let margin_gone = snr_margin < INTERF_MARGIN_DB - 3.0;
+                    let was = interf_on;
+                    if !interf_on {
+                        if enter {
+                            interf_on = true;
+                            clean_cnt = 0;
+                        }
+                    } else if margin_gone {
+                        interf_on = false;
+                    } else if clean {
+                        clean_cnt += 1;
+                        if clean_cnt >= 3 {
+                            interf_on = false;
+                        }
+                    } else {
+                        clean_cnt = 0;
+                    }
+                    let interf = interf_on;
+                    if interf != was {
+                        surv_cnt = 0;
+                        log(&format!(
+                            "olla: interference regime {} at {} (snr {:.1} dB, rung needs {:.1}, block ok {:.2})",
+                            if interf { "ON - holding the rung, loss is not SNR" } else { "off" },
+                            Mcs::ALL[cur].label(), fb.snr_db, MCS_SNR_THRESH[cur], mn_prob[cur]
+                        ));
+                    }
                     // expected throughput: frame airtime is FIXED, so thr ~ prob x
                     // payload_block/nfrag (useful payload per FRAME; low MCS spends more frames per
                     // block). v40.34: a lost block tears the WHOLE video frame (and costs an IDR),
@@ -541,7 +756,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             mn_prob[i]
                         } else if i < cur {
                             if mn_prob[cur] >= 0.0 {
-                                (mn_prob[cur] + 0.35).min(1.0)
+                                // v40.45: under interference an unmeasured lower rung gets
+                                // NO optimism - its longer frames are hit just the same
+                                if interf { mn_prob[cur] } else { (mn_prob[cur] + 0.35).min(1.0) }
                             } else {
                                 1.0
                             }
@@ -553,7 +770,18 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         // -> sinks to the bottom and sticks. Low frame probability at a high rung
                         // is what the BASE layer is for; that is the simulcast design.)
                         let t = thr(i, pb);
-                        let need = if i > cur { best_thr * 1.1 } else { best_thr };
+                        // v40.45b: under interference a measured lower rung must beat the
+                        // current one by 20 % (not just edge it): WiFi comes in seconds of
+                        // clean and seconds of loss, and the rung we sat on a moment ago
+                        // always looks a little better than the one being hit now
+                        // (measured: 5 <-> 4 every ~5 s at 0.86 vs 0.69).
+                        let need = if i > cur {
+                            best_thr * 1.1
+                        } else if interf {
+                            best_thr * 1.2
+                        } else {
+                            best_thr
+                        };
                         if t > need {
                             best = i;
                             best_thr = t;
@@ -574,7 +802,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // survival: the current rate is nearly dead -> go down at once, do not wait for
                     // argmax (argmax needs samples and a collapsing channel gives poor ones)
                     if mn_prob[cur] >= 0.0 && mn_prob[cur] < 0.2 && cur > 0 {
-                        best = cur - 1;
+                        // v40.45: in the interference regime a dead rung is not evidence
+                        // for the rung below; only 3 dead windows in a row (or a measured
+                        // better rung below) move us
+                        surv_cnt = if interf { surv_cnt + 1 } else { 0 };
+                        let below_better = cur > 0 && fresh(cur - 1) && mn_prob[cur - 1] > mn_prob[cur] + 0.2;
+                        if !interf || surv_cnt >= 3 || below_better {
+                            best = cur - 1;
+                            surv_cnt = 0;
+                        }
+                    } else {
+                        surv_cnt = 0;
                     }
                     // climbing needs 2 CONSECUTIVE windows in agreement (probes at the fade edge
                     // are noisy; a single good window often lies; stepping down stays immediate).
@@ -594,7 +832,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     if best != cur
                         && allow
                         && last_step.elapsed() > Duration::from_millis(
-                            if best < cur { 1000 } else { 3000 },
+                            // v40.45b: a step down under interference dwells 5 s
+                            if best < cur { if interf { 5000 } else { 1000 } } else { 3000 },
                         )
                     {
                         auto_mcs = Mcs::ALL[best];
@@ -681,7 +920,44 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             said_acquiring = true;
             log("worker: first iteration — acquiring source");
         }
-        let video_frame: Option<RgbFrame> = match cfg.source {
+        let pass_au: Option<RtspAu> = if pass {
+            match pass_next(&shared.rtsp, &mut pst) {
+                Some(au) => Some(au),
+                None => {
+                    // No camera frame due yet: answer NACKs now rather than after the next
+                    // frame (17/9 on air: retransmissions came back 54-223 ms after the loss,
+                    // the receiver gives a hole 300 ms, and in pass-through every hole it
+                    // gives up on costs the picture until the camera's next key frame).
+                    // Only the conv path exists on the board; the full handling is below.
+                    if cfg.txconv {
+                        let nack_rx = net.nacks.lock().unwrap();
+                        let max_retx = if interf_on || pass { MAX_RETX_INTERF } else { MAX_RETX };
+                        while let Ok(nseq) = nack_rx.try_recv() {
+                            nacks_handled += 1;
+                            if !cfg.arq {
+                                continue;
+                            }
+                            if let Some(entry) = cache
+                                .iter_mut()
+                                .rev()
+                                .find(|e| e.seq & 0xFF == nseq & 0xFF && e.retx < max_retx)
+                            {
+                                entry.retx += 1;
+                                convtx.push(entry.seq, &entry.block);
+                                retransmits += 1;
+                                if cfg.dup && interf_on {
+                                    dup_q.push_back((Instant::now() + DUP_GAP, entry.seq, entry.block));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let video_frame: Option<RgbFrame> = if pass { None } else { match cfg.source {
             SourceKind::Pattern => Some(pattern.render(aw, ah)),
             SourceKind::Webcam => {
                 let raw = shared.webcam.frame.lock().unwrap().clone();
@@ -718,7 +994,15 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 }
             }
             SourceKind::RandomData => None,
-        };
+        } };
+        // v40.46 latency test: the millisecond counter into the picture before encoding (the
+        // ground app shows the same counter; freeze both and subtract)
+        let video_frame = video_frame.map(|mut f| {
+            if cfg.stamp {
+                nyx_common::stamp::burn(&mut f, nyx_common::stamp::counter_ms());
+            }
+            f
+        });
 
         // v12.2: GLASS-IN mark for the glass-to-glass measurement: the moment the frame is produced
         // (pattern), BEFORE encoding. Pairs with "G2G out" in nyx-rx (after decode). frame_id % 8
@@ -726,7 +1010,79 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         if video_frame.is_some() && frame_id % 8 == 0 {
             log(&format!("G2G in id={frame_id}"));
         }
-        let (src_type, app_data, preview) = match video_frame {
+        let (src_type, app_data, preview) = if let Some(au) = pass_au {
+            pass_fps_roll.push(1);
+            pass_byte_roll.push(au.data.len());
+            // The receiver asks for a key frame after a loss; the camera sends one when it
+            // wants to, so the request can only be counted.
+            if std::mem::take(&mut shared.feedback.lock().unwrap().need_idr) {
+                pass_idr_req += 1;
+            }
+            let payload_bits = (FRAME_PAYLOAD_BYTES * 8) as f32;
+            let cam_fps = pass_fps_roll.count_per_sec().max(1.0);
+            let cap = conv_air_ceiling_bps(cfg.air_gap_ms, false, mcs, payload_bits, cam_fps, cfg.fec);
+            video_bitrate = (pass_byte_roll.per_sec() * 8.0) as u32;
+            // ONVIF: once a second, the bitrate the camera should be at. What the air carries at
+            // this rung, cut to the spacing the daemon really keeps up with (the board app's
+            // pacer) and to the share of blocks that arrive; the camera gets CAM_HEADROOM of it.
+            // Down at once, up only after 4 s of room and by at most 30 % a step (the rung flaps
+            // 5 <-> 4 while the air changes, and a camera may restart its stream on a change).
+            // ...and only once the receiving end is answering: while blind the rung starts at
+            // MCS3 and the delivered/needed ratio is stale, which drove the camera to its floor
+            // right after every restart and took half a minute to climb back (18/9).
+            if cfg.cam_adapt && shared.rtsp.onvif_ok.load(Ordering::Relaxed) && fb_fresh {
+                if cam_tick.elapsed() >= Duration::from_secs(1) {
+                    cam_tick = Instant::now();
+                    let ceiling = crate::cam_ceiling(&shared);
+                    let mut air = cap;
+                    let floor_us = shared.pace_floor_us.load(Ordering::Relaxed) as f32;
+                    if floor_us > 3000.0 {
+                        let nfrag = conv_frames(mcs.index().min(5), FRAME_PAYLOAD_BYTES) as f32;
+                        let blocks = (1e6 / floor_us / nfrag - if cfg.fec { cam_fps } else { 0.0 }).max(1.0);
+                        air = air.min(blocks * payload_bits * 0.85);
+                    }
+                    let target = ((air * air_scale * CAM_HEADROOM / 1000.0) as u32).max(CAM_MIN_KBPS);
+                    let target = if ceiling > 0 { target.min(ceiling) } else { target };
+                    let late = pst.drop_late.saturating_sub(cam_late0);
+                    cam_late0 = pst.drop_late;
+                    if cam_want == 0 {
+                        cam_want = target;
+                    } else if late > 0 {
+                        // frames went old waiting: the camera is above what really goes out
+                        cam_want = target.min((video_bitrate as f32 / 1000.0 * 0.7) as u32).max(CAM_MIN_KBPS);
+                        cam_up_since = None;
+                    } else if target < cam_want {
+                        cam_want = target;
+                        cam_up_since = None;
+                    } else if target as f32 > cam_want as f32 * 1.15 {
+                        let since = *cam_up_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= Duration::from_secs(4) {
+                            cam_want = target.min((cam_want as f32 * 1.3) as u32);
+                            cam_up_since = None;
+                        }
+                    } else {
+                        cam_up_since = None;
+                    }
+                    shared.rtsp.want_kbps.store(cam_want, Ordering::Relaxed);
+                }
+            } else if !cfg.cam_adapt {
+                cam_want = 0;
+                shared.rtsp.want_kbps.store(0, Ordering::Relaxed);
+            }
+            {
+                let mut st = shared.stats.lock().unwrap();
+                st.pass_fps = cam_fps;
+                st.pass_kbps = video_bitrate as f32 / 1000.0;
+                st.pass_drop_late = pst.drop_late;
+                st.pass_drop_nokey = pst.drop_nokey;
+                st.pass_idr_req = pass_idr_req;
+                st.link_cap_bps = cap;
+                st.rc_one_burst = cap;
+            }
+            // the PC build still decodes the camera: that picture is the preview
+            let preview = shared.rtsp.frame.lock().unwrap().take();
+            (SourceType::H264, au.data, preview)
+        } else { match video_frame {
             Some(f) => match cfg.codec {
                 Codec::H264 => {
                     // Rate control follows the ACHIEVED burst cadence, not
@@ -1022,7 +1378,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 }
                 (SourceType::RawData, data, Some(preview))
             }
-        };
+        } };
 
         // v7: capacity for the ladder (read by the NEXT loop) = the video_bitrate the system just
         // converged to, already clamped by one_burst/ceiling/budget, self-consistent (resolution
@@ -1048,6 +1404,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         let t_pk = Instant::now();
         let mut blocks =
             packetize_fec(frame_id, src_type, &app_data, cfg.fec);
+        // v40.45c: the video parity block is the LAST block packetize_fec made (before the
+        // text/data/info frames are appended); under interference it goes out twice.
+        let parity_idx = if cfg.fec && !blocks.is_empty() { Some(blocks.len() - 1) } else { None };
         if frame_id % 8 == 0 {
             log(&format!("pkpace: packetize={}us", t_pk.elapsed().as_micros()));
         }
@@ -1072,7 +1431,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         // v40.33: this board's licence state for the far app, every 3 s (one block)
         if lic_info_at.elapsed() >= Duration::from_secs(3) {
             lic_info_at = Instant::now();
-            let t = shared.lic_info.lock().unwrap().clone();
+            let mut t = shared.lic_info.lock().unwrap().clone();
+            // camera pass-through 18/9: tell the receiving end that this is a camera's own H.264. It cannot ask
+            // for a key frame here (the camera decides), so a hole given up on costs the picture
+            // until the camera's next one - the receiver waits longer for a retransmission when it
+            // knows that, and knows how long the wait is worth (`cam_gop_ms`).
+            if pass {
+                let fps = shared.rtsp.fps_x10.load(Ordering::Relaxed) as f32 / 10.0;
+                let gop = shared.rtsp.gop.load(Ordering::Relaxed);
+                let gop_ms = if fps > 1.0 && gop > 0 { (gop as f32 / fps * 1000.0) as u32 } else { 0 };
+                t.push_str(&format!("video=pass\ncam_gop_ms={gop_ms}\n"));
+            }
             if !t.is_empty() {
                 frame_id = frame_id.wrapping_add(1);
                 blocks.extend(packetize(frame_id, SourceType::Info, t.as_bytes()));
@@ -1100,7 +1469,15 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             let block = &blocks[bi];
             if cfg.txconv {
                 seq = seq.wrapping_add(1);
-                convtx.push(seq, block);
+                if pass {
+                    // a camera frame cannot lose a block; the reader drops whole frames by age
+                    convtx.push_wait(seq, block);
+                } else {
+                    convtx.push(seq, block);
+                }
+                if cfg.dup && interf_on && Some(bi) == parity_idx {
+                    dup_q.push_back((Instant::now() + DUP_GAP, seq, *block));
+                }
                 // v37.1: load the ARQ cache on the conv path TOO. Before, only the legacy path
                 // (below) loaded it, so conv mode answered every NACK from an empty cache: nack > 0
                 // / retx == 0 FOR EVER, a block lost on air was never repaired. On the cable (loss
@@ -1356,9 +1733,27 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             log(&format!("LAT tx id={frame_id}"));
         }
 
+        // v40.45c: second copies whose time has come (same seq: the RX dedups)
+        if cfg.txconv {
+            while let Some((due, _, _)) = dup_q.front() {
+                if Instant::now() < *due {
+                    break;
+                }
+                let (_, dseq, dblk) = dup_q.pop_front().unwrap();
+                convtx.push(dseq, &dblk);
+                dups_sent += 1;
+            }
+            if !interf_on {
+                dup_q.clear();
+            }
+        }
         // --------------------------------------------- ARQ retransmits
         {
             let nack_rx = net.nacks.lock().unwrap();
+            // camera pass-through 18/9: a camera passed through pays more for a lost frame than an encoder does
+            // (no key frame on request, so the smear lasts until the camera's own), and a retry is
+            // one block: spend the larger budget on it as under interference.
+            let max_retx = if interf_on || pass { MAX_RETX_INTERF } else { MAX_RETX };
             while let Ok(nseq) = nack_rx.try_recv() {
                 nacks_handled += 1;
                 if !cfg.arq {
@@ -1374,7 +1769,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 if let Some(entry) = cache
                     .iter_mut()
                     .rev()
-                    .find(|e| e.seq & 0xFF == nseq & 0xFF && e.retx < MAX_RETX)
+                    .find(|e| e.seq & 0xFF == nseq & 0xFF && e.retx < max_retx)
                 {
                     entry.retx += 1;
                     if cfg.txconv {
@@ -1383,6 +1778,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         // the old rung.
                         convtx.push(entry.seq, &entry.block);
                         retransmits += 1;
+                        if cfg.dup && interf_on {
+                            dup_q.push_back((Instant::now() + DUP_GAP, entry.seq, entry.block));
+                        }
                         continue;
                     }
                     // 5G-style IR: same MCS, next redundancy version — the
@@ -1480,7 +1878,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         }
         status.tick(&format!(
             "status | src={:?} codec={:?} {}x{}@{:.0} vbr={}kbps idr={} mcs={} seq={} \
-             blocks/frame={} tx_fps={:.1} iq={:.1}Mbps nack={} retx={} \
+             blocks/frame={} tx_fps={:.1} iq={:.1}Mbps nack={} retx={} dup={} \
              fb_snr={:.1}dB fb_bler={:.1}% olla={:.1}dB dac_clip={}",
             cfg.source,
             cfg.codec,
@@ -1496,6 +1894,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             iq_mbps,
             nacks_handled,
             retransmits,
+            dups_sent,
             if fb_fresh { fb.snr_db } else { f32::NAN },
             if fb_fresh { fb.bler * 100.0 } else { f32::NAN },
             olla_margin_db,

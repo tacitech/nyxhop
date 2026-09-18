@@ -25,7 +25,7 @@ nyx-proto = { path = "../../../link/nyx-proto" }
 # The aircraft screen: the PC transmitter as a library. No webcam (nokhwa is Windows
 # only; the phone camera feeds the same slot from cam.rs), no PC modulator; the IP camera
 # (RTSP, pure Rust) comes along.
-nyx-tx = { path = "../nyx-tx", default-features = false, features = ["rtsp"] }
+nyx-tx = { path = "../nyx-tx", default-features = false, features = ["gui", "rtsp"] }
 log = "0.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

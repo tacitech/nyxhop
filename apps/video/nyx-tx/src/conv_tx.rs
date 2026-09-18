@@ -78,6 +78,14 @@ impl ConvTx {
         self.push_mcs(seq, block, None)
     }
 
+    /// camera pass-through: queue one block, waiting for room. A camera frame loses nothing
+    /// block by block; when the link cannot keep up the worker drops whole frames by age.
+    pub fn push_wait(&self, seq: u64, block: &[u8]) {
+        if self.tx.send((seq, block.to_vec(), None)).is_ok() {
+            CQ_IN.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// v36 simulcast: nhu push nhung GHIM MCS (lop nen di MCS0 cung).
     pub fn push_mcs(&self, seq: u64, block: &[u8], pin: Option<usize>) {
         if pin.is_some() {
@@ -173,21 +181,26 @@ fn send_paced(
         // 35 %: the queue fills because the transmit thread is pinned. Lowered to 0.4 ms (2500
         // f/s): still a stop against runaway, while the real cadence is handed back to the board's
         // txgap as originally designed.
-        c.air_gap_ms.max(0.4)
+        let floor_ms = shared.pace_floor_us.load(Ordering::Relaxed) as f32 / 1000.0;
+        c.air_gap_ms.max(floor_ms).max(0.4)
     };
     let want = Duration::from_micros((gap_ms * 1000.0 * nfrag.max(1) as f32) as u64);
     // Windows thread::sleep OVERSLEEPS by ~1.5 ms (timer resolution); measured on the cable: a 2 ms
     // floor gave a real period of 3.57 ms, flat at every txpace (the pacer's period). Remedy: sleep
     // coarsely (want - 2 ms), then SPIN for the last part for precision. One thread spinning at
     // most 2 ms per frame is cheap on a PC.
+    // Linux (the on-board camera app) sleeps to within a fraction of a
+    // millisecond, and a spinning thread there takes CPU from the radio daemon on the same
+    // two cores: only Windows spins.
+    let spin = if cfg!(windows) { Duration::from_millis(2) } else { Duration::ZERO };
     loop {
         let el = last.elapsed();
         if el >= want {
             break;
         }
         let left = want - el;
-        if left > Duration::from_millis(2) {
-            std::thread::sleep(left - Duration::from_millis(2));
+        if left > spin {
+            std::thread::sleep(left - spin);
         } else {
             std::hint::spin_loop();
         }

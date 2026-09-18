@@ -400,6 +400,19 @@ pub mod webcam {
 
 // ------------------------------------------------------------------ rtsp --
 
+/// One access unit exactly as the camera encoded it, in Annex B (SPS/PPS in front of a key
+/// frame that carries none), for a consumer that sends it on without decoding it.
+pub struct RtspAu {
+    pub data: Vec<u8>,
+    pub key: bool,
+    /// RTP time in 90 kHz ticks, unwrapped (retina's extended timestamp).
+    pub ts90k: i64,
+    pub at: std::time::Instant,
+}
+
+/// Access units waiting for the consumer before the client starts dropping them: 3 s at 30 fps.
+pub const RTSP_AU_QUEUE: usize = 90;
+
 /// Shared state between the RTSP client thread and its consumer: the URL to pull,
 /// whether anyone wants it, the latest decoded picture, and a status line.
 pub struct RtspShared {
@@ -409,6 +422,37 @@ pub struct RtspShared {
     /// The latest decoded picture; the consumer takes it (one encode per camera frame).
     pub frame: std::sync::Mutex<Option<RgbFrame>>,
     pub status: std::sync::Mutex<String>,
+    /// Pass-through: queue the camera's own access units in `aus` as well (camera pass-through, 17/9: the
+    /// board has no time to decode and re-encode, and the camera already did the encoding).
+    pub pass: std::sync::atomic::AtomicBool,
+    pub aus: std::sync::Mutex<std::collections::VecDeque<RtspAu>>,
+    pub aus_cv: std::sync::Condvar,
+    /// Raised when access units were thrown away before the consumer saw them (queue full,
+    /// reconnect): what follows cannot be decoded until the next key frame.
+    pub aus_broken: std::sync::atomic::AtomicBool,
+    /// The stream as measured over the last 2 s: width, height, fps x 10, kbps.
+    pub dims: std::sync::Mutex<(u32, u32)>,
+    pub fps_x10: std::sync::atomic::AtomicU32,
+    pub kbps: std::sync::atomic::AtomicU32,
+    /// Frames between the last two key frames (the camera's GOP), 0 until two were seen.
+    pub gop: std::sync::atomic::AtomicU32,
+    /// Every video frame received since start: a consumer tells a live camera from a silent
+    /// one by watching it move.
+    pub frames_total: std::sync::atomic::AtomicU64,
+    /// ONVIF (onvif.rs): the device service address (empty = port 80 of the RTSP host), whether
+    /// the camera's bitrate follows the link, and what the ONVIF thread knows.
+    pub onvif_url: std::sync::Mutex<String>,
+    pub onvif_adapt: std::sync::atomic::AtomicBool,
+    pub onvif_status: std::sync::Mutex<String>,
+    /// the camera answered and its H.264 profile was found
+    pub onvif_ok: std::sync::atomic::AtomicBool,
+    /// the bitrate limit the transmit worker wants the camera at (kbit/s, 0 = no wish)
+    pub want_kbps: std::sync::atomic::AtomicU32,
+    /// the bitrate limit the camera has now, and the one it had when first reached
+    pub onvif_kbps: std::sync::atomic::AtomicU32,
+    pub onvif_base_kbps: std::sync::atomic::AtomicU32,
+    /// what the camera accepts (0, 0 = it did not say)
+    pub onvif_range: std::sync::Mutex<(u32, u32)>,
 }
 
 impl RtspShared {
@@ -419,18 +463,61 @@ impl RtspShared {
             stop: std::sync::atomic::AtomicBool::new(false),
             frame: std::sync::Mutex::new(None),
             status: std::sync::Mutex::new(String::from("idle")),
+            pass: std::sync::atomic::AtomicBool::new(false),
+            aus: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            aus_cv: std::sync::Condvar::new(),
+            aus_broken: std::sync::atomic::AtomicBool::new(false),
+            dims: std::sync::Mutex::new((0, 0)),
+            fps_x10: std::sync::atomic::AtomicU32::new(0),
+            kbps: std::sync::atomic::AtomicU32::new(0),
+            gop: std::sync::atomic::AtomicU32::new(0),
+            frames_total: std::sync::atomic::AtomicU64::new(0),
+            onvif_url: std::sync::Mutex::new(String::new()),
+            onvif_adapt: std::sync::atomic::AtomicBool::new(false),
+            onvif_status: std::sync::Mutex::new(String::from("off")),
+            onvif_ok: std::sync::atomic::AtomicBool::new(false),
+            want_kbps: std::sync::atomic::AtomicU32::new(0),
+            onvif_kbps: std::sync::atomic::AtomicU32::new(0),
+            onvif_base_kbps: std::sync::atomic::AtomicU32::new(0),
+            onvif_range: std::sync::Mutex::new((0, 0)),
         })
     }
 
     pub fn status(&self) -> String {
         self.status.lock().unwrap().clone()
     }
+
+    /// Queue one access unit for the pass-through consumer. A full queue means the consumer
+    /// stalled: everything waiting is useless without its references, so it all goes.
+    pub fn push_au(&self, au: RtspAu) {
+        use std::sync::atomic::Ordering;
+        let mut q = self.aus.lock().unwrap();
+        if q.len() >= RTSP_AU_QUEUE {
+            q.clear();
+            self.aus_broken.store(true, Ordering::Relaxed);
+        }
+        q.push_back(au);
+        drop(q);
+        self.aus_cv.notify_one();
+    }
+
+    /// Forget the queue (stream restarted, pass-through switched off).
+    pub fn clear_aus(&self) {
+        use std::sync::atomic::Ordering;
+        let mut q = self.aus.lock().unwrap();
+        if !q.is_empty() {
+            q.clear();
+            self.aus_broken.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
-#[cfg(feature = "rtsp")]
+#[cfg(feature = "rtsp-client")]
 pub mod rtsp {
     //! RTSP client (retina) -> H.264 access units -> openh264 -> `RtspShared::frame`.
     //! Runs only while `wanted`; reconnects on its own after an error or a URL change.
+    //! With `pass` set the access units are also queued untouched (`RtspShared::push_au`);
+    //! a build without openh264 then does not decode at all.
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -439,7 +526,7 @@ pub mod rtsp {
     use retina::client::{Credentials, PlayOptions, SessionGroup, SessionOptions, SetupOptions, Transport};
     use retina::codec::{CodecItem, ParametersRef};
 
-    use super::RtspShared;
+    use super::{RtspAu, RtspShared};
     use crate::codec::VideoDecoder;
     use crate::logging::log;
 
@@ -641,12 +728,17 @@ pub mod rtsp {
             .map_err(|e| e.to_string())?;
         let mut demuxed = session.demuxed().map_err(|e| e.to_string())?;
         let mut dec = VideoDecoder::new();
+        // a new session: whatever the consumer still holds belongs to the old stream
+        shared.clear_aus();
+        if let Some(ParametersRef::Video(v)) = demuxed.streams()[vi].parameters() {
+            *shared.dims.lock().unwrap() = v.pixel_dimensions();
+        }
+        let mut since_key: u32 = 0;
         let (mut n_frames, mut n_pics, mut bytes) = (0u64, 0u64, 0u64);
         let (mut n_none, mut n_err) = (0u64, 0u64);
         // NYX_RTSP_DEBUG=<n>: log the first n access units (NAL types, decode result)
         let mut debug: u32 = std::env::var("NYX_RTSP_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut t_report = Instant::now();
-        let mut dims = (0usize, 0usize);
         let (mut waiting_key, mut key_logged) = (true, false);
         loop {
             if shared.stop.load(Ordering::Relaxed) || !shared.wanted.load(Ordering::Relaxed) {
@@ -665,6 +757,7 @@ pub mod rtsp {
             if f.has_new_parameters() {
                 if let Some(ParametersRef::Video(v)) = demuxed.streams()[f.stream_id()].parameters() {
                     sps_pps = avcc_to_annex_b(v.extra_data());
+                    *shared.dims.lock().unwrap() = v.pixel_dimensions();
                 }
             }
             let key = f.is_random_access_point();
@@ -680,7 +773,31 @@ pub mod rtsp {
             }
             n_frames += 1;
             bytes += f.data().len() as u64;
+            shared.frames_total.fetch_add(1, Ordering::Relaxed);
+            if key {
+                if since_key > 0 {
+                    shared.gop.store(since_key, Ordering::Relaxed);
+                }
+                since_key = 0;
+            }
+            since_key = since_key.saturating_add(1);
             let au = to_annex_b(f.data(), key, &sps_pps);
+            let pass = shared.pass.load(Ordering::Relaxed);
+            if pass {
+                shared.push_au(RtspAu {
+                    data: au.clone(),
+                    key,
+                    ts90k: f.timestamp().timestamp(),
+                    at: Instant::now(),
+                });
+            }
+            // A build without a decoder only passes the stream on; the PC build still decodes it
+            // for the preview.
+            if pass && !cfg!(feature = "h264") {
+                n_none += 1;
+                report(shared, &mut t_report, dims_now(shared), &mut n_frames, &mut n_pics, &mut n_none, &mut n_err, &mut bytes);
+                continue;
+            }
             let r = dec.decode_checked(&au);
             if debug > 0 {
                 debug -= 1;
@@ -696,29 +813,59 @@ pub mod rtsp {
             match r {
                 Ok(Some(rgb)) => {
                     n_pics += 1;
-                    dims = (rgb.width, rgb.height);
                     *shared.frame.lock().unwrap() = Some(rgb);
                 }
                 Ok(None) => n_none += 1,
                 Err(_) => n_err += 1,
             }
-            let dt = t_report.elapsed();
-            if dt >= Duration::from_secs(2) {
-                set_status(shared, format!(
-                    "streaming {}x{} {:.0} fps {:.0} kbps ({} frames: {} pictures, {} no-picture, {} rejected)",
-                    dims.0, dims.1,
-                    n_pics as f64 / dt.as_secs_f64(),
-                    bytes as f64 * 8.0 / dt.as_secs_f64() / 1000.0,
-                    n_frames, n_pics, n_none, n_err,
-                ));
-                n_frames = 0;
-                n_pics = 0;
-                n_none = 0;
-                n_err = 0;
-                bytes = 0;
-                t_report = Instant::now();
-            }
+            report(shared, &mut t_report, dims_now(shared), &mut n_frames, &mut n_pics, &mut n_none, &mut n_err, &mut bytes);
         }
+    }
+
+    fn dims_now(shared: &RtspShared) -> (u32, u32) {
+        *shared.dims.lock().unwrap()
+    }
+
+    /// Every 2 s: the status line and the stream numbers the control screens show.
+    #[allow(clippy::too_many_arguments)]
+    fn report(
+        shared: &RtspShared,
+        t_report: &mut Instant,
+        dims: (u32, u32),
+        n_frames: &mut u64,
+        n_pics: &mut u64,
+        n_none: &mut u64,
+        n_err: &mut u64,
+        bytes: &mut u64,
+    ) {
+        let dt = t_report.elapsed();
+        if dt < Duration::from_secs(2) {
+            return;
+        }
+        let secs = dt.as_secs_f64();
+        let fps = *n_frames as f64 / secs;
+        let kbps = *bytes as f64 * 8.0 / secs / 1000.0;
+        shared.fps_x10.store((fps * 10.0).round() as u32, Ordering::Relaxed);
+        shared.kbps.store(kbps.round() as u32, Ordering::Relaxed);
+        let gop = shared.gop.load(Ordering::Relaxed);
+        let gop_txt = if gop > 0 { format!(", key frame every {gop}") } else { String::new() };
+        if shared.pass.load(Ordering::Relaxed) {
+            set_status(shared, format!(
+                "streaming {}x{} {:.0} fps {:.0} kbps{gop_txt} (passed on as the camera sent it)",
+                dims.0, dims.1, fps, kbps,
+            ));
+        } else {
+            set_status(shared, format!(
+                "streaming {}x{} {:.0} fps {:.0} kbps{gop_txt} ({} frames: {} pictures, {} no-picture, {} rejected)",
+                dims.0, dims.1, fps, kbps, n_frames, n_pics, n_none, n_err,
+            ));
+        }
+        *n_frames = 0;
+        *n_pics = 0;
+        *n_none = 0;
+        *n_err = 0;
+        *bytes = 0;
+        *t_report = Instant::now();
     }
 }
 

@@ -139,6 +139,16 @@ camera's URL, `rtsp://user:password@192.168.1.64:554/stream1` for instance (the 
 path are in the camera's manual; a 640x480 sub-stream is the right size). The camera's picture
 is decoded and sent on like the webcam's, so the link's rate control applies to it.
 
+Two settings underneath change how an IP camera is carried. **Send the camera's H.264 as it is**
+passes the camera's own pictures on untouched: nothing is decoded and re-encoded, which takes
+about 30 ms off the delay and leaves the picture exactly as the camera made it. Nothing on this
+side can then make the stream smaller, so **Camera follows the link (ONVIF)** does it at the
+source: over ONVIF, with the user and password of the RTSP URL, the app moves the camera's own
+bitrate limit up and down with the link and tells you what it asked for. Leave *ONVIF address*
+empty unless the camera answers on another address or port, and set *Ceiling* to hold it below a
+bitrate of your choosing (0 keeps the limit the camera already had). A camera that does not
+answer ONVIF simply keeps its own bitrate, and the reading says so.
+
 **The Android app** is the same thing on a phone: it starts on the same choice, Ground station
 or Aircraft, with the board's address, puts the board into the role and shows that end's
 screen. As the ground end it shows the video; as the aircraft end it sends the phone's own
@@ -163,7 +173,8 @@ key on either end.
 Everything else is in the apps' settings drawer (tap the video or press `H`):
 
 * **Video** (aircraft): USB camera, IP camera (RTSP, a URL) or test pattern, resolution, fps,
-  quality, codec, the simulcast base layer for reach through fades.
+  quality, codec, the simulcast base layer for reach through fades. An IP camera adds the
+  pass-through and ONVIF settings above.
 * **Channel**: your tables. *Video MHz* and *Control MHz* take any channels from 70 to 6000 MHz,
   comma separated; **Apply** sends them to the board, which passes them to the other end over
   the air. *Auto* holds the best channel and re-scans when it degrades; *Off* pins one channel.
@@ -175,8 +186,8 @@ Everything else is in the apps' settings drawer (tap the video or press `H`):
   leaving the picture and the status pills. `H` opens and closes the drawer.
 
 The headless transmitting app takes the same settings on its console (TCP 7201 by default):
-`set source webcam`, `set source rtsp` with `set rtsp rtsp://...`, `set fps 20`,
-`set quality 60`, `stats`; a `nyx-tx.cfg` next to the program holds them across starts.
+`set source webcam`, `set source rtsp` with `set rtsp rtsp://...`, `set pass 1`,
+`set camadapt 1`, `set onvif auto`, `set cammax 2000`, `set fps 20`, `set quality 60`, `stats`; a `nyx-tx.cfg` next to the program holds them across starts.
 
 **Telemetry and data**: the link also carries a two-way UDP pipe. Send datagrams into `nyx-rx`
 UDP 14555 and they come out of `nyx-tx` UDP 14556 (commands, RC); send into `nyx-tx` UDP 14557

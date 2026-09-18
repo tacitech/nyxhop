@@ -166,6 +166,12 @@ fn connect_loop(shared: Arc<Shared>, net: Arc<Net>, nack_tx: Sender<u64>) {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
+        // the host process has nothing to send (on-board camera app: receiving end, or the camera is silent)
+        if shared.standby.load(Ordering::Relaxed) || shared.port_off.load(Ordering::Relaxed) {
+            shared.connected.store(false, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(300));
+            continue;
+        }
         let addr = shared.channel_addr.lock().unwrap().clone();
         match TcpStream::connect(&addr) {
             Ok(stream) => {
@@ -228,6 +234,9 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
             }
             Ok(Msg::Nack { seq }) => {
                 let _ = nack_tx.send(seq);
+                // the pass-through worker sleeps on this; a retransmission must not wait for
+                // the next camera frame
+                shared.rtsp.aus_cv.notify_all();
             }
             Ok(Msg::UserText { text }) => {
                 nyx_common::logging::log(&format!("MSG received: {text}"));

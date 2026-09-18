@@ -11,7 +11,12 @@ h264 = ["dep:openh264", "dep:openh264-sys2"]
 webcam = ["dep:nokhwa"]
 # IP camera over RTSP (retina: pure Rust, so it builds for Android too). Decodes with
 # openh264, hence h264.
-rtsp = ["h264", "dep:retina", "dep:tokio", "dep:futures", "dep:url"]
+rtsp = ["h264", "rtsp-client"]
+# The RTSP client alone: the camera's own access units, passed on without decoding (the
+# on-board camera app has no H.264 codec in its build).
+rtsp-client = ["dep:retina", "dep:tokio", "dep:futures", "dep:url"]
+# ONVIF client: the pass-through camera's bitrate follows the link (no dependencies).
+onvif = []
 
 [dependencies]
 egui = "0.35.0"

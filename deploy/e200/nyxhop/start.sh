@@ -5,7 +5,8 @@
 #   1. read the role from nyx-role (tx|rx|A|B)
 #   2. wait for the AD9361 phy, then set manual gain before the daemon starts
 #   3. find the uio devices for the DMA and the capture buffer
-#   4. start the daemon, logging to /tmp/nyxhop/radio.out
+#   4. start the daemon, logging to /tmp/nyxhop/radio.out; extra daemon flags (one line,
+#      e.g. --tx-ring 32768 for a bench sweep) are read from nyx-args
 #   5. apply nyx-radio.cfg through the console on port 7202
 D=/tmp/nyxhop
 LOG=$D/radio.out
@@ -13,6 +14,8 @@ DA="--fir $D/fir10MHz.ftr --mod-base 0x43C30000 --demod-base 0x43C40000 --trig-b
 # The licence hour record lives in the last 64 KB sector of the QSPI Linux partition; it is
 # named explicitly so the daemon may erase what is there. This FPGA design has no hardware
 # AGC block, so no --agc-base is passed: the daemon uses its software AGC instead.
+# Extra daemon flags come from nyx-args (one line, '#' comments allowed), appended last.
+[ -f "$D/nyx-args" ] && DA="$DA $(sed -e 's/#.*//' "$D/nyx-args" | tr '\n' ' ')"
 
 log() { echo "nyxhop: $*"; logger -t nyxhop "$*" 2>/dev/null; }
 

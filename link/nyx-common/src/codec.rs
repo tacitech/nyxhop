@@ -281,11 +281,26 @@ impl VideoEncoder {
 
 pub struct VideoDecoder {
     dec: Option<Decoder>,
+    /// 18/9: the concealing decoder instead of the crate's strict one (see `Conceal`).
+    conceal: Option<Conceal>,
 }
 
 impl VideoDecoder {
+    /// The strict decoder: a picture whose reference is missing is refused, and nothing is shown
+    /// until the next key frame.
     pub fn new() -> Self {
-        VideoDecoder { dec: Decoder::new().ok() }
+        VideoDecoder { dec: Decoder::new().ok(), conceal: None }
+    }
+
+    /// The concealing decoder: a picture whose reference is missing is still built, from what the
+    /// decoder has. The picture smears where the lost frame was and cleans up at the next key
+    /// frame, instead of freezing until then.
+    ///
+    /// camera pass-through 18/9: what this is for. A camera passed through cannot be asked for a key frame, so
+    /// one lost frame froze the picture for up to a whole key-frame interval (measured: every P
+    /// frame refused for 1.5-2 s after one hole, 2 s of still picture at the ground).
+    pub fn new_concealing() -> Self {
+        VideoDecoder { dec: None, conceal: Conceal::new().ok() }
     }
 
     /// Decode one access unit; None until a decodable picture (e.g. while
@@ -297,6 +312,9 @@ impl VideoDecoder {
     /// `decode` that says why there was no picture: Ok(None) = the decoder wants more
     /// data, Err = the bitstream was rejected (it then waits for the next IDR).
     pub fn decode_checked(&mut self, data: &[u8]) -> Result<Option<RgbFrame>, String> {
+        if let Some(c) = &mut self.conceal {
+            return c.decode(data);
+        }
         if self.dec.is_none() {
             self.dec = Decoder::new().ok();
         }
@@ -314,6 +332,97 @@ impl VideoDecoder {
     }
 }
 
+/// OpenH264 with error concealment on. The openh264 crate builds its decoder with concealment
+/// DISABLED and exposes neither the setting nor the decoder pointer, so this drives the C API
+/// itself (openh264-sys2): create, initialise with `eEcActiveIdc`, decode, convert.
+struct Conceal {
+    dec: *mut openh264_sys2::ISVCDecoder,
+}
+
+// The decoder is used from one thread at a time (each consumer owns its VideoDecoder); the raw
+// pointer is what OpenH264 hands out and carries no thread affinity of its own.
+unsafe impl Send for Conceal {}
+
+impl Conceal {
+    fn new() -> Result<Conceal, String> {
+        use openh264_sys2::{
+            ERROR_CON_SLICE_COPY_CROSS_IDR_FREEZE_RES_CHANGE, SDecodingParam, SVideoProperty, VIDEO_BITSTREAM_DEFAULT,
+            source::APILoader,
+        };
+        let mut dec: *mut openh264_sys2::ISVCDecoder = std::ptr::null_mut();
+        // SAFETY: the C API fills `dec` on success; every call below goes through its vtable,
+        // which is non-null once the decoder exists.
+        unsafe {
+            if APILoader::WelsCreateDecoder(&mut dec) != 0 || dec.is_null() {
+                return Err("WelsCreateDecoder failed".into());
+            }
+            let param = SDecodingParam {
+                pFileNameRestructed: std::ptr::null_mut(),
+                uiCpuLoad: 0,
+                uiTargetDqLayer: 0,
+                eEcActiveIdc: ERROR_CON_SLICE_COPY_CROSS_IDR_FREEZE_RES_CHANGE,
+                bParseOnly: false,
+                sVideoProperty: SVideoProperty {
+                    size: std::mem::size_of::<SVideoProperty>() as u32,
+                    eVideoBsType: VIDEO_BITSTREAM_DEFAULT,
+                },
+            };
+            let init = (**dec).Initialize.ok_or("decoder without Initialize")?;
+            if init(dec, &param) != 0 {
+                APILoader::WelsDestroyDecoder(dec);
+                return Err("decoder Initialize failed".into());
+            }
+        }
+        log("h264 decoder: error concealment on (a lost reference smears instead of freezing)");
+        Ok(Conceal { dec })
+    }
+
+    fn decode(&mut self, data: &[u8]) -> Result<Option<RgbFrame>, String> {
+        use openh264_sys2::SBufferInfo;
+        let mut info: SBufferInfo = unsafe { std::mem::zeroed() };
+        let mut dst: [*mut u8; 3] = [std::ptr::null_mut(); 3];
+        // SAFETY: `data` is a valid slice; the decoder writes pointers into its own picture buffer
+        // (valid until the next decode call) and the sizes into `info`.
+        let rc = unsafe {
+            let f = (**self.dec).DecodeFrameNoDelay.ok_or("decoder without DecodeFrameNoDelay")?;
+            f(self.dec, data.as_ptr(), data.len() as i32, dst.as_mut_ptr(), &mut info)
+        };
+        if info.iBufferStatus != 1 {
+            // no picture: either it wants more data (rc == 0) or it could not use this one
+            return if rc == 0 { Ok(None) } else { Err(format!("decode state {rc}")) };
+        }
+        // SAFETY: iBufferStatus == 1 means the three planes and the sizes below are filled in.
+        let buf = unsafe { info.UsrData.sSystemBuffer };
+        let (w, h) = (buf.iWidth.max(0) as usize, buf.iHeight.max(0) as usize);
+        let (ys, uvs) = (buf.iStride[0].max(0) as usize, buf.iStride[1].max(0) as usize);
+        if w == 0 || h == 0 || ys < w || uvs * 2 < w || dst[0].is_null() || dst[1].is_null() || dst[2].is_null() {
+            return Err("decoded picture of odd shape".into());
+        }
+        // SAFETY: the planes hold at least stride x height (chroma: stride x height/2) bytes.
+        let (y, u, v) = unsafe {
+            (
+                std::slice::from_raw_parts(dst[0], ys * h),
+                std::slice::from_raw_parts(dst[1], uvs * h.div_ceil(2)),
+                std::slice::from_raw_parts(dst[2], uvs * h.div_ceil(2)),
+            )
+        };
+        let p = crate::source::Yuv420 { y, y_stride: ys, u, v, uv_stride: uvs, uv_pixel_stride: 1 };
+        Ok(Some(crate::source::yuv420_to_rgb(&p, w, h, false)))
+    }
+}
+
+impl Drop for Conceal {
+    fn drop(&mut self) {
+        // SAFETY: the decoder was created by the same API and is not used after this.
+        unsafe {
+            if let Some(uninit) = (**self.dec).Uninitialize {
+                uninit(self.dec);
+            }
+            openh264_sys2::source::APILoader::WelsDestroyDecoder(self.dec);
+        }
+    }
+}
+
 impl Default for VideoDecoder {
     fn default() -> Self {
         Self::new()
@@ -324,6 +433,44 @@ impl Default for VideoDecoder {
 mod tests {
     use super::*;
     use crate::source::PatternGen;
+
+    /// One frame lost: the strict decoder shows nothing until the next key frame, the concealing
+    /// one keeps producing pictures. This is the whole point of `new_concealing` (camera pass-through, 18/9: a
+    /// camera passed through cannot be asked for a key frame, so a hole froze the picture for up
+    /// to a key-frame interval).
+    #[test]
+    fn concealing_decoder_keeps_pictures_after_a_lost_frame() {
+        let mut pattern = PatternGen::new();
+        let mut enc = VideoEncoder::new_with_intra(320, 240, 600_000, 30.0, 300).expect("encoder");
+        let mut frames = Vec::new();
+        for _ in 0..24 {
+            let f = pattern.render(320, 240);
+            let au = enc.encode(&f, false);
+            if !au.is_empty() {
+                frames.push(au);
+            }
+        }
+        assert!(frames.len() > 12, "encoder produced {} frames", frames.len());
+        let feed = |dec: &mut VideoDecoder| {
+            let mut pics = 0;
+            for (i, au) in frames.iter().enumerate() {
+                if i == 8 {
+                    continue; // the frame lost on air
+                }
+                if dec.decode_checked(au).ok().flatten().is_some() && i > 8 {
+                    pics += 1;
+                }
+            }
+            pics
+        };
+        let strict = feed(&mut VideoDecoder::new());
+        let concealing = feed(&mut VideoDecoder::new_concealing());
+        let after = frames.len() - 9;
+        assert!(
+            concealing > strict && concealing * 2 >= after,
+            "after the hole: concealing {concealing}, strict {strict}, of {after} frames"
+        );
+    }
 
     #[test]
     fn h264_roundtrip_and_compression() {

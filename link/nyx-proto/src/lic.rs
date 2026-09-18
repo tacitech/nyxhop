@@ -17,7 +17,7 @@ pub const TIER_HOBBY: u8 = 0;
 pub const TIER_PRO: u8 = 1;
 pub const TIER_OEM: u8 = 2;
 /// v40.38: the gate generation baked into the bitstreams that are out now (`VER` in
-/// fpga/rtl/nyx_lic.v). Bump it together with VER - only for a PAID feature generation;
+/// the gate in the board's programmable logic). Bump it together with VER - only for a PAID feature generation;
 /// bug-fix releases keep VER so every licence of the generation loads them.
 pub const GATE_VER: u8 = 1;
 /// v40.38: a paid licence covers this many generations beyond the current one.

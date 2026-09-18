@@ -175,6 +175,26 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
     tapped
 }
 
+/// v40.46 latency test: the millisecond counter at the bottom of the video with a Freeze /
+/// Live button (see `stamp`); true when the button was tapped.
+pub fn counter_box(ui: &mut egui::Ui, text: &str, frozen: bool) -> bool {
+    let rect = ui.max_rect();
+    let p = ui.painter().clone();
+    let g = p.layout_no_wrap(text.to_string(), egui::FontId::monospace(30.0), if frozen { th::WARN } else { th::TXT });
+    let btn = egui::vec2(120.0, g.size().y + 4.0);
+    let size = egui::vec2(g.size().x + btn.x + 34.0, g.size().y + 16.0);
+    let r = egui::Rect::from_min_size(egui::pos2(rect.center().x - size.x / 2.0, rect.bottom() - 16.0 - size.y), size);
+    p.rect_filled(r, 9.0, Color32::from_black_alpha(170));
+    p.galley(egui::pos2(r.min.x + 12.0, r.min.y + 8.0), g, Color32::WHITE);
+    let b = egui::Rect::from_min_size(egui::pos2(r.max.x - btn.x - 10.0, r.min.y + 6.0), btn);
+    let resp = ui.interact(b, ui.id().with("freeze"), egui::Sense::click());
+    let fill = if frozen { th::WARN.gamma_multiply(0.35) } else { Color32::from_white_alpha(if resp.hovered() { 40 } else { 22 }) };
+    p.rect_filled(b, 8.0, fill);
+    p.text(b.center(), egui::Align2::CENTER_CENTER, if frozen { "Live (F)" } else { "Freeze (F)" },
+           egui::FontId::proportional(16.0), th::TXT);
+    resp.clicked() || (resp.drag_stopped() && resp.hovered())
+}
+
 // ---------------------------------------------------------------- drawer
 
 /// Video + drawer layout. Wide (>= 900 px): the drawer is a right column and the

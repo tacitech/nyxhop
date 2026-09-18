@@ -9,7 +9,8 @@ Run by systemd (nyxhop.service). It:
      competes for the SPI bus and the receiver does not sit at maximum gain
   3. tim uio "dma" (--uio) va buffer capture: /dev/udmabuf0 (module u-dma-buf)
      or the uio "capbuf" device (reserved memory, no module needed)
-  4. starts the daemon, logging to /home/root/radio.out
+  4. starts the daemon, logging to /home/root/radio.out; extra daemon flags (one line,
+     e.g. `--tx-ring 32768` for a bench sweep) are read from /home/root/nyx-args
   5. applies /home/root/nyx-radio.cfg through the console on port 7202, retrying each line
   6. o lai giu daemon (systemd Restart=on-failure keo ca cum len khi chet)
 """
@@ -22,6 +23,7 @@ import time
 
 HOME = "/home/root"
 CFG = f"{HOME}/nyx-radio.cfg"
+ARGS_FILE = f"{HOME}/nyx-args"
 ROLE_FILE = f"{HOME}/nyx-role"
 DAEMON = f"{HOME}/nyx-radio-node"
 LOG = f"{HOME}/radio.out"
@@ -151,6 +153,10 @@ def main():
         log("neither /dev/udmabuf0 nor uio 'capbuf' - no capture buffer")
         sys.exit(1)
     args = f"--uio {uio['dma']} --udmabuf {capbuf} " + BASE_ARGS.format(home=HOME)
+    if os.path.exists(ARGS_FILE):
+        extra = " ".join(l.split("#")[0].strip() for l in open(ARGS_FILE, encoding="utf-8", errors="replace"))
+        if extra.strip():
+            args += " " + extra.strip()
     log(f"daemon: {DAEMON} {args}")
 
     subprocess.run(["killall", "nyx-radio-node"], capture_output=True)

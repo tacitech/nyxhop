@@ -4,15 +4,22 @@
 pub mod boardctl;
 #[cfg(feature = "h264")]
 pub mod codec;
+#[cfg(not(feature = "h264"))]
+#[path = "codec_none.rs"]
+pub mod codec;
 pub mod control;
 /// v40.33 licence rows shared by the apps.
 pub mod licpanel;
 /// v40.34 shared touch-first user interface (HUD, drawer, sections).
 pub mod ui;
 pub mod logging;
+#[cfg(feature = "onvif")]
+pub mod onvif;
 pub mod plots;
 pub mod rng;
 pub mod source;
+/// v40.46 latency test: the millisecond counter (burned in at the aircraft, shown at the ground).
+pub mod stamp;
 /// The start screen of the combined apps (which end, which board, put it into the role).
 pub mod start;
 pub mod theme;

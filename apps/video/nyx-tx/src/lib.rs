@@ -19,9 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use nyx_common::logging::{self, log};
+#[cfg(feature = "gui")]
+use nyx_common::logging;
+use nyx_common::logging::log;
 use nyx_common::source::{SourceKind, WebcamShared};
-use nyx_common::{RgbFrame, to_color_image};
+use nyx_common::RgbFrame;
+#[cfg(feature = "gui")]
+use nyx_common::to_color_image;
 use nyx_common::Opts;
 use nyx_proto::{DEFAULT_TX_PORT, Mcs};
 
@@ -59,6 +63,20 @@ pub struct TxConfig {
     pub source: SourceKind,
     /// v40.45: the IP camera, as `rtsp://user:pass@host/path` (SourceKind::Rtsp).
     pub rtsp_url: String,
+    /// camera pass-through 17/9: send the camera's own H.264 as it is (no decode, no re-encode): the
+    /// camera's bitrate and key-frame interval rule, the receiver's key-frame requests
+    /// cannot be served, and a frame that does not fit the link is dropped whole up to the
+    /// next key frame. `set pass 0|1`. The only H.264 there is in a build without openh264.
+    pub rtsp_pass: bool,
+    /// camera pass-through 17/9: in pass-through, set the camera's bitrate limit over ONVIF so the stream
+    /// fits the link (`set camadapt 0|1`). The camera cannot be thinned on the way; without this
+    /// a camera above what the air carries loses whole runs of frames.
+    pub cam_adapt: bool,
+    /// The camera's ONVIF device service; empty = port 80 of the RTSP host (`set onvif <url>|auto`).
+    pub onvif_url: String,
+    /// The highest bitrate the camera is taken to (kbit/s); 0 = what the camera had when first
+    /// reached (`set cammax <kbps>`).
+    pub cam_max_kbps: u32,
     pub codec: Codec,
     pub width: usize,
     pub height: usize,
@@ -119,6 +137,12 @@ pub struct TxConfig {
     /// rebuilds it, NO IDR request (an IDR = a bloated frame = congestion = stutter). Overhead 1/N.
     /// `set fec 0|1`.
     pub fec: bool,
+    /// v40.45c: under interference send a second copy of every parity block and every
+    /// retransmission 12 ms later (`set dup 0|1`). OFF by default: A/B on 2437 MHz next to
+    /// WiFi (alternating minutes, MCS5 held) showed video loss tracking the PL block error
+    /// rate the same way with or without it (1.9 % vs 1.4 %, 26 % vs 8 % in a heavy minute),
+    /// while it added 35-60 frames/s of air. ARQ already repairs what a second copy would.
+    pub dup: bool,
     /// v36 simulcast base layer, ON BY DEFAULT. Measured on the SAME ruler, disp_fps (pictures
     /// actually shown, not the flattering rx_fps): ON 72 % of samples with a picture vs OFF 59 %;
     /// the base layer carries 22 % of the samples at the fade edge. (The "100 %" of v35.1 the day
@@ -129,6 +153,9 @@ pub struct TxConfig {
     /// x2 REPEAT STEP (+3 dB reach: the rescue layer goes 3 dB further, at twice the airtime, ~150
     /// f/s at 15 fps). `set basemcs 0|6`.
     pub base_mcs: usize,
+    /// v40.46 latency test: burn the millisecond counter into the picture (nyx_common::stamp).
+    /// `set stamp 0|1`.
+    pub stamp: bool,
 }
 
 impl Default for TxConfig {
@@ -139,6 +166,10 @@ impl Default for TxConfig {
             // to the pattern when no camera opens.
             source: if cfg!(feature = "webcam") { SourceKind::Webcam } else { SourceKind::Pattern },
             rtsp_url: String::new(),
+            rtsp_pass: !cfg!(feature = "h264"),
+            cam_adapt: true,
+            onvif_url: String::new(),
+            cam_max_kbps: 0,
             codec: Codec::H264,
             // v40.44z: the bench setting; at 480x360 the same camera and link gave 20 fps and a
             // display that dipped to 10, at 640x480 a steady 30 (10/9, public build, no cfg).
@@ -179,10 +210,12 @@ impl Default for TxConfig {
             pl_syms: 16,
             rep_count: 1, // default off (reactive ARQ only)
             fec: true,
+            dup: false,
             // v40.44z: off by default (user, 10/9): the base layer costs ~30 ms of glass-to-glass
             // latency (61 vs 28 ms measured); turn it on for reach through fades.
             simulcast: false,
             base_mcs: 0, // default MCS0; `set basemcs 6` for the +3 dB lifebuoy
+            stamp: false,
         }
     }
 }
@@ -226,6 +259,18 @@ pub struct TxStats {
     pub rc_blocks_frame: f32,
     pub rc_blocks_sent: f32,
     pub rc_src_bytes: f32,
+    /// camera pass-through: the camera stream as it is sent, and what did not go
+    pub pass_fps: f32,
+    pub pass_kbps: f32,
+    /// access units dropped because they waited too long (the camera outran the link)
+    pub pass_drop_late: u64,
+    /// access units dropped because an earlier one was lost (they cannot be decoded until the
+    /// next key frame)
+    pub pass_drop_nokey: u64,
+    /// key-frame requests from the receiver that the camera stream could not answer
+    pub pass_idr_req: u64,
+    /// what the air carries at the current rung (bits of video per second)
+    pub link_cap_bps: f32,
 }
 
 pub struct Shared {
@@ -264,36 +309,74 @@ pub struct Shared {
     /// v40.33: the daemon's licence state (lic_* lines) - sent in-band every few
     /// seconds so the app on the receive end sees this board's DNA and state.
     pub lic_info: Mutex<String>,
+    /// The config file read at start; `save` writes the running settings back to it.
+    pub cfg_path: Mutex<String>,
+    /// Shell command run after `save` (`{path}` = the file), for a board that runs from RAM
+    /// and keeps its files on the SD card (the E200). Empty = none.
+    pub save_hook: Mutex<String>,
+    /// camera pass-through 17/9, set by the host process: `standby` = send nothing and pull no camera (the
+    /// board is the receiving end); `port_off` = leave the daemon's transmit port to someone
+    /// else (the camera is silent, a PC app may send instead). See `set_port_off`.
+    pub standby: AtomicBool,
+    pub port_off: AtomicBool,
+    /// One line on what the host process is doing, shown as `mode=` in `stats`.
+    pub mode_note: Mutex<String>,
+    /// Slowest spacing the conv transmit path may use between air frames (µs, 0 = only the
+    /// config's gap). camera pass-through 17/9: the board app raises it while the daemon's raw queue fills, so
+    /// a camera stream that outruns the air backs up here, where whole frames are dropped,
+    /// instead of in the daemon, which drops single blocks and breaks many frames.
+    pub pace_floor_us: AtomicU64,
+}
+
+/// Let go of the daemon's transmit port (or take it again). The daemon serves one sender at a
+/// time, so a sender with nothing to send must close its connection, not just go quiet.
+pub fn set_port_off(shared: &Shared, off: bool) {
+    shared.port_off.store(off, Ordering::Relaxed);
+    if off {
+        if let Some(s) = shared.ctl_stream.lock().unwrap().take() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+/// No window: the threads `setup` started do all the work, this only logs a line every 2 s
+/// until `shutdown`. Control through the `--ctl` console.
+pub fn run_headless(shared: &Shared) {
+    log("headless: no window opened; control through --ctl");
+    while !shared.stop.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let s = shared.stats.lock().unwrap().clone();
+        let fb = shared.feedback.lock().unwrap().clone();
+        let c = shared.config.lock().unwrap().source;
+        log(&format!(
+            "hl src={:?} mcs={:?} tx_fps={:.1} vbr={}kbps fb_snr={:.1} fb_bler={:.3} \
+             blk_ps={:.1} cq={}/{}/{} conn={} pass_drop={}/{} idr_req={}",
+            c,
+            s.active_mcs.map(|m| m.index()),
+            s.tx_fps,
+            s.video_bitrate_bps / 1000,
+            fb.snr_db,
+            fb.bler,
+            s.rc_blocks_ps,
+            crate::conv_tx::CQ_IN.load(Ordering::Relaxed),
+            crate::conv_tx::CQ_OUT.load(Ordering::Relaxed),
+            crate::conv_tx::CQ_DROP.load(Ordering::Relaxed),
+            shared.connected.load(Ordering::Relaxed),
+            s.pass_drop_late,
+            s.pass_drop_nokey,
+            s.pass_idr_req,
+        ));
+    }
 }
 
 /// The standalone app: options from the command line, a window of its own (or
 /// `--headless`).
+#[cfg(feature = "gui")]
 pub fn run(opts: Opts) -> eframe::Result {
     logging::init("tx");
     let shared = setup(&opts);
     if opts.flag("--headless") {
-        log("headless: no window opened; control through --ctl");
-        while !shared.stop.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let s = shared.stats.lock().unwrap().clone();
-            let fb = shared.feedback.lock().unwrap().clone();
-            let c = shared.config.lock().unwrap().source;
-            log(&format!(
-                "hl src={:?} mcs={:?} tx_fps={:.1} vbr={}kbps fb_snr={:.1} \
-                 fb_bler={:.3} blk_ps={:.1} cq={}/{}/{} conn={}",
-                c,
-                s.active_mcs.map(|m| m.index()),
-                s.tx_fps,
-                s.video_bitrate_bps / 1000,
-                fb.snr_db,
-                fb.bler,
-                s.rc_blocks_ps,
-                crate::conv_tx::CQ_IN.load(Ordering::Relaxed),
-                crate::conv_tx::CQ_OUT.load(Ordering::Relaxed),
-                crate::conv_tx::CQ_DROP.load(Ordering::Relaxed),
-                shared.connected.load(Ordering::Relaxed),
-            ));
-        }
+        run_headless(&shared);
         return Ok(());
     }
 
@@ -373,6 +456,13 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         text_out: Mutex::new(Vec::new()),
         tlm_tx_q: Mutex::new(Vec::new()),
         lic_info: Mutex::new(String::new()),
+        cfg_path: Mutex::new(String::new()),
+        save_hook: Mutex::new(String::new()),
+        // `--standby`: start with nothing sent until the host process says otherwise
+        standby: AtomicBool::new(opts.flag("--standby")),
+        port_off: AtomicBool::new(opts.flag("--standby")),
+        mode_note: Mutex::new(String::new()),
+        pace_floor_us: AtomicU64::new(0),
     });
 
     // v37.3: load the config file BEFORE spawning the worker, so the worker uses the right config
@@ -400,11 +490,14 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         }
     };
     load_config_file(&shared, &cfg_path);
+    *shared.cfg_path.lock().unwrap() = cfg_path.clone();
 
     #[cfg(feature = "webcam")]
     nyx_common::source::webcam::spawn(shared.webcam.clone());
-    #[cfg(feature = "rtsp")]
+    #[cfg(feature = "rtsp-client")]
     nyx_common::source::rtsp::spawn(shared.rtsp.clone());
+    #[cfg(feature = "onvif")]
+    nyx_common::onvif::spawn(shared.rtsp.clone());
 
     let net = net::spawn(shared.clone());
     worker::spawn(shared.clone(), net);
@@ -496,7 +589,9 @@ fn apply_set(c: &mut TxConfig, key: &str, val: &str) -> Result<(), String> {
             .map(|v| c.rep_count = v.clamp(1, 8))
             .is_ok(),
         "fec" => parse_bool(val).map(|v| c.fec = v).is_some(),
+        "dup" => parse_bool(val).map(|v| c.dup = v).is_some(),
         "simulcast" => parse_bool(val).map(|v| c.simulcast = v).is_some(),
+        "stamp" => parse_bool(val).map(|v| c.stamp = v).is_some(),
         "basemcs" => val
             .parse::<usize>()
             .ok()
@@ -527,6 +622,14 @@ fn apply_set(c: &mut TxConfig, key: &str, val: &str) -> Result<(), String> {
             .map(|m| c.mcs = m)
             .is_some(),
         "rtsp" => { c.rtsp_url = val.trim().to_string(); true }
+        "pass" => parse_bool(val).map(|v| c.rtsp_pass = v).is_some(),
+        "camadapt" => parse_bool(val).map(|v| c.cam_adapt = v).is_some(),
+        "onvif" => {
+            let v = val.trim();
+            c.onvif_url = if v.eq_ignore_ascii_case("auto") { String::new() } else { v.to_string() };
+            true
+        }
+        "cammax" => val.parse::<u32>().map(|v| c.cam_max_kbps = v.min(50_000)).is_ok(),
         "source" => match val.to_ascii_lowercase().as_str() {
             "pattern" => { c.source = SourceKind::Pattern; true }
             "webcam" => { c.source = SourceKind::Webcam; true }
@@ -542,6 +645,65 @@ fn apply_set(c: &mut TxConfig, key: &str, val: &str) -> Result<(), String> {
         _ => return Err(format!("err unknown key {key}")),
     };
     if ok { Ok(()) } else { Err(format!("err bad value for {key}")) }
+}
+
+/// The running settings as config-file lines (`key value`), every key `apply_set` reads back.
+pub fn config_lines(c: &TxConfig) -> String {
+    let b = |v: bool| if v { "1" } else { "0" };
+    let source = match c.source {
+        SourceKind::Pattern => "pattern",
+        SourceKind::Webcam => "webcam",
+        SourceKind::Rtsp => "rtsp",
+        SourceKind::RandomData => "data",
+    };
+    let mut out = String::new();
+    out.push_str(&format!("source {source}\n"));
+    if !c.rtsp_url.is_empty() {
+        out.push_str(&format!("rtsp {}\n", c.rtsp_url));
+    }
+    out.push_str(&format!("pass {}\n", b(c.rtsp_pass)));
+    out.push_str(&format!("camadapt {}\nonvif {}\ncammax {}\n",
+        b(c.cam_adapt), if c.onvif_url.is_empty() { "auto" } else { &c.onvif_url }, c.cam_max_kbps));
+    out.push_str(&format!("codec {}\n", if c.codec == Codec::H264 { "h264" } else { "mjpeg" }));
+    out.push_str(&format!("res {}x{}\nfps {}\nquality {}\n", c.width, c.height, c.fps, c.jpeg_quality));
+    out.push_str(&format!("auto {}\nmcs {}\narq {}\nir {}\nfec {}\ndup {}\n",
+        b(c.auto_mcs), c.mcs.index(), b(c.arq), b(c.harq_ir), b(c.fec), b(c.dup)));
+    out.push_str(&format!("txconv {}\nfilv {}\ntxbits {}\ntxpl {}\npair {}\ngap {}\nrep {}\n",
+        b(c.txconv), b(c.filv), b(c.txbits), b(c.txpl), b(c.pair), c.air_gap_ms, c.rep_count));
+    out.push_str(&format!("autores {}\nplsyms {}\nsimulcast {}\nbasemcs {}\nchanmem {}\nstamp {}\n",
+        b(c.auto_res), c.pl_syms, b(c.simulcast), c.base_mcs, b(c.chan_mem), b(c.stamp)));
+    out
+}
+
+/// The highest bitrate the camera may be taken to (kbit/s): the configured one, else what the
+/// camera had when ONVIF first reached it; 0 = not known yet.
+pub fn cam_ceiling(shared: &Shared) -> u32 {
+    let c = shared.config.lock().unwrap().cam_max_kbps;
+    if c > 0 { c } else { shared.rtsp.onvif_base_kbps.load(Ordering::Relaxed) }
+}
+
+/// Write the running settings to the config file (and run the save hook): the console's `save`,
+/// callable by a host process too. Returns the console answer.
+pub fn save_config(shared: &Shared) -> String {
+    let path = shared.cfg_path.lock().unwrap().clone();
+    let text = format!(
+        "# written by `save` on the console; one `key value` per line, read at start\n{}",
+        config_lines(&shared.config.lock().unwrap())
+    );
+    match std::fs::write(&path, text) {
+        Ok(()) => {
+            log(&format!("control: settings saved to {path}"));
+            let hook = shared.save_hook.lock().unwrap().replace("{path}", &path);
+            if hook.is_empty() {
+                format!("saved={path}\nok")
+            } else {
+                let ok = std::process::Command::new("sh").arg("-c").arg(&hook).status().is_ok_and(|s| s.success());
+                log(&format!("control: save hook {}", if ok { "ok" } else { "FAILED" }));
+                format!("saved={path}\npersist={}\nok", if ok { "ok" } else { "failed" })
+            }
+        }
+        Err(e) => format!("err cannot write {path}: {e}"),
+    }
 }
 
 /// v37.3: load the config file at start-up: an app restart used to LOSE every setting (restart ->
@@ -613,16 +775,17 @@ ok");
             Some("get") => {
                 let c = shared.config.lock().unwrap().clone();
                 format!(
-                    "source={:?}\nrtsp={}\ncodec={:?}\nres={}x{}\nfps={}\nquality={}\nmcs={}\nauto={}\narq={}\nir={}\nrep={}\nsimulcast={}\nbasemcs={}\npause={}\nchanmem={}\nok",
-                    c.source, c.rtsp_url, c.codec, c.width, c.height, c.fps, c.jpeg_quality,
+                    "source={:?}\nrtsp={}\npass={}\ncamadapt={}\nonvif={}\ncammax={}\ncodec={:?}\nres={}x{}\nfps={}\nquality={}\nmcs={}\nauto={}\narq={}\nir={}\nrep={}\nsimulcast={}\nbasemcs={}\npause={}\nchanmem={}\nstamp={}\nok",
+                    c.source, c.rtsp_url, u8::from(c.rtsp_pass), u8::from(c.cam_adapt),
+                    if c.onvif_url.is_empty() { "auto" } else { &c.onvif_url }, c.cam_max_kbps, c.codec, c.width, c.height, c.fps, c.jpeg_quality,
                     c.mcs.index(), c.auto_mcs, c.arq, c.harq_ir, c.rep_count,
-                    c.simulcast, c.base_mcs, c.paused, c.chan_mem
+                    c.simulcast, c.base_mcs, c.paused, c.chan_mem, c.stamp
                 )
             }
             Some("stats") => {
                 let s = shared.stats.lock().unwrap().clone();
                 let fb = shared.feedback.lock().unwrap().clone();
-                format!(
+                let out = format!(
                     "active_mcs={:?}\nseq={}\ntx_fps={:.1}\niq_mbps={:.1}\nnacks={}\nretx={}\nfb_snr={:.1}\nfb_bler={:.3}\nconnected={}\nvbr_kbps={}\nrc_air_scale={:.2}\nrc_one_burst_kbps={:.0}\nrc_ceiling_kbps={:.0}\nrc_budget_kbps={:.0}\nrc_blocks_ps={:.1}\nrc_msgs_ps={:.1}\nrc_enc_us={:.0}\nrc_gap_us={:.0}\nrc_send_us={:.0}\nrc_loop_us={:.0}\nrc_blocks_frame={:.0}\nrc_blocks_sent={:.0}\nrc_src_bytes={:.0}\ncq_in={}\ncq_out={}\ncq_drop={}\nchan_hz={}\nchan_changes={}\nok",
                     s.active_mcs.map(|m| m.index()),
                     s.seq, s.tx_fps, s.iq_mbps, s.nacks_handled, s.retransmits,
@@ -638,8 +801,30 @@ ok");
                     crate::conv_tx::CQ_DROP.load(Ordering::Relaxed),
                     shared.chan_hz.load(Ordering::Relaxed),
                     shared.chan_changes.load(Ordering::Relaxed)
-                )
+                );
+                // the camera and what pass-through did with it (the camera control screen)
+                let r = &shared.rtsp;
+                let (cw, ch) = *r.dims.lock().unwrap();
+                let extra = format!(
+                    "mode={}\npace_floor_us={}\ncam_status={}\ncam_res={cw}x{ch}\ncam_fps={:.1}\ncam_kbps={}\ncam_gop={}\npass_fps={:.1}\npass_kbps={:.0}\npass_drop_late={}\npass_drop_nokey={}\npass_idr_req={}\nlink_cap_kbps={:.0}\nonvif_status={}\ncam_want_kbps={}\ncam_set_kbps={}\ncam_ceiling_kbps={}\nok",
+                    shared.mode_note.lock().unwrap().replace('=', "%3D"),
+                    shared.pace_floor_us.load(Ordering::Relaxed),
+                    // one line per key: an `=` inside (a camera URL) would split it in the
+                    // console clients
+                    r.status().replace('=', "%3D"),
+                    r.fps_x10.load(Ordering::Relaxed) as f32 / 10.0,
+                    r.kbps.load(Ordering::Relaxed),
+                    r.gop.load(Ordering::Relaxed),
+                    s.pass_fps, s.pass_kbps, s.pass_drop_late, s.pass_drop_nokey, s.pass_idr_req,
+                    s.link_cap_bps / 1000.0,
+                    r.onvif_status.lock().unwrap().replace('=', "%3D"),
+                    r.want_kbps.load(Ordering::Relaxed),
+                    r.onvif_kbps.load(Ordering::Relaxed),
+                    cam_ceiling(&shared),
+                );
+                format!("{}{}", out.strip_suffix("ok").unwrap_or(&out), extra)
             }
+            Some("save") => save_config(&shared),
             Some("set") => {
                 let (Some(key), Some(val)) = (it.next(), it.next()) else {
                     return "err usage: set <key> <value>".into();
@@ -653,12 +838,13 @@ ok");
                     Err(e) => e,
                 }
             }
-            _ => "err unknown command (get / stats / set / quit)".into(),
+            _ => "err unknown command (get / stats / set / save / say / msgs / quit)".into(),
         }
     });
     control::spawn(addr, h);
 }
 
+#[cfg(feature = "gui")]
 pub struct TxApp {
     shared: Arc<Shared>,
     tex: Option<egui::TextureHandle>,
@@ -678,6 +864,7 @@ pub struct TxApp {
     hud_plates: bool,
 }
 
+#[cfg(feature = "gui")]
 impl TxApp {
     pub fn new(shared: Arc<Shared>) -> Self {
         let addr_buf = shared.channel_addr.lock().unwrap().clone();
@@ -741,7 +928,46 @@ impl TxApp {
                             .desired_width(f32::INFINITY),
                     );
                 });
+                ui.checkbox(&mut cfg.rtsp_pass, "Send the camera's H.264 as it is")
+                    .on_hover_text("No decoding and re-encoding: the camera's bitrate and key-frame interval go on air unchanged. Lower latency; the link cannot slow the camera down.");
                 ui.label(egui::RichText::new(format!("camera: {}", self.shared.rtsp.status())).small().color(th::DIM));
+                // ONVIF (onvif.rs): with pass-through nothing on this side re-encodes, so the
+                // only way to fit the picture into the link is to ask the CAMERA for less. The
+                // thread moves the camera's own bitrate limit and nothing else.
+                ui.checkbox(&mut cfg.cam_adapt, "Camera follows the link (ONVIF)")
+                    .on_hover_text(
+                        "Ask the camera itself for a lower or higher bitrate as the link changes, over ONVIF (the user and password of the RTSP URL).",
+                    );
+                if cfg.cam_adapt {
+                    th::row(ui, "ONVIF address", |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cfg.onvif_url)
+                                .hint_text("auto: port 80 of the camera")
+                                .desired_width(f32::INFINITY),
+                        )
+                        .on_hover_text("Leave empty unless the camera answers ONVIF on another address or port.");
+                    });
+                    th::row(ui, "Ceiling", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.cam_max_kbps)
+                                .speed(50.0)
+                                .range(0..=50_000)
+                                .suffix(" kbps"),
+                        )
+                        .on_hover_text("Never ask the camera for more than this. 0 = the limit the camera already had.");
+                    });
+                    let onvif = self.shared.rtsp.onvif_status.lock().unwrap().clone();
+                    ui.label(egui::RichText::new(format!("onvif: {onvif}")).small().color(th::DIM));
+                    let want = self.shared.rtsp.want_kbps.load(Ordering::Relaxed);
+                    let set = self.shared.rtsp.onvif_kbps.load(Ordering::Relaxed);
+                    if want > 0 || set > 0 {
+                        ui.label(
+                            egui::RichText::new(format!("link wants {want} kbps, camera set to {set} kbps"))
+                                .small()
+                                .color(th::DIM),
+                        );
+                    }
+                }
             }
             const RES: [(usize, usize, &str); 7] = [
                 (320, 240, "320 x 240"),
@@ -810,6 +1036,9 @@ impl TxApp {
                     cfg.base_mcs = if far { 6 } else { 0 };
                 }
             });
+            // v40.46 latency test: pairs with "Counter on screen" in the ground app
+            ui.checkbox(&mut cfg.stamp, "Counter in the picture (latency test)")
+                .on_hover_text("Burns a millisecond counter into the video before encoding. The ground app shows the same counter (Latency test): freeze both and subtract.");
             ui.label(egui::RichText::new(format!("camera: {}", self.shared.webcam.status())).small().color(th::DIM));
         });
 
@@ -911,6 +1140,7 @@ impl TxApp {
     }
 }
 
+#[cfg(feature = "gui")]
 impl eframe::App for TxApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
