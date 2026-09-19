@@ -8,6 +8,7 @@
 #   4. start the daemon, logging to /tmp/nyxhop/radio.out; extra daemon flags (one line,
 #      e.g. --tx-ring 32768 for a bench sweep) are read from nyx-args
 #   5. apply nyx-radio.cfg through the console on port 7202
+#   6. run local.sh start if the card has one (extra steps of this card)
 D=/tmp/nyxhop
 LOG=$D/radio.out
 DA="--fir $D/fir10MHz.ftr --mod-base 0x43C30000 --demod-base 0x43C40000 --trig-base 0x43C00000 --video-hz 5745000000 --gpreg-base 0x41200000 --dac-base 0x79024000 --vcxo-base 0x43C70000 --state-dir /tmp/nyxhop --sd-dev /dev/mmcblk0p1 --lic-mtd /dev/mtd3:0x1df0000 --restart-cmd \"setsid sh -c 'sleep 1; $D/start.sh restart' >/dev/null 2>&1 &\""
@@ -98,8 +99,16 @@ nyx_start() {
 }
 
 case "$1" in
-    start) nyx_start & ;;
-    stop) killall nyx-radio-node 2>/dev/null ;;
+    start)
+        nyx_start &
+        # extra start-up steps of this card, if it has any (local.sh on the card, e.g. an
+        # on-board camera app); they are not tied to the daemon and survive `restart`
+        [ -f "$D/local.sh" ] && sh "$D/local.sh" start
+        ;;
+    stop)
+        killall nyx-radio-node 2>/dev/null
+        [ -f "$D/local.sh" ] && sh "$D/local.sh" stop
+        ;;
     restart) killall nyx-radio-node 2>/dev/null; sleep 1; nyx_start & ;;
     *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
 esac

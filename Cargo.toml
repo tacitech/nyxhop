@@ -8,6 +8,9 @@ members = [
     "apps/video/nyx-tx",
     "apps/video/nyx-rx",
     "apps/video/nyx-mobile",
+    "apps/video/nyx-ipcam",
+    "apps/video/nyx-fakecam",
+    "apps/video/nyx-ipcam-ctl",
     "apps/nyxhop",
 ]
 

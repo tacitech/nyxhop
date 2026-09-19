@@ -42,13 +42,15 @@ flowchart LR
     BA == "radio link" ==> BB["SDR board"]
     BB -- "Ethernet" --> RX["nyx-rx<br/>PC or Android"]
     RX <-.-> GCS["Ground control station"]
+    IPC["IP camera"] -. "Ethernet, no computer" .-> BA
 ```
 
 Two boards, one at each end, each on Ethernet with the computer that runs its app. Video and
 data go one way over the radio link, control and telemetry the other. Both boards run the same
 image; which end a board plays is a flag when you flash it. The computers never touch the
 radio: they exchange bytes with a board over Ethernet, and everything about the air interface
-lives on the board.
+lives on the board. The aircraft end does not need a computer at all: with an IP camera on its
+Ethernet port the board sends the camera by itself ([below](#the-camera-straight-into-the-board)).
 
 ## Getting started
 
@@ -160,6 +162,49 @@ remembers the choice in `Android/data/com.nyxhop.mobile/files/nyxhop.cfg`, a pla
 The Android app is its own build: `python apps/video/build_apk.py` writes a signed APK to
 `apps/video/android/out/`, and needs the Android SDK and NDK, `cargo-ndk` and the
 `aarch64-linux-android` Rust target. You do not need it: the apps on a PC do the same job.
+
+#### The camera straight into the board
+
+An IP camera needs no computer on the aircraft. `nyx-ipcam` is the transmitting app built for
+the board's own ARM: it runs beside the radio, pulls the camera's RTSP stream over the board's
+Ethernet port and puts the camera's H.264 on air as it is. Nothing is decoded or encoded on the
+board, so the two ARM cores stay with the radio. What flies is a board, a camera and a cable.
+
+```bash
+python link/scripts/nyx_ipcam_install.py 192.168.0.10     # either board, once NyxHop runs on it
+```
+
+That writes the prebuilt program from `deploy/ipcam/` onto the board and starts it on every
+power-up (a systemd service on the ADRV9364, the SD card's start-up hook on the E200). Give the
+camera an address in the board's subnet and plug it into the board, directly or through a
+switch. Then tell the board where the camera is, from any PC on that network:
+
+```bash
+nyx-ipcam-ctl --board 192.168.0.10
+```
+
+Type the camera's URL, press **Apply**, then **Save on board**: from then on the board finds
+its camera by itself after a power cycle, and the PC can go. The window also shows what the
+camera sends against what the air carries, holds the same ONVIF settings as the aircraft app
+(the board moves the camera's bitrate with the link), and carries the link, role, radio and
+licence sections of the other apps. No video passes through that PC; the picture is on the
+ground screen.
+
+The program follows the board's role by itself, so it can sit on both boards of a pair: on the
+receiving end it waits, and when a board becomes the aircraft it starts sending. If the camera
+falls silent it lets go of the radio after five seconds, so a `nyxhop` Aircraft window on a PC
+can take the board over without anything being switched off. Its console is TCP 7201 on the
+board, the same commands as the headless app below plus `save`; a flight controller on the same
+Ethernet sends MAVLink to the board's UDP 14557 and it goes up the link.
+
+No camera at hand? `nyx-fakecam` is one on your PC: it serves your webcam (or a test pattern) as
+an RTSP camera with an ONVIF service, at the bitrate and key-frame interval you give it.
+`nyx-fakecam --kbps 2000 --gop 60 --user admin --pass secret` prints the URL to give the board.
+
+To build the board program yourself instead of using the prebuilt one:
+`cargo build --release -p nyx-ipcam --target armv7-unknown-linux-gnueabihf` (the Rust target and
+an `arm-linux-gnueabihf` linker named in `.cargo/config.toml`); the installer takes your build
+when it finds one.
 
 Then, once in the life of a pair of boards, **pair them**: press **Link aircraft** in the ground
 app. A board that has never been paired accepts on its own, both pills turn *linked*, and the
@@ -287,9 +332,11 @@ the answer.
 ```
 link/         the transmission system: protocol, block framing, shared app support,
               board console, the flashing tool
-apps/video/   the apps (ground, transmitting, Android) - video and the UDP data pipe
+apps/video/   the apps (ground, transmitting, Android, the camera app for the board's ARM
+              with its PC window and a test camera) - video and the UDP data pipe
 apps/data/    the tool that measures the pipe
-deploy/       prebuilt board images you flash (deploy/adrv9364, deploy/e200)
+deploy/       prebuilt board images you flash (deploy/adrv9364, deploy/e200) and the camera
+              app built for the boards (deploy/ipcam)
 docs/         licence terms, SDK notes, legal
 ```
 
@@ -298,7 +345,8 @@ docs/         licence terms, SDK notes, legal
 | what | licence |
 |---|---|
 | Source code in this repository: `link/`, `apps/`, `docs/` | public domain ([Unlicense](LICENSE)): no licence needed |
-| Binaries in `deploy/`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md) |
+| Binaries in `deploy/adrv9364` and `deploy/e200`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md) |
+| `deploy/ipcam/`: a build of `apps/video/nyx-ipcam` for the boards | public domain, like its source |
 | Third-party components inside the board images (U-Boot, BusyBox and others) | their own licences, see [THIRD-PARTY.md](docs/THIRD-PARTY.md) |
 
 Radio use is subject to the laws of your country: you are responsible for the frequencies and the

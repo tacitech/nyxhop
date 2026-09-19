@@ -16,6 +16,9 @@
   The aircraft end on a PC takes a USB camera or an IP camera (RTSP): the camera's own H.264 can
   go on air untouched, and the camera's bitrate can follow the link over ONVIF. A Board role
   switch in every settings drawer turns a board into the other end; the apps follow it.
+* The camera straight into the board: `nyx-ipcam` runs on the board's own ARM and sends an IP
+  camera with no computer on the aircraft (prebuilt in `deploy/ipcam/`, one-command installer,
+  a PC window to set it up, a test camera for the bench). Either board, follows the board's role.
 * Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card).
 * Licence per board, checked offline; free tier.
 * Licensing of the repository: the source code is public domain (Unlicense), no licence needed;

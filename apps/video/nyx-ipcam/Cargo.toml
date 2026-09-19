@@ -1,0 +1,12 @@
+[package]
+name = "nyx-ipcam"
+version = "0.1.0"
+edition = "2024"
+
+# Runs on the board's ARM (armv7-unknown-linux-gnueabihf), beside the radio daemon: pulls an IP
+# camera over RTSP and sends its H.264 as it is through the daemon's transmit port. The transmit
+# side of nyx-tx without a window and without openh264 (nothing is encoded on the board).
+
+[dependencies]
+nyx-common = { path = "../../../link/nyx-common", default-features = false }
+nyx-tx = { path = "../nyx-tx", default-features = false, features = ["rtsp-client", "onvif"] }

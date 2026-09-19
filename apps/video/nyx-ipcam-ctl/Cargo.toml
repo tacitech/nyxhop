@@ -1,0 +1,17 @@
+[package]
+name = "nyx-ipcam-ctl"
+version = "0.1.0"
+edition = "2024"
+
+# The PC window for a board that sends an IP camera itself (nyx-ipcam): the camera URL, what
+# the camera sends against what the air carries, and the board's radio sections shared with
+# the other apps.
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.35.0"
+nyx-common = { path = "../../../link/nyx-common", default-features = false }

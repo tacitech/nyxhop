@@ -2672,6 +2672,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyx-fakecam"
+version = "0.1.0"
+dependencies = [
+ "nyx-common",
+]
+
+[[package]]
+name = "nyx-ipcam"
+version = "0.1.0"
+dependencies = [
+ "nyx-common",
+ "nyx-tx",
+]
+
+[[package]]
+name = "nyx-ipcam-ctl"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "nyx-common",
+]
+
+[[package]]
 name = "nyx-link"
 version = "0.1.0"
 dependencies = [

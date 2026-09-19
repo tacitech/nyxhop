@@ -1,0 +1,11 @@
+[package]
+name = "nyx-fakecam"
+version = "0.1.0"
+edition = "2024"
+
+# An IP camera on the PC, for testing nyx-ipcam without a real one: webcam (or the test
+# pattern) -> openh264 at a fixed bitrate and key-frame interval -> RTSP (RTP over the RTSP TCP
+# connection, as retina asks for it).
+
+[dependencies]
+nyx-common = { path = "../../../link/nyx-common", features = ["h264", "webcam", "onvif"] }

@@ -1,0 +1,16 @@
+[Unit]
+Description=NyxHop IP camera on the board (RTSP pass-through into the radio)
+After=nyxhop.service network-online.target
+Wants=network-online.target
+
+[Service]
+# logs/ipcam.log lands in the runtime directory (RAM), capped at 8 MB + one old file
+RuntimeDirectory=nyx-ipcam
+WorkingDirectory=/run/nyx-ipcam
+Environment=NYX_LOG_MAX_MB=8
+ExecStart=/home/root/nyx-ipcam
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -12,6 +12,11 @@ source locations in `../docs/THIRD-PARTY.md`.
     deploy/adrv9364/   BOOT.BIN  devicetree.dtb  nyx-radio-node  nyxhop-start.py  nyxctl.py
                        nyxhop.service  u-dma-buf.ko  fir10MHz.ftr  nyx-radio-A.cfg  nyx-radio-B.cfg
     deploy/e200/       nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-A-e200.cfg  nyx-radio-B-e200.cfg
+    deploy/ipcam/      nyx-ipcam  nyx-ipcam.service  e200/   (the camera app for the board's ARM)
+
+`ipcam/` is the exception to the licence note above: it is a build of `apps/video/nyx-ipcam`
+for the boards' ARM, public domain like its source, and `link/scripts/nyx_ipcam_install.py`
+writes it onto a board that already runs NyxHop.
 
 Usage (from the repository root):
 
@@ -19,3 +24,4 @@ Usage (from the repository root):
     python link/scripts/nyx_flash.py --host <ip> --role tx            # ADRV9364 aircraft
     python link/scripts/nyx_flash.py --host <ip> --role rx            # ADRV9364 ground
     python link/scripts/nyx_flash.py --host 192.168.0.12 --role rx --board e200
+    python link/scripts/nyx_ipcam_install.py <ip>                     # the camera app, either board

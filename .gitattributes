@@ -21,3 +21,4 @@
 *.jpg -text
 deploy/**/nyx-radio-node -text
 deploy/**/nyxctl -text
+deploy/**/nyx-ipcam -text
