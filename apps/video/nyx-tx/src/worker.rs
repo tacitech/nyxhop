@@ -40,6 +40,24 @@ const MAX_RETX: u8 = 3;
 /// receiver, the air is just being hit), and every retransmission and every parity block
 /// gets a SECOND copy this much later - a WiFi burst that ate the first one has moved on.
 const MAX_RETX_INTERF: u8 = 6;
+/// The lowest rung ARQ is still worth using on (conv path).
+///
+/// A block is 2016 B whatever the rung, but a conv frame carries 2022 B at MCS5 and only
+/// 447 B at MCS0 - so the same block is ONE frame up there and FIVE down here, on a link
+/// whose ceiling is ~330 frames/s. Two things follow, and they multiply: a retry costs five
+/// frames of airtime instead of one, and a block dies if any ONE of its five fragments does,
+/// so the block loss is about five times the frame loss. The retries then take the airtime
+/// the new data needed, which loses more blocks, which asks for more retries.
+///
+/// Measured 19/9 with the rung pinned and SNR 22 dB (so the modulation was never the limit),
+/// 45 s windows at the ground:
+///   MCS0, ARQ on : 641 frames, 14 lost, 20.5 fps, longest freeze 411 ms (2054 ms earlier)
+///   MCS0, ARQ off: 496 frames,  0 lost, 15.0 fps, longest freeze 134 ms
+///   auto (MCS5), ARQ on vs off: 140 ms vs 99 ms - no harm up there, so only the low rungs
+///     are gated.
+/// Fewer frames arrive without ARQ, but they arrive steadily, and steady is what a picture
+/// needs. Above this rung a retry is one frame and pays for itself, so ARQ stays on.
+const ARQ_MIN_MCS: u64 = 2;
 const DUP_GAP: Duration = Duration::from_millis(12);
 
 /// AIRTIME CEILING of the fabric conv path, in bit/s: how much the air can CARRY.
@@ -240,10 +258,20 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         (1920, 1080, 60.0, 6000.0),
         (2560, 1440, 60.0, 12000.0),
     ];
+    /// How long a rung is out of bounds after falling off it, and the ceiling on that wait.
+    const TIER_BACKOFF: Duration = Duration::from_secs(20);
+    const TIER_BACKOFF_MAX: Duration = Duration::from_secs(160);
+    /// A rung that holds this long is considered good again: its back-off resets.
+    const TIER_SETTLED: Duration = Duration::from_secs(45);
     let mut cur_tier = LADDER.len() - 1; // seed high, step down with the channel
     let mut tier_since = Instant::now();
     let mut tier_up_since: Option<Instant> = None;
     let mut tier_down_since: Option<Instant> = None;
+    // v40.47: per rung, when it may be tried again after falling off it, and how long that wait
+    // was last time (it doubles from TIER_BACKOFF up to TIER_BACKOFF_MAX, and is forgotten once
+    // the rung holds for a while).
+    let mut tier_retry_at: Vec<Option<Instant>> = vec![None; LADDER.len()];
+    let mut tier_backoff: Vec<Duration> = vec![TIER_BACKOFF; LADDER.len()];
     let mut link_cap_kbps = 0.0f32; // capacity measured in the PREVIOUS loop
     // OLLA v32 minstrel-lite: bang thong ke per-rate
     let mut mn_prob: [f32; 6] = [-1.0; 6]; // <0 = chua co mau
@@ -349,7 +377,19 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     const BURST_BUDGET: usize = 42_000;
     let mut last_air = Instant::now();
     let mut nacks_handled: u64 = 0;
+    // NACKs answered with silence because the rung is too low to retry on (see ARQ_MIN_MCS)
+    let mut nacks_low: u64 = 0;
+    // v40.47 long-term reference: references the receiver confirmed, repairs coded against
+    // one, and how many repairs have been tried since the last confirmation (a repair that
+    // does not fix the receiver must give way to a keyframe, or the picture stays broken).
+    let (mut ltr_marks, mut ltr_repairs): (u64, u64) = (0, 0);
+    let mut ltr_tries: u32 = 0;
+    let mut ltr_last = Instant::now() - Duration::from_secs(10);
+    /// Repairs to try from one broken state before falling back to a keyframe.
+    const LTR_MAX_TRIES: u32 = 2;
     let mut retransmits: u64 = 0;
+    // the rung the conv path is sending at right now
+    let low_rung = || crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) < ARQ_MIN_MCS;
     // v20.11 rate diagnostic: time slept in the gap vs net.send per status window
     let mut tp_gap: u64 = 0;
     let mut tp_send: u64 = 0;
@@ -507,7 +547,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             // hides the rest). v40.35: the condition must PERSIST (up 3 s, down 2 s): a single
             // frame's capacity estimate flipped 320x240 <-> 480x360 every few seconds, each flip an
             // encoder restart and a new IDR.
+            // the rung above is out of bounds while its back-off runs
+            let up_free = tier_retry_at
+                .get(cur_tier + 1)
+                .and_then(|o| *o)
+                .is_none_or(|t| Instant::now() >= t);
             let up_now = cur_tier < max_tier
+                && up_free
                 && link_cap_kbps >= LADDER[cur_tier + 1].3 * 1.45;
             let need = LADDER[cur_tier].3;
             let down_now = cur_tier > 0 && link_cap_kbps < need * 0.80;
@@ -523,14 +569,38 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             }
             let up_ok = tier_up_since.is_some_and(|t| t.elapsed() >= Duration::from_secs(3));
             let down = tier_down_since.is_some_and(|t| t.elapsed() >= Duration::from_secs(2));
-            let crash = cur_tier > 0 && link_cap_kbps < need * 0.50;
+            // v40.47: even a crash has to LAST. This branch skips both the 2 s persistence and
+            // the 6 s dwell, so ONE low capacity estimate dropped the rung at once - and every
+            // rung change is an encoder restart, a fresh IDR and a burst of broken frames.
+            // Measured 19/9 with the rung pinned at MCS0 (where the estimate swings hardest):
+            // 480x360 -> 320x240 -> 480x360 -> 640x480 inside 40 s, and the picture stalled ~400
+            // ms at each flip while everything else was clean (p50/p95 gaps 67/84 ms). Half a
+            // second of persistence is nothing against a real collapse and kills the flapping.
+            let crash = cur_tier > 0
+                && link_cap_kbps < need * 0.50
+                && tier_down_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(500));
             let dwell = tier_since.elapsed() >= Duration::from_millis(6000);
             if crash || (down && dwell) {
+                // the rung we are leaving did not hold: keep out of it, longer each time
+                let held = tier_since.elapsed();
+                let b = &mut tier_backoff[cur_tier];
+                if held >= TIER_SETTLED {
+                    *b = TIER_BACKOFF; // it was fine for a long time - this was a real change
+                } else {
+                    *b = (*b * 2).min(TIER_BACKOFF_MAX);
+                }
+                tier_retry_at[cur_tier] = Some(Instant::now() + *b);
                 cur_tier -= 1;
                 tier_since = Instant::now();
             } else if up_ok && dwell {
                 cur_tier += 1;
                 tier_since = Instant::now();
+            } else if tier_since.elapsed() >= TIER_SETTLED {
+                // this rung is holding: let the one above become reachable again at the normal
+                // wait rather than the doubled one
+                if let Some(b) = tier_backoff.get_mut(cur_tier + 1) {
+                    *b = TIER_BACKOFF;
+                }
             }
         } else {
             cur_tier = max_tier; // auto off: use the configuration as it is
@@ -934,7 +1004,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         let max_retx = if interf_on || pass { MAX_RETX_INTERF } else { MAX_RETX };
                         while let Ok(nseq) = nack_rx.try_recv() {
                             nacks_handled += 1;
-                            if !cfg.arq {
+                            if !cfg.arq || low_rung() {
+                                nacks_low += u64::from(low_rung());
                                 continue;
                             }
                             if let Some(entry) = cache
@@ -1195,6 +1266,46 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             }
                         },
                     };
+                    // v40.47: the cheap repair first. Every long-term reference the receiver
+                    // confirms has to go into the encoder - openh264 will only code a repair
+                    // against a confirmed one - and a repair request is then served by coding
+                    // the next picture against it instead of a whole keyframe. At MCS0 that is
+                    // the difference between one frame of airtime and five.
+                    let mut ltr_repair = false;
+                    if cfg.ltr {
+                        let pending: Vec<(u8, u16, u16, u16)> =
+                            std::mem::take(&mut shared.feedback.lock().unwrap().ltr);
+                        for (kind, id, marked, cur) in pending {
+                            if kind == 0 {
+                                if enc.ltr_marked_ok(u32::from(id), i32::from(marked)) {
+                                    ltr_marks += 1;
+                                    ltr_tries = 0; // the receiver is healthy again
+                                    if ltr_marks <= 3 || ltr_marks % 20 == 0 {
+                                        log(&format!(
+                                            "LTR: the RX confirms reference {marked} (#{ltr_marks}, idr {id}) - a repair can use it"
+                                        ));
+                                    }
+                                }
+                            } else if ltr_tries < LTR_MAX_TRIES
+                                && enc.request_ltr_recovery(u32::from(id), i32::from(marked), i32::from(cur))
+                            {
+                                ltr_repair = true;
+                                ltr_tries += 1;
+                                ltr_repairs += 1;
+                                ltr_last = Instant::now();
+                                log(&format!(
+                                    "LTR repair #{ltr_repairs} (try {ltr_tries}/{LTR_MAX_TRIES}): coding against the reference the RX holds (frame {marked}, it is at {cur}) instead of a keyframe"
+                                ));
+                            }
+                        }
+                        // a quiet spell means the last repair worked, or the receiver went away
+                        // - either way the next break starts its own count
+                        if ltr_tries > 0 && ltr_last.elapsed() >= Duration::from_secs(3) {
+                            ltr_tries = 0;
+                        }
+                    } else {
+                        shared.feedback.lock().unwrap().ltr.clear();
+                    }
                     // RX asked for a recovery keyframe? Serve AT MOST one IDR per 700 ms. A webcam
                     // IDR spans many blocks and at low MCS is the easiest thing to lose on air;
                     // serving every request turned one lost frame into a self-feeding IDR flood
@@ -1214,7 +1325,14 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                                 log("idr: RX is decoding pictures - leaving survival mode, bitrate back to normal");
                             }
                         }
-                        (idr_ok && std::mem::take(&mut fb.need_idr), fb.segs_ok)
+                        if ltr_repair {
+                            // the repair IS the answer to the request: do not also spend a
+                            // keyframe on it
+                            fb.need_idr = false;
+                            (false, fb.segs_ok)
+                        } else {
+                            (idr_ok && std::mem::take(&mut fb.need_idr), fb.segs_ok)
+                        }
                     };
                     if force_idr {
                         idr_sent += 1;
@@ -1756,7 +1874,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             let max_retx = if interf_on || pass { MAX_RETX_INTERF } else { MAX_RETX };
             while let Ok(nseq) = nack_rx.try_recv() {
                 nacks_handled += 1;
-                if !cfg.arq {
+                if !cfg.arq || (cfg.txconv && low_rung()) {
+                    nacks_low += u64::from(cfg.txconv && low_rung());
                     continue;
                 }
                 // Match by the sequence LSB, newest first. The RX can only
@@ -1878,7 +1997,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         }
         status.tick(&format!(
             "status | src={:?} codec={:?} {}x{}@{:.0} vbr={}kbps idr={} mcs={} seq={} \
-             blocks/frame={} tx_fps={:.1} iq={:.1}Mbps nack={} retx={} dup={} \
+             blocks/frame={} tx_fps={:.1} iq={:.1}Mbps nack={} retx={} nack_low={} dup={}              ltr={}/{} \
              fb_snr={:.1}dB fb_bler={:.1}% olla={:.1}dB dac_clip={}",
             cfg.source,
             cfg.codec,
@@ -1894,7 +2013,10 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             iq_mbps,
             nacks_handled,
             retransmits,
+            nacks_low,
             dups_sent,
+            ltr_marks,
+            ltr_repairs,
             if fb_fresh { fb.snr_db } else { f32::NAN },
             if fb_fresh { fb.bler * 100.0 } else { f32::NAN },
             olla_margin_db,

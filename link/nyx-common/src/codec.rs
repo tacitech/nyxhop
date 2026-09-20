@@ -11,6 +11,38 @@ use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
 use crate::RgbFrame;
 use crate::logging::log;
 
+/// How often the encoder marks a long-term reference. It has to be often enough that the
+/// receiver always holds a recent one (an older reference means a bigger repair frame) and rare
+/// enough not to cost coding efficiency: 30 pictures is 1-2 s at the rates this link runs.
+const LTR_MARK_PERIOD: u32 = 30;
+
+/// Switch long-term references on. The high-level crate does not carry these in its config, but
+/// they are plain SetOptions - with one catch: the crate initialises openh264 LAZILY, on the
+/// first frame (that is where it learns the picture size), and SetOption before that returns
+/// cmInitExpected (4). Hence the black priming frame in `new_with_intra`.
+fn enable_ltr(enc: &mut Encoder, period: u32) -> bool {
+    use openh264_sys2::{ENCODER_LTR_MARKING_PERIOD, ENCODER_OPTION_LTR, SLTRConfig};
+    let mut cfg = SLTRConfig { bEnableLongTermReference: true, iLTRRefNum: 1 };
+    let mut per = period;
+    // SAFETY: the encoder is initialised and both structs are the C types these options expect;
+    // SetOption only reads them.
+    let (a, b) = unsafe {
+        let api = enc.raw_api();
+        (
+            api.set_option(ENCODER_OPTION_LTR, &mut cfg as *mut SLTRConfig as *mut std::os::raw::c_void),
+            api.set_option(ENCODER_LTR_MARKING_PERIOD, &mut per as *mut u32 as *mut std::os::raw::c_void),
+        )
+    };
+    if a != 0 {
+        log(&format!("h264 encoder: long-term reference unavailable ({a}) - losses will cost a keyframe"));
+        return false;
+    }
+    if b != 0 {
+        log(&format!("h264 encoder: LTR marking period refused ({b}) - keeping the default"));
+    }
+    true
+}
+
 pub struct VideoEncoder {
     enc: Encoder,
     width: usize,
@@ -24,6 +56,8 @@ pub struct VideoEncoder {
     /// (CONSTANT_ID); a decoder recreated at the RX (after the TX renumbers / gets stuck) cannot
     /// decode an IDR without SPS/PPS -> prepend them to EVERY IDR.
     sps_pps: Vec<u8>,
+    /// v40.47: the encoder accepted long-term references (see enable_ltr)
+    ltr: bool,
 }
 
 impl VideoEncoder {
@@ -72,12 +106,21 @@ impl VideoEncoder {
             // Before, 1 frame = 1 big NAL: one lost block lost everything.
             .max_slice_len(1800)
             .skip_frames(true);
-        let enc = Encoder::with_api_config(OpenH264API::from_source(), config)
+        let mut enc = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| e.to_string())?;
+        // Prime the encoder with one black frame so openh264 is really initialised, then switch
+        // long-term references on and throw that bitstream away. Turning LTR on raises the number
+        // of reference frames, which resets the encoder and changes the SPS - which is exactly why
+        // it happens here, before the caller's first picture: that one then comes out as a fresh
+        // IDR carrying the new SPS, and `with_sps_pps` caches it as usual.
+        let _ = enc.encode(&YUVBuffer::new(width.max(16), height.max(16)));
+        let ltr = enable_ltr(&mut enc, LTR_MARK_PERIOD);
+        enc.force_intra_frame();
         Ok(VideoEncoder {
             enc, width, height, bitrate_bps, fps, frames_since_idr: 0,
             last_reinit: std::time::Instant::now(),
             sps_pps: Vec::new(),
+            ltr,
         })
     }
 
@@ -210,6 +253,70 @@ impl VideoEncoder {
         }
     }
 
+    /// Is a long-term reference being kept? (false = the repair falls back to a keyframe)
+    pub fn ltr_on(&self) -> bool {
+        self.ltr
+    }
+
+    /// The receiver decoded the picture that marks a long-term reference. This is the other
+    /// half of the loop and it is NOT optional: openh264 will only code a repair against a
+    /// reference the receiver has CONFIRMED (`uiRecieveConfirmed`), so without this feedback a
+    /// recovery request finds nothing usable and falls back to a keyframe - which is the very
+    /// thing we are trying to avoid. `ltr_frame_num` is the receiver's
+    /// DECODER_OPTION_LTR_MARKED_FRAME_NUM, `idr_pic_id` its DECODER_OPTION_IDR_PIC_ID (feedback
+    /// from an older IDR period is ignored by the encoder).
+    pub fn ltr_marked_ok(&mut self, idr_pic_id: u32, ltr_frame_num: i32) -> bool {
+        if !self.ltr {
+            return false;
+        }
+        use openh264_sys2::{ENCODER_LTR_MARKING_FEEDBACK, LTR_MARKING_SUCCESS, SLTRMarkingFeedback};
+        let mut fb = SLTRMarkingFeedback {
+            uiFeedbackType: LTR_MARKING_SUCCESS as u32,
+            uiIDRPicId: idr_pic_id,
+            iLTRFrameNum: ltr_frame_num,
+            iLayerId: 0,
+        };
+        // SAFETY: the encoder is initialised and SLTRMarkingFeedback is the C struct this option
+        // expects; SetOption only reads it.
+        let rc = unsafe {
+            self.enc.raw_api().set_option(
+                ENCODER_LTR_MARKING_FEEDBACK,
+                &mut fb as *mut SLTRMarkingFeedback as *mut std::os::raw::c_void,
+            )
+        };
+        rc == 0
+    }
+
+    /// Repair the receiver without a keyframe: code the next picture against the long-term
+    /// reference it still holds. `last_correct` is the frame number it last decoded (its
+    /// DECODER_OPTION_LTR_MARKED_FRAME_NUM), `current` where it is now. Returns false when the
+    /// encoder refuses, and then the caller should fall back to a keyframe.
+    pub fn request_ltr_recovery(&mut self, idr_pic_id: u32, last_correct: i32, current: i32) -> bool {
+        if !self.ltr {
+            return false;
+        }
+        use openh264_sys2::{ENCODER_LTR_RECOVERY_REQUEST, LTR_RECOVERY_REQUEST, SLTRRecoverRequest};
+        let mut req = SLTRRecoverRequest {
+            uiFeedbackType: LTR_RECOVERY_REQUEST as u32,
+            uiIDRPicId: idr_pic_id,
+            iLastCorrectFrameNum: last_correct,
+            iCurrentFrameNum: current,
+            iLayerId: 0,
+        };
+        // SAFETY: the encoder is initialised and SLTRRecoverRequest is the C struct this option
+        // expects; SetOption only reads it.
+        let rc = unsafe {
+            self.enc.raw_api().set_option(
+                ENCODER_LTR_RECOVERY_REQUEST,
+                &mut req as *mut SLTRRecoverRequest as *mut std::os::raw::c_void,
+            )
+        };
+        if rc != 0 {
+            log(&format!("h264 encoder: LTR recovery request refused ({rc})"));
+        }
+        rc == 0
+    }
+
     /// Encode one frame; returns an Annex-B byte stream (may be empty on
     /// encoder error). `force_idr` inserts a keyframe (recovery request).
     pub fn encode(&mut self, frame: &RgbFrame, force_idr: bool) -> Vec<u8> {
@@ -279,17 +386,44 @@ impl VideoEncoder {
     }
 }
 
+/// What the receiver knows about long-term references, read out of the decoder after a picture.
+/// These are the numbers the transmitter needs: see `VideoEncoder::ltr_marked_ok` and
+/// `VideoEncoder::request_ltr_recovery`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LtrReport {
+    /// which IDR period this is - the encoder ignores feedback carrying an older one
+    pub idr_pic_id: u32,
+    /// the frame number of the picture just decoded
+    pub frame_num: i32,
+    /// the newest long-term reference this decoder holds, if it holds one
+    pub marked: Option<i32>,
+    /// true only on the picture that marked it - that is when to send the marking feedback
+    pub fresh_mark: bool,
+    /// The reference chain is broken: this picture's frame number does not follow the last
+    /// one, so pictures were lost. This is the ONLY honest loss signal when the decoder
+    /// conceals (which is the default at the ground): a concealed picture "decodes" happily,
+    /// so "the decoder refused it" never fires and the repair would never be asked for.
+    /// It also re-fires by itself if the repair is lost on the way.
+    pub gap: bool,
+}
+
 pub struct VideoDecoder {
     dec: Option<Decoder>,
     /// 18/9: the concealing decoder instead of the crate's strict one (see `Conceal`).
     conceal: Option<Conceal>,
+    /// the long-term reference this decoder holds (v40.47)
+    last_ltr: Option<i32>,
+    /// the frame number of the last picture, and which IDR period it was in, to notice
+    /// pictures that never arrived (see `LtrReport::gap`)
+    last_fn: Option<i32>,
+    last_idr: Option<u32>,
 }
 
 impl VideoDecoder {
     /// The strict decoder: a picture whose reference is missing is refused, and nothing is shown
     /// until the next key frame.
     pub fn new() -> Self {
-        VideoDecoder { dec: Decoder::new().ok(), conceal: None }
+        VideoDecoder { dec: Decoder::new().ok(), conceal: None, last_ltr: None, last_fn: None, last_idr: None }
     }
 
     /// The concealing decoder: a picture whose reference is missing is still built, from what the
@@ -300,7 +434,7 @@ impl VideoDecoder {
     /// one lost frame froze the picture for up to a whole key-frame interval (measured: every P
     /// frame refused for 1.5-2 s after one hole, 2 s of still picture at the ground).
     pub fn new_concealing() -> Self {
-        VideoDecoder { dec: None, conceal: Conceal::new().ok() }
+        VideoDecoder { dec: None, conceal: Conceal::new().ok(), last_ltr: None, last_fn: None, last_idr: None }
     }
 
     /// Decode one access unit; None until a decodable picture (e.g. while
@@ -329,6 +463,64 @@ impl VideoDecoder {
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// One GetOption on whichever decoder this is (the crate's or the concealing one).
+    fn opt_i32(&mut self, id: openh264_sys2::DECODER_OPTION) -> Option<i32> {
+        let mut v: i32 = 0;
+        let p = (&mut v as *mut i32).cast::<std::os::raw::c_void>();
+        // SAFETY: both decoders are initialised here and every one of these options writes a
+        // single int through the pointer.
+        let rc = unsafe {
+            if let Some(c) = &mut self.conceal {
+                let f = (**c.dec).GetOption?;
+                f(c.dec, id, p)
+            } else if let Some(d) = &mut self.dec {
+                d.raw_api().get_option(id, p)
+            } else {
+                return None;
+            }
+        };
+        (rc == 0).then_some(v)
+    }
+
+    /// Where this decoder is, in the terms the encoder's long-term reference machinery speaks.
+    /// Call it right after a picture comes out; `fresh_mark` says this picture marked a new
+    /// long-term reference, which is when the transmitter wants to hear about it.
+    pub fn ltr(&mut self) -> Option<LtrReport> {
+        use openh264_sys2::{
+            DECODER_OPTION_FRAME_NUM, DECODER_OPTION_IDR_PIC_ID, DECODER_OPTION_LTR_MARKED_FRAME_NUM,
+            DECODER_OPTION_LTR_MARKING_FLAG,
+        };
+        let frame_num = self.opt_i32(DECODER_OPTION_FRAME_NUM)?;
+        let idr_pic_id = self.opt_i32(DECODER_OPTION_IDR_PIC_ID)? as u32;
+        let mut fresh_mark = false;
+        if self.opt_i32(DECODER_OPTION_LTR_MARKING_FLAG).unwrap_or(0) != 0 {
+            if let Some(n) = self.opt_i32(DECODER_OPTION_LTR_MARKED_FRAME_NUM) {
+                fresh_mark = self.last_ltr != Some(n);
+                self.last_ltr = Some(n);
+            }
+        }
+        // frame_num counts coded pictures and wraps at 1 << 15 (openh264 writes
+        // log2_max_frame_num = 15); every picture here is a reference, so the step is
+        // exactly one. A different step means pictures never arrived. A new IDR period
+        // restarts the count, and the reference held before it is gone with it.
+        let new_idr = self.last_idr != Some(idr_pic_id);
+        let gap = match self.last_fn {
+            Some(prev) if !new_idr => !matches!((frame_num - prev) & 0x7FFF, 0 | 1),
+            _ => false,
+        };
+        if new_idr {
+            self.last_idr = Some(idr_pic_id);
+            self.last_ltr = None;
+        }
+        self.last_fn = Some(frame_num);
+        Some(LtrReport { idr_pic_id, frame_num, marked: self.last_ltr, fresh_mark, gap })
+    }
+
+    /// A new IDR period starts from nothing: the reference held before it is gone.
+    pub fn forget_ltr(&mut self) {
+        self.last_ltr = None;
     }
 }
 
@@ -438,6 +630,120 @@ mod tests {
     /// one keeps producing pictures. This is the whole point of `new_concealing` (camera pass-through, 18/9: a
     /// camera passed through cannot be asked for a key frame, so a hole froze the picture for up
     /// to a key-frame interval).
+    /// The point of a long-term reference: after a loss, repair the picture with a frame that
+    /// points at one the receiver still holds, instead of a whole keyframe. At MCS0 the link
+    /// carries 131 kbit/s and a picture is a single block, so the difference is a freeze of a
+    /// few hundred ms or none (measured 19/9, see the rate-control notes).
+    ///
+    /// This runs the whole loop, because half of it is not optional: openh264 only repairs
+    /// against a reference the RECEIVER has confirmed, so the test decodes what it encodes and
+    /// feeds the confirmations back, exactly as the link will.
+    #[test]
+    fn ltr_repairs_without_a_keyframe() {
+        let (w, h) = (320, 240);
+        let mut enc = VideoEncoder::new_with_intra(w, h, 300_000, 30.0, 600).expect("encoder");
+        assert!(enc.ltr_on(), "openh264 would not take a long-term reference");
+        let mut dec = VideoDecoder::new();
+
+        // a still scene with one small square moving across it: an aircraft holding station,
+        // which is the case a long-term reference is good for (a picture from a second ago is
+        // still most of the answer).
+        let frame = |n: usize| {
+            let mut rgb = vec![0u8; w * h * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y * w + x) * 3;
+                    let v = (((x / 16) + (y / 16)) % 2) as u8 * 40 + 60;
+                    rgb[i] = v;
+                    rgb[i + 1] = v;
+                    rgb[i + 2] = v;
+                }
+            }
+            let (bx, by) = (8 + (n * 3) % (w - 40), h / 2);
+            for y in by..by + 24 {
+                for x in bx..bx + 24 {
+                    let i = (y * w + x) * 3;
+                    rgb[i] = 240;
+                    rgb[i + 1] = 40;
+                    rgb[i + 2] = 40;
+                }
+            }
+            RgbFrame { width: w, height: h, rgb }
+        };
+
+        // the link running normally: everything arrives, and the receiver confirms every
+        // long-term reference it is given
+        let idr = enc.encode(&frame(0), true);
+        dec.decode(&idr).expect("the first picture");
+        let mut here = dec.ltr().expect("the decoder reports where it is");
+        let mut sizes = Vec::new();
+        for n in 1..=45 {
+            let bs = enc.encode(&frame(n), false);
+            sizes.push(bs.len());
+            dec.decode(&bs);
+            here = dec.ltr().expect("a report per picture");
+            if here.fresh_mark {
+                assert!(
+                    enc.ltr_marked_ok(here.idr_pic_id, here.marked.unwrap()),
+                    "the encoder refused the marking feedback"
+                );
+            }
+        }
+        let marked = here.marked.expect("the receiver should hold a long-term reference by now");
+        let steady = sizes[sizes.len() - 8..].iter().sum::<usize>() / 8;
+
+        // now lose everything for half a second: the transmitter keeps encoding, the receiver
+        // gets none of it, and it is left with the reference it confirmed
+        for n in 46..=60 {
+            let _ = enc.encode(&frame(n), false);
+        }
+
+        // the receiver asks for a repair from where it actually is
+        assert!(
+            enc.request_ltr_recovery(here.idr_pic_id, marked, here.frame_num),
+            "the encoder refused the recovery request"
+        );
+        let repair = enc.encode(&frame(61), false);
+        assert!(!repair.is_empty(), "the repair frame was empty");
+
+        // it must be a repair, not a keyframe: no IDR slice and no parameter sets
+        let mut i = 0;
+        let (mut has_idr, mut has_sps) = (false, false);
+        while i + 3 < repair.len() {
+            if repair[i] == 0 && repair[i + 1] == 0 && repair[i + 2] == 1 {
+                match repair[i + 3] & 0x1F {
+                    5 => has_idr = true,
+                    7 => has_sps = true,
+                    _ => {}
+                }
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(!has_idr && !has_sps, "the repair was a keyframe ({} B)", repair.len());
+        assert!(
+            repair.len() < idr.len(),
+            "the repair cost {} B against a keyframe's {} B",
+            repair.len(),
+            idr.len()
+        );
+
+        println!(
+            "keyframe {} B, steady frame {steady} B, LTR repair {} B",
+            idr.len(),
+            repair.len()
+        );
+
+        // and it really repairs: the receiver, which missed 15 frames, decodes a picture again
+        let got = dec.decode(&repair).expect("the repair did not decode after the loss");
+        assert_eq!((got.width, got.height), (w, h));
+        // the loss itself is visible in the frame numbers - the signal the receiver uses,
+        // because a concealing decoder never refuses a picture
+        assert!(dec.ltr().expect("a report").gap, "15 lost pictures left no gap in the frame numbers");
+        assert!(repair.len() > steady / 4, "the repair {} B looks empty (steady {steady} B)", repair.len());
+    }
+
     #[test]
     fn concealing_decoder_keeps_pictures_after_a_lost_frame() {
         let mut pattern = PatternGen::new();

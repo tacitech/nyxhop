@@ -143,6 +143,11 @@ pub struct TxConfig {
     /// rate the same way with or without it (1.9 % vs 1.4 %, 26 % vs 8 % in a heavy minute),
     /// while it added 35-60 frames/s of air. ARQ already repairs what a second copy would.
     pub dup: bool,
+    /// v40.47: repair a loss with a long-term reference instead of a keyframe (`set ltr 0|1`).
+    /// The receiver confirms every reference it decodes and asks to be repaired from one; the
+    /// encoder then codes the next picture against it. Off = the keyframe path of before, which
+    /// is also what happens by itself when the far end is older or the encoder refuses LTR.
+    pub ltr: bool,
     /// v36 simulcast base layer, ON BY DEFAULT. Measured on the SAME ruler, disp_fps (pictures
     /// actually shown, not the flattering rx_fps): ON 72 % of samples with a picture vs OFF 59 %;
     /// the base layer carries 22 % of the samples at the fade edge. (The "100 %" of v35.1 the day
@@ -211,6 +216,7 @@ impl Default for TxConfig {
             rep_count: 1, // default off (reactive ARQ only)
             fec: true,
             dup: false,
+            ltr: true,
             // v40.44z: off by default (user, 10/9): the base layer costs ~30 ms of glass-to-glass
             // latency (61 vs 28 ms measured); turn it on for reach through fades.
             simulcast: false,
@@ -231,6 +237,10 @@ pub struct FeedbackState {
     pub ok_mcs: [u16; 6],
     pub ok_base: u16,
     pub updated: Option<std::time::Instant>,
+    /// v40.47: long-term reference feedback from the receiver, newest first out.
+    /// (kind, idr_pic_id, marked, current) - kind 0 confirms a reference arrived,
+    /// kind 1 asks to be repaired from it. See `nyx_common::codec::LtrReport`.
+    pub ltr: Vec<(u8, u16, u16, u16)>,
 }
 
 #[derive(Clone, Default)]
@@ -590,6 +600,7 @@ fn apply_set(c: &mut TxConfig, key: &str, val: &str) -> Result<(), String> {
             .is_ok(),
         "fec" => parse_bool(val).map(|v| c.fec = v).is_some(),
         "dup" => parse_bool(val).map(|v| c.dup = v).is_some(),
+        "ltr" => parse_bool(val).map(|v| c.ltr = v).is_some(),
         "simulcast" => parse_bool(val).map(|v| c.simulcast = v).is_some(),
         "stamp" => parse_bool(val).map(|v| c.stamp = v).is_some(),
         "basemcs" => val
@@ -1108,6 +1119,9 @@ impl TxApp {
                         "Send a different redundancy version each retry, so the receiver combines them instead of repeating.",
                     );
                 });
+                ui.checkbox(&mut cfg.ltr, "Repair without keyframes").on_hover_text(
+                    "After a loss, code the next picture against a frame the receiver still holds (H.264 long-term reference) instead of sending a whole keyframe. Off falls back to the keyframe.",
+                );
             });
             drop(cfg);
             ui.add_space(6.0);
@@ -1195,6 +1209,7 @@ impl eframe::App for TxApp {
             title: "NYXHOP · AIRCRAFT".into(),
             empty_text: "waiting for the camera…".into(),
             plates: self.hud_plates,
+            range: None, // the receiving end works the range out
         };
         let tex = self.tex.clone();
         let mut open = self.drawer_open;

@@ -232,6 +232,13 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                 fb.need_idr |= need_idr;
                 fb.updated = Some(std::time::Instant::now());
             }
+            Ok(Msg::Ltr { kind, idr_pic_id, marked, current }) => {
+                let mut fb = shared.feedback.lock().unwrap();
+                // keep one of each kind: an older repair request is worthless once a newer
+                // one says where the receiver is now
+                fb.ltr.retain(|e| e.0 != kind);
+                fb.ltr.push((kind, idr_pic_id, marked, current));
+            }
             Ok(Msg::Nack { seq }) => {
                 let _ = nack_tx.send(seq);
                 // the pass-through worker sleeps on this; a retransmission must not wait for

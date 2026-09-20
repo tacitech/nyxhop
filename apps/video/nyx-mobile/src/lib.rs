@@ -282,6 +282,11 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
     // reference and every later frame fails too (measured: 49 pictures decoded vs
     // 2033 failed, 1-2 fps, while the PC receiver on the same stream did 30 fps).
     let mut need_idr = false;
+    // v40.47: the long-term reference this decoder holds, and whether it is asking to be
+    // repaired from it instead of with a keyframe (see nyx_common::codec::LtrReport).
+    let mut ltr_now: Option<nyx_common::codec::LtrReport> = None;
+    let mut ltr_repair = false;
+    let mut ltr_req_at = Instant::now() - Duration::from_secs(1);
     let mut dbg_dec = 0u32;
     // H.264 must be fed in DECODE ORDER. The reassembler completes frames in
     // whatever order their last block happens to arrive (parity, retransmissions
@@ -394,6 +399,7 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                         } else if pend_pics.values().any(|(_, _, t)| t.elapsed() > HOLD) {
                             let skip_to = *pend_pics.keys().next().unwrap();
                             need_idr = true;
+                            ltr_repair = true;
                             next_id = Some(skip_to);
                         } else {
                             break;
@@ -424,8 +430,31 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                                     need_idr = false;
                                     pics_ok += 1;
                                     last_main = Instant::now();
+                                    // every reference that really arrived is confirmed to the
+                                    // encoder: it will not repair against an unconfirmed one
+                                    if let Some(r) = h264.ltr() {
+                                        ltr_now = Some(r);
+                                        // a concealed picture still "decodes": the frame
+                                        // numbers are what tell us pictures were lost
+                                        if r.gap {
+                                            need_idr = true;
+                                            ltr_repair = true;
+                                        }
+                                        if r.fresh_mark {
+                                            let _ = write_msg(s, &Msg::Ltr {
+                                                kind: 0,
+                                                idr_pic_id: r.idr_pic_id as u16,
+                                                marked: r.marked.unwrap_or(0) as u16,
+                                                current: r.frame_num as u16,
+                                            });
+                                        }
+                                    }
                                 } else {
                                     need_idr = true; // waiting for a keyframe
+                                    ltr_repair = true;
+                                    if let Some(r) = h264.ltr() {
+                                        ltr_now = Some(r);
+                                    }
                                     pics_fail += 1;
                                     // Frames keep arriving but nothing decodes for
                                     // 6 s: the decoder is wedged and even an IDR
@@ -507,6 +536,19 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
         // Feedback every 150 ms (as nyx-rx on the PC): the TX needs it for OLLA and the bitrate
         // regulation loop (delivered/sent ratio) to track; too sparse and the TX guesses blind. 150
         // ms normally, 100 ms while a keyframe is wanted (same as nyx-rx).
+        // the cheap repair, beside the keyframe request and never instead of it
+        if ltr_repair && ltr_req_at.elapsed() >= Duration::from_millis(100) {
+            if let Some(r) = ltr_now.filter(|r| r.marked.is_some()) {
+                ltr_req_at = Instant::now();
+                ltr_repair = false;
+                let _ = write_msg(s, &Msg::Ltr {
+                    kind: 1,
+                    idr_pic_id: r.idr_pic_id as u16,
+                    marked: r.marked.unwrap_or(0) as u16,
+                    current: r.frame_num as u16,
+                });
+            }
+        }
         let fb_due = if need_idr { 100 } else { 150 };
         if last_fb.elapsed() >= Duration::from_millis(fb_due) {
             last_fb = Instant::now();
@@ -558,7 +600,7 @@ impl RxApp {
                 let host = addr.split(':').next().unwrap_or("192.168.0.10");
                 format!("{host}:7202")
             }),
-            &["get", "trig", "softagc", "hop status", "license", "role"],
+            &["get", "trig", "softagc", "hop status", "license", "role", "range"],
         );
         let addr_buf = sh.addr.lock().unwrap().clone();
         RxApp {
@@ -653,6 +695,7 @@ impl eframe::App for RxApp {
             title: "NYXHOP · GROUND".into(),
             empty_text: "waiting for video…".into(),
             plates: self.hud_plates,
+            range: nu::range_of(&st),
         };
         let tex = self.tex.clone();
         let mut open = self.drawer_open;

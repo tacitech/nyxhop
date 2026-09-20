@@ -60,6 +60,15 @@ pub struct HudData {
     pub empty_text: String,
     /// Draw the two corner readouts. Off leaves the video and the pills alone.
     pub plates: bool,
+    /// v40.46: the link's own range reading (metres, one sigma), when the board has one
+    pub range: Option<(f32, f32)>,
+}
+
+/// The board's range reading out of its console snapshot (`range`): metres and one sigma.
+pub fn range_of(st: &BoardState) -> Option<(f32, f32)> {
+    let m: f32 = st.kv.get("range_m")?.parse().ok()?;
+    let s: f32 = st.kv.get("range_sigma_m").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    Some((m, s))
 }
 
 fn plate(p: &egui::Painter, at: egui::Pos2, al: egui::Align2, lines: &[(String, f32, Color32)]) {
@@ -153,6 +162,19 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
             (format!("{:.0} kbps", d.kbps), 12.0, th::TXT),
         ],
     );
+    if let Some((m, s)) = d.range {
+        let big = if m.abs() >= 1000.0 { format!("{:.2} km", m / 1000.0) } else { format!("{m:.1} m") };
+        plate(
+            &p,
+            egui::pos2(rect.center().x, rect.bottom() - pad),
+            egui::Align2::CENTER_BOTTOM,
+            &[
+                ("RANGE".into(), 11.0, th::DIM),
+                (big, 24.0, th::CYAN),
+                (format!("±{s:.1} m"), 12.0, th::TXT),
+            ],
+        );
+    }
     }
     if let Some((txt, col)) = &d.banner {
         plate(

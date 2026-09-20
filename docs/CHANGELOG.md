@@ -4,7 +4,10 @@
 
 * Video link: H.264, adaptive bitrate and modulation, retransmission of lost frames, two-layer
   simulcast for the low end (off by default: it adds ~30 ms of latency; switch it on in the
-  aircraft app for reach through fades).
+  aircraft app for reach through fades). After a loss the aircraft repairs the picture with a
+  small frame pointing at one the ground still holds, instead of a whole keyframe - measured on
+  air, 544 bytes against 18553, so the picture comes back without the freeze a keyframe costs on
+  the slow rungs ("Repair without keyframes" in the aircraft app).
 * Channels: user-defined tables over 70 MHz–6 GHz, Auto policy (hold the best channel, re-scan
   when it degrades or the link drops), fixed-channel mode, tables sent to the aircraft over the air.
 * Control link on its own channel pool, frequency hopping in 125 ms slots, paired links with a

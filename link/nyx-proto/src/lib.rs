@@ -163,6 +163,19 @@ pub enum Msg {
     /// v40.37: one chunk of the receive end's channel table heard on the control
     /// channel (kind 0 video, 1 control pool; channels in 0.1 MHz; eff epoch 0,0 = now).
     HopTable { kind: u8, idx: u8, n: u8, tag: u8, epoch_hi: u8, eff_e8: u8, mhz10: Vec<u16> },
+    /// v40.46 ranging: the transmitting end's time stamps, sent down inside the video
+    /// stream. Times are in that board's sample clock (48 bits). `tx` = when some of its
+    /// recent bursts left, `ctl` = (sequence number, arrival time) of control frames it
+    /// decoded. The receiving end pairs them with its own stamps; the two clocks never
+    /// have to agree.
+    RangeRep { samp_hz: u32, tx: Vec<u64>, ctl: Vec<(u8, u64)> },
+    /// v40.47: what the receiving end knows about LONG-TERM REFERENCES, on its way to the
+    /// encoder. kind 0 = "I decoded the picture that marks `marked`" (the encoder will only
+    /// repair against a reference the receiver has confirmed, so this is not optional),
+    /// kind 1 = "repair me: I am at `current`, the last good thing I hold is `marked`".
+    /// `idr_pic_id` is the encoder's IDR period as the decoder read it - feedback from an
+    /// older period is ignored, which is why it travels along.
+    Ltr { kind: u8, idr_pic_id: u16, marked: u16, current: u16 },
 }
 
 impl Msg {
@@ -188,6 +201,8 @@ impl Msg {
             Msg::LicPush { .. } => 18,
             Msg::HopTable { .. } => 19,
             Msg::TxBlock { .. } => 20,
+            Msg::RangeRep { .. } => 21,
+            Msg::Ltr { .. } => 22,
         }
     }
 }
@@ -261,6 +276,25 @@ pub fn encode_msg(msg: &Msg) -> Vec<u8> {
             for c in mhz10.iter().take(255) {
                 body.extend_from_slice(&c.to_le_bytes());
             }
+        }
+        Msg::RangeRep { samp_hz, tx, ctl } => {
+            // [samp_hz u32][n_tx u8][n_ctl u8] then 6-byte stamps, control ones led by seq
+            body.extend_from_slice(&samp_hz.to_le_bytes());
+            body.push(tx.len().min(255) as u8);
+            body.push(ctl.len().min(255) as u8);
+            for t in tx.iter().take(255) {
+                body.extend_from_slice(&t.to_le_bytes()[..6]);
+            }
+            for (s, t) in ctl.iter().take(255) {
+                body.push(*s);
+                body.extend_from_slice(&t.to_le_bytes()[..6]);
+            }
+        }
+        Msg::Ltr { kind, idr_pic_id, marked, current } => {
+            body.push(*kind);
+            body.extend_from_slice(&idr_pic_id.to_le_bytes());
+            body.extend_from_slice(&marked.to_le_bytes());
+            body.extend_from_slice(&current.to_le_bytes());
         }
         Msg::Ping => {}
         Msg::UserText { text } => {
@@ -547,6 +581,31 @@ pub fn decode_msg(buf: &[u8]) -> io::Result<Msg> {
                 flags: body[10],
                 payload: body[15..].to_vec(),
             })
+        }
+        21 => {
+            if body.len() < 6 {
+                return Err(err());
+            }
+            let (nt, nc) = (usize::from(body[4]), usize::from(body[5]));
+            if body.len() < 6 + 6 * nt + 7 * nc {
+                return Err(err());
+            }
+            let t48 = |b: &[u8]| {
+                let mut w = [0u8; 8];
+                w[..6].copy_from_slice(&b[..6]);
+                u64::from_le_bytes(w)
+            };
+            let tx = (0..nt).map(|i| t48(&body[6 + 6 * i..])).collect();
+            let c0 = 6 + 6 * nt;
+            let ctl = (0..nc).map(|i| (body[c0 + 7 * i], t48(&body[c0 + 7 * i + 1..]))).collect();
+            Ok(Msg::RangeRep { samp_hz: u32::from_le_bytes(body[0..4].try_into().unwrap()), tx, ctl })
+        }
+        22 => {
+            if body.len() < 7 {
+                return Err(err());
+            }
+            let w = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+            Ok(Msg::Ltr { kind: body[0], idr_pic_id: w(1), marked: w(3), current: w(5) })
         }
         19 => {
             if body.len() < 7 {
@@ -911,6 +970,9 @@ mod lic_msgs {
             Msg::LicInfo { dna: 0x0123456789abcde, state: 2, minutes: 77, trial_min: 1200, ver: 1 },
             Msg::LicPush { dna: 0x0123456789abcde, aux: 0x0101000100001234, word: 0xdeadbeef01234567 },
             Msg::HopTable { kind: 1, idx: 0, n: 4, tag: 9, epoch_hi: 1, eff_e8: 2, mhz10: vec![24120, 24320, 24520, 24720] },
+            Msg::RangeRep { samp_hz: 15_360_000, tx: vec![1, 0xFFFF_FFFF_FFFF, 123_456_789_012], ctl: vec![(7, 99), (255, 0x8000_0000_0001)] },
+            Msg::Ltr { kind: 1, idr_pic_id: 65535, marked: 4095, current: 4096 },
+            Msg::Ltr { kind: 0, idr_pic_id: 0, marked: 0, current: 0 },
         ] {
             let b = encode_msg(&m);
             let back = decode_msg(&b[4..]).expect("decodes");

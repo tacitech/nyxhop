@@ -1506,6 +1506,17 @@ fn demod_loop(
     let mut goodput: VecDeque<(Instant, usize)> = VecDeque::new();
     let mut last_feedback = Instant::now();
     let mut need_idr = false;
+    // v40.47 long-term reference: where this decoder is, and whether it is asking to be
+    // repaired from the reference it holds instead of with a whole keyframe.
+    let mut ltr_now: Option<nyx_common::codec::LtrReport> = None;
+    let mut ltr_repair = false;
+    let mut ltr_req_at = Instant::now() - Duration::from_secs(1);
+    let mut ltr_marks: u64 = 0;
+    let mut ltr_asks: u64 = 0;
+    let mut ltr_gaps: u64 = 0;
+    // why no repair is being asked for, said once: either the decoder does not report
+    // references (an encoder without LTR at the other end) or it holds none yet
+    let mut ltr_said_none = false;
     let new_dec = |shared: &Shared| {
         if shared.conceal.load(Ordering::Relaxed) {
             VideoDecoder::new_concealing()
@@ -2279,6 +2290,7 @@ fn demod_loop(
                 log(&format!("reorder: frame {n} not recovered within {} ms -> skipping to {skip_to}, asking for a keyframe", hold.as_millis()));
                 frames_lost += skip_to.wrapping_sub(n) as u64;
                 need_idr = true;
+                ltr_repair = true;
                 next_deliver_id = Some(skip_to);
             } else {
                 break;
@@ -2324,9 +2336,51 @@ fn demod_loop(
                             need_idr = false;
                             pics_ok += 1;
                             last_main = std::time::Instant::now();
+                            // Tell the transmit end about every long-term reference that
+                            // actually arrived: openh264 will only repair against one the
+                            // receiver has confirmed, so without this the repair path does
+                            // not exist and every loss costs a keyframe.
+                            if let Some(r) = vdec.ltr() {
+                                ltr_now = Some(r);
+                                // A concealing decoder never refuses a picture, so "it
+                                // decoded" says nothing about whether the reference chain
+                                // survived. The frame numbers do: a step other than one
+                                // means pictures were lost, and THAT is what asks for a
+                                // repair. Without it the request was cancelled by the next
+                                // concealed picture and neither a repair nor a keyframe was
+                                // ever sent (measured 19/9: a 5 s blackout, 0 keyframes).
+                                if r.gap {
+                                    need_idr = true;
+                                    ltr_repair = true;
+                                    ltr_gaps += 1;
+                                    if ltr_gaps <= 5 || ltr_gaps % 20 == 0 {
+                                        log(&format!(
+                                            "video: reference chain broken at frame {} (#{ltr_gaps}) - asking for a repair",
+                                            r.frame_num));
+                                    }
+                                }
+                                if r.fresh_mark {
+                                    ltr_marks += 1;
+                                    if ltr_marks <= 3 || ltr_marks % 20 == 0 {
+                                        log(&format!(
+                                            "LTR: reference {} arrived (#{ltr_marks}, idr {} frame {}) - telling the TX",
+                                            r.marked.unwrap_or(-1), r.idr_pic_id, r.frame_num));
+                                    }
+                                    send_msg(&shared, &Msg::Ltr {
+                                        kind: 0,
+                                        idr_pic_id: r.idr_pic_id as u16,
+                                        marked: r.marked.unwrap_or(0) as u16,
+                                        current: r.frame_num as u16,
+                                    });
+                                }
+                            }
                         }
                         None => {
                             need_idr = true; // waiting for a keyframe
+                            ltr_repair = true;
+                            if let Some(r) = vdec.ltr() {
+                                ltr_now = Some(r);
+                            }
                             pics_fail += 1;
                             // v40.24: frames keep arriving but no picture for > 2 s -> the decoder
                             // is stuck (even an IDR does not save it) -> recreate
@@ -2477,6 +2531,34 @@ fn demod_loop(
         } else {
             bler_window.iter().filter(|&&f| f).count() as f32 / bler_window.len() as f32
         };
+
+        // The cheap repair, asked for beside the keyframe request (and never instead of it:
+        // an old transmit end, or one whose encoder refused long-term references, still has
+        // need_idr to fall back on).
+        if ltr_repair && !ltr_said_none && ltr_now.is_none_or(|r| r.marked.is_none()) {
+            ltr_said_none = true;
+            log(&format!(
+                "LTR: no long-term reference held ({}), a loss will cost a keyframe",
+                if ltr_now.is_none() { "the decoder reports none" } else { "none marked yet" }));
+        }
+        if ltr_repair && ltr_req_at.elapsed() >= Duration::from_millis(100) {
+            if let Some(r) = ltr_now.filter(|r| r.marked.is_some()) {
+                ltr_req_at = Instant::now();
+                ltr_repair = false;
+                ltr_asks += 1;
+                if ltr_asks <= 5 || ltr_asks % 20 == 0 {
+                    log(&format!(
+                        "LTR: asking to be repaired from reference {} (#{ltr_asks}, I am at {})",
+                        r.marked.unwrap_or(-1), r.frame_num));
+                }
+                send_msg(&shared, &Msg::Ltr {
+                    kind: 1,
+                    idr_pic_id: r.idr_pic_id as u16,
+                    marked: r.marked.unwrap_or(0) as u16,
+                    current: r.frame_num as u16,
+                });
+            }
+        }
 
         maybe_feedback(&shared, &mut last_feedback, snr_smooth, &bler_window,
                        segs_ok, segs_lost, need_idr,
@@ -2664,6 +2746,8 @@ pub struct RxApp {
     /// value the picture was frozen at (F / the button)
     counter_on: bool,
     frozen: Option<u32>,
+    /// v40.46 range: the distance between the antennas when Zero is pressed (metres)
+    range_known: f32,
 }
 
 impl RxApp {
@@ -2676,7 +2760,7 @@ impl RxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.11");
                 format!("{host}:7202")
             }),
-            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role"],
+            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range"],
         );
         RxApp {
             shared,
@@ -2696,6 +2780,7 @@ impl RxApp {
             ev_lost_at: None,
             ev_banner: None,
             counter_on: false,
+            range_known: 0.0,
             frozen: None,
         }
     }
@@ -2756,6 +2841,41 @@ impl RxApp {
         use nyx_common::ui as nu;
         let st = self.board.snapshot();
         let connected = self.shared.connected.load(Ordering::Relaxed);
+
+        // v40.46: the link measures its own length (two-way ranging on the boards' sample
+        // clocks). The radios add a fixed delay of their own; Zero removes it once, with the
+        // antennas a known distance apart.
+        th::section(ui, "Range", true, |ui| {
+            let hw = st.kv.get("range_hw").map(String::as_str);
+            match (nu::range_of(&st), hw) {
+                (Some((m, s)), _) => {
+                    let pairs = st.kv.get("range_pairs").cloned().unwrap_or_default();
+                    let ppm = st.kv.get("range_ppm").cloned().unwrap_or_default();
+                    th::kv(ui, "Distance", &format!("{m:.1} m  ±{s:.1}"));
+                    th::kv(ui, "Frames in the fit", &format!("{pairs} (video / control)"));
+                    th::kv(ui, "Clocks apart", &format!("{ppm} ppm"));
+                }
+                (None, Some("1")) => {
+                    ui.label(egui::RichText::new("waiting: it needs video coming down and control going up").small().color(th::DIM));
+                }
+                (None, Some(_)) => {
+                    ui.label(egui::RichText::new("this board's FPGA design has no time stamps (update the board)").small().color(th::DIM));
+                }
+                (None, None) => {
+                    ui.label(egui::RichText::new("the board does not answer `range` (update the board)").small().color(th::DIM));
+                }
+            }
+            th::row(ui, "Antennas apart", |ui| {
+                ui.add(egui::DragValue::new(&mut self.range_known).speed(0.1).range(0.0..=100_000.0).suffix(" m"));
+                if ui
+                    .add_enabled(nu::range_of(&st).is_some(), egui::Button::new("Zero"))
+                    .on_hover_text("The reading becomes this distance: removes the radios' own delay. Do it once per pair of boards, with the antennas a measured distance apart.")
+                    .clicked()
+                {
+                    self.board.send(format!("range zero {:.2}", self.range_known));
+                }
+            });
+        });
 
         th::section(ui, "Latency test", true, |ui| {
             if ui
@@ -2945,6 +3065,7 @@ impl eframe::App for RxApp {
             title: "NYXHOP · GROUND".into(),
             empty_text: "waiting for video…".into(),
             plates: self.hud_plates,
+            range: nu::range_of(&st),
         };
         let tex = self.tex.clone();
         let mut open = self.drawer_open;
