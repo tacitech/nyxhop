@@ -65,10 +65,15 @@ pub struct HudData {
 }
 
 /// The board's range reading out of its console snapshot (`range`): metres and one sigma.
+///
+/// Shown from zero up. Close in, the noise is larger than the distance itself (on the bench,
+/// zeroed: 0 +/- 9 m), so the raw estimate spends about half its samples below zero - which
+/// reads as a broken instrument rather than as the noise it is. The signed value is untouched
+/// in the console (`range_m`), which is what calibration works from.
 pub fn range_of(st: &BoardState) -> Option<(f32, f32)> {
     let m: f32 = st.kv.get("range_m")?.parse().ok()?;
     let s: f32 = st.kv.get("range_sigma_m").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    Some((m, s))
+    Some((m.max(0.0), s))
 }
 
 fn plate(p: &egui::Painter, at: egui::Pos2, al: egui::Align2, lines: &[(String, f32, Color32)]) {
