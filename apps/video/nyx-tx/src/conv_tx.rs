@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nyx_common::logging::log;
-use nyx_proto::{Msg, TXB_CONV, TXB_FILV, conv_frames};
+use nyx_proto::{Msg, TXB_CONV, TXB_FILV};
 
 use crate::net::Net;
 use crate::Shared;
@@ -27,8 +27,9 @@ use crate::Shared;
 pub static CUR_MCS: AtomicU64 = AtomicU64::new(5);
 // v32 minstrel: the worker sets a probe rung (0xFF = none); every PROBE_EVERY-th block goes out at
 // that rung so the NEIGHBOUR's prob statistics stay fresh without betting the whole stream (the
-// minstrel/mac80211 principle).
-pub static PROBE_MCS: AtomicU64 = AtomicU64::new(0xFF);
+// minstrel/mac80211 principle). v40.49: two rungs, low byte and the byte above it; the probe
+// blocks alternate between them (0xFF in the second = the first one only).
+pub static PROBE_MCS: AtomicU64 = AtomicU64::new(0xFFFF);
 pub static PROBE_EVERY: AtomicU64 = AtomicU64::new(12);
 /// BLOCKS sent per MCS actually used (probes included); the worker divides ok_mcs (from feedback)
 /// by this for a per-rate prob, on the SAME window. v40: 7 entries: rung 6 (the repeat step) is
@@ -115,7 +116,10 @@ fn cfg_filv(shared: &Shared) -> bool {
 ///
 /// `gap_ms` is re-read from the config every loop, so `set gap` works at runtime.
 pub fn spawn(shared: Arc<Shared>, net: Arc<Net>) -> ConvTx {
-    let (tx, rx) = sync_channel::<(u64, Vec<u8>, Option<usize>)>(64);
+    // v40.48: 64 -> 128 blocks. A 640x480 keyframe is 33-42 KB (measured 20/9): ~80-100
+    // compact blocks at MCS0; a queue shorter than a keyframe cuts its head off, which costs a
+    // repair and a longer freeze than letting it wait for the air it needs anyway.
+    let (tx, rx) = sync_channel::<(u64, Vec<u8>, Option<usize>)>(128);
     std::thread::Builder::new()
         .name("conv-tx".into())
         .spawn(move || {
@@ -135,17 +139,26 @@ pub fn spawn(shared: Arc<Shared>, net: Arc<Net>) -> ConvTx {
                 let mut mcs = (CUR_MCS.load(Ordering::Relaxed) as usize).min(6);
                 // xen block tham do (minstrel lookaround)
                 blk_ctr = blk_ctr.wrapping_add(1);
-                let pm = PROBE_MCS.load(Ordering::Relaxed) as usize;
+                let pw = PROBE_MCS.load(Ordering::Relaxed);
                 let pe = PROBE_EVERY.load(Ordering::Relaxed).max(2);
-                if pm < 6 && blk_ctr % pe == 0 {
-                    mcs = pm;
+                if blk_ctr % pe == 0 {
+                    let (p1, p2) = ((pw & 0xFF) as usize, ((pw >> 8) & 0xFF) as usize);
+                    let pm = if p2 < 6 && (blk_ctr / pe) % 2 == 1 { p2 } else { p1 };
+                    if pm < 6 {
+                        mcs = pm;
+                    }
                 }
                 // v36: the simulcast base layer PINNED hard (no minstrel/probe)
                 if let Some(p) = pin {
                     mcs = p.min(6);
                 }
                 SENT_MCS[mcs].fetch_add(1, Ordering::Relaxed);
-                let nfrag = conv_frames(mcs, block.len());
+                // v40.48: the frames this block REALLY takes on air (compact when the board does)
+                let nfrag = nyx_proto::conv_frames_block(
+                    mcs,
+                    &block,
+                    crate::worker::BOARD_COMPACT.load(Ordering::Relaxed),
+                );
                 if nfrag > MAX_FRAGS {
                     log(&format!("conv-tx: MCS{mcs} needs {nfrag} fragments > {MAX_FRAGS}"));
                     continue;
@@ -182,7 +195,12 @@ fn send_paced(
         // f/s): still a stop against runaway, while the real cadence is handed back to the board's
         // txgap as originally designed.
         let floor_ms = shared.pace_floor_us.load(Ordering::Relaxed) as f32 / 1000.0;
-        c.air_gap_ms.max(floor_ms).max(0.4)
+        // v40.48: never faster than the board puts frames on air (its txframe_us). At 1.8 ms a
+        // frame against the board's 2.013 the app ran 10 % ahead, and a keyframe of small
+        // compact blocks filled the board's queue and lost its head (12 blocks in 20 ms seen
+        // at the drop, 20/9).
+        let board_ms = crate::worker::BOARD_FRAME_US.load(Ordering::Relaxed) as f32 / 1000.0;
+        c.air_gap_ms.max(floor_ms).max(board_ms).max(0.4)
     };
     let want = Duration::from_micros((gap_ms * 1000.0 * nfrag.max(1) as f32) as u64);
     // Windows thread::sleep OVERSLEEPS by ~1.5 ms (timer resolution); measured on the cable: a 2 ms

@@ -67,7 +67,7 @@ pub mod mcs;
 
 pub use mcs::{
     CONV_MCS_COUNT, FRAME_PAYLOAD_BYTES, Mcs, RV_SEQUENCE, TXB_CONV, TXB_FABRIC, TXB_FILV,
-    TXB_PAIR, conv_frames, conv_payload_bytes,
+    TXB_PAIR, conv_frames, conv_frames_block, conv_payload_bytes, conv_seg_one_frame,
 };
 
 #[derive(Debug, Clone)]
@@ -179,6 +179,36 @@ pub enum Msg {
 }
 
 impl Msg {
+    /// The variant's name, for logs. Exhaustive on purpose: a new message kind has to be named
+    /// here before anything compiles, and a reader that drops a kind it does not know can say
+    /// WHICH (v40.47: Msg::Ltr vanished through catch-all arms without a trace).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Msg::IqFrame { .. } => "IqFrame",
+            Msg::Feedback { .. } => "Feedback",
+            Msg::Nack { .. } => "Nack",
+            Msg::Ping => "Ping",
+            Msg::EqFrame { .. } => "EqFrame",
+            Msg::LlrFrame { .. } => "LlrFrame",
+            Msg::DecFrame { .. } => "DecFrame",
+            Msg::TxBits { .. } => "TxBits",
+            Msg::TxPayload { .. } => "TxPayload",
+            Msg::TxBlock { .. } => "TxBlock",
+            Msg::HopCmd { .. } => "HopCmd",
+            Msg::UserText { .. } => "UserText",
+            Msg::Tlm { .. } => "Tlm",
+            Msg::HopMask { .. } => "HopMask",
+            Msg::HopDesc { .. } => "HopDesc",
+            Msg::LinkBind { .. } => "LinkBind",
+            Msg::TxChan { .. } => "TxChan",
+            Msg::LicInfo { .. } => "LicInfo",
+            Msg::LicPush { .. } => "LicPush",
+            Msg::HopTable { .. } => "HopTable",
+            Msg::RangeRep { .. } => "RangeRep",
+            Msg::Ltr { .. } => "Ltr",
+        }
+    }
+
     fn type_byte(&self) -> u8 {
         match self {
             Msg::IqFrame { .. } => 1,

@@ -24,6 +24,40 @@ pub mod stamp;
 pub mod start;
 pub mod theme;
 
+/// v40.49: the SNR a receiver reports back is measured on frames that arrive (on a board: blocks
+/// that decode), so in a fade where none does it froze at the last good value. The simulator's 5 dB
+/// fade reported 10 dB for 8 s, and the sender took the loss for interference and held a rung
+/// that delivered nothing. After 300 ms without a frame the reading falls 30 dB per second, to 0
+/// (10 dB/s at first: a sudden -24 dB fade on the bench took 3 s to reach the rate control).
+pub struct SnrStarve {
+    last_frame: std::time::Instant,
+    tick: std::time::Instant,
+}
+
+impl Default for SnrStarve {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        SnrStarve { last_frame: now, tick: now }
+    }
+}
+
+impl SnrStarve {
+    /// A frame arrived (its SNR is folded in by the caller).
+    pub fn frame(&mut self) {
+        self.last_frame = std::time::Instant::now();
+    }
+
+    /// Call often (every frame and every idle wake-up); lowers `snr` while starving.
+    pub fn apply(&mut self, snr: &mut f32) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.tick).as_secs_f32();
+        self.tick = now;
+        if now.duration_since(self.last_frame).as_millis() > 300 && *snr > 0.0 {
+            *snr = (*snr - 30.0 * dt).max(0.0);
+        }
+    }
+}
+
 /// An RGB8 frame passed between threads and to the GUI.
 #[derive(Clone)]
 pub struct RgbFrame {

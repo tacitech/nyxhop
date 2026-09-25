@@ -680,7 +680,7 @@ fn read_loop(
                     ));
                 }
             }
-            Ok(_) => {}
+            Ok(other) => nyx_common::logging::log_unhandled("nyx-rx board link", other.kind()),
             Err(e) => {
                 log(&format!("read_loop exit: {e}"));
                 return;
@@ -1465,6 +1465,7 @@ fn demod_loop(
     let mut sig_failures = 0u64;
     let mut bler_window: VecDeque<bool> = VecDeque::new();
     let mut snr_smooth = 10.0f32;
+    let mut snr_starve = nyx_common::SnrStarve::default();
     let mut segs_ok = 0u64;
     // v32 minstrel: count delivered blocks PER MCS (wrapping u16); the TX divides by its own
     // sent-per-MCS for a per-rate probability (minstrel-style statistics).
@@ -1631,6 +1632,28 @@ fn demod_loop(
                              pending={}) - predemod worker stalled?",
                             pending_pre.len()
                         ));
+                    }
+                    snr_starve.apply(&mut snr_smooth);
+                    // v40.49: the live numbers are published below, after a frame; with none
+                    // coming they froze (the simulator: "24 fps" through an 8 s freeze)
+                    if let Some(cut) = Instant::now().checked_sub(Duration::from_secs(2)) {
+                        while fps_events.front().is_some_and(|&t| t < cut) {
+                            fps_events.pop_front();
+                        }
+                        while disp_events.front().is_some_and(|&t| t < cut) {
+                            disp_events.pop_front();
+                        }
+                        while goodput.front().is_some_and(|&(t, _)| t < cut) {
+                            goodput.pop_front();
+                        }
+                    }
+                    if let Ok(mut ui) = shared.ui.try_lock() {
+                        let m = &mut ui.metrics;
+                        m.snr_db = snr_smooth;
+                        m.rx_fps = fps_events.len() as f32 / 2.0;
+                        m.disp_fps = disp_events.len() as f32 / 2.0;
+                        m.goodput_kbps = goodput.iter().map(|&(_, b)| b).sum::<usize>() as f32
+                            * 8.0 / 2.0 / 1000.0;
                     }
                     maybe_feedback(&shared, &mut last_feedback, snr_smooth,
                                    &bler_window, segs_ok, segs_lost, need_idr,
@@ -1976,8 +1999,10 @@ fn demod_loop(
         };
         let mut delivered = false;
         let mut seg_src_base = false; // v37
+        snr_starve.apply(&mut snr_smooth);
         if demod.synced {
             snr_smooth = 0.85 * snr_smooth + 0.15 * demod.snr_db;
+            snr_starve.frame();
             // IR-HARQ: deposit this transmission's LLRs (at its rv) into
             // the accumulated circular buffer for this seq.
             let combined =

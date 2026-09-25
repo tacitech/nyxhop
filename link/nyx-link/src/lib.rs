@@ -52,11 +52,21 @@ impl SourceType {
 
 /// Split one application data unit into `BLOCK_BYTES` PHY payload blocks.
 pub fn packetize(frame_id: u32, src: SourceType, data: &[u8]) -> Vec<[u8; BLOCK_BYTES]> {
-    let seg_cnt = data.len().div_ceil(SEG_PAYLOAD).max(1) as u16;
+    packetize_seg(frame_id, src, data, SEG_PAYLOAD)
+}
+
+/// v40.48: like `packetize`, at most `seg` bytes of data per block. A board that sends blocks
+/// in compact form (only the bytes in use) puts a small block on air as ONE frame at a slow
+/// rung instead of five; `nyx_proto::conv_seg_one_frame` says how small is small enough.
+/// Blocks keep their 2016 B and their own `len`, so the receiver needs nothing new for the
+/// data blocks.
+pub fn packetize_seg(frame_id: u32, src: SourceType, data: &[u8], seg: usize) -> Vec<[u8; BLOCK_BYTES]> {
+    let seg = seg.clamp(1, SEG_PAYLOAD);
+    let seg_cnt = data.len().div_ceil(seg).max(1) as u16;
     let mut out = Vec::with_capacity(seg_cnt as usize);
     for idx in 0..seg_cnt {
-        let lo = idx as usize * SEG_PAYLOAD;
-        let hi = (lo + SEG_PAYLOAD).min(data.len());
+        let lo = idx as usize * seg;
+        let hi = (lo + seg).min(data.len());
         let chunk = &data[lo..hi];
         let mut blk = [0u8; BLOCK_BYTES];
         blk[0..2].copy_from_slice(&MAGIC.to_be_bytes());
@@ -88,7 +98,27 @@ pub fn packetize_fec(
     data: &[u8],
     fec: bool,
 ) -> Vec<[u8; BLOCK_BYTES]> {
-    let mut out = packetize(frame_id, src, data);
+    packetize_fec_seg(frame_id, src, data, fec, SEG_PAYLOAD)
+}
+
+/// Where a version-2 parity block keeps the segment size (the last two payload bytes, past any
+/// segment it can describe - see `packetize_fec_seg`).
+const PAR_SEG_AT: usize = HEADER_BYTES + SEG_PAYLOAD - 2;
+
+/// v40.48: `packetize_fec` with `seg` bytes per block. With segments shorter than the full
+/// block, a rebuilt MIDDLE block is `seg` long, which the receiver cannot know from a two-block
+/// frame whose first block was lost - so the parity block says it: version 2, the segment size
+/// in its last two payload bytes (outside the XOR, which covers only `seg`). A receiver that
+/// predates this refuses version 2 and simply goes without the parity: never a wrong frame.
+pub fn packetize_fec_seg(
+    frame_id: u32,
+    src: SourceType,
+    data: &[u8],
+    fec: bool,
+    seg: usize,
+) -> Vec<[u8; BLOCK_BYTES]> {
+    let seg = if seg >= SEG_PAYLOAD - 2 { SEG_PAYLOAD } else { seg.max(1) };
+    let mut out = packetize_seg(frame_id, src, data, seg);
     let n = out.len();
     // v34: the n < 2 guard is GONE. Measured on the board: at low bitrate (vbr 309 kbps @ 30 fps ->
     // ~1.3 KB/frame < 1 block) EVERY frame is a single block, so FEC never ran exactly when it was
@@ -101,12 +131,12 @@ pub fn packetize_fec(
         return out;
     }
     let last_len = {
-        let rem = data.len() % SEG_PAYLOAD;
-        if rem == 0 && !data.is_empty() { SEG_PAYLOAD } else { rem }
+        let rem = data.len() % seg;
+        if rem == 0 && !data.is_empty() { seg } else { rem }
     };
     let mut par = [0u8; BLOCK_BYTES];
     par[0..2].copy_from_slice(&MAGIC.to_be_bytes());
-    par[2] = 1;
+    par[2] = if seg < SEG_PAYLOAD { 2 } else { 1 };
     par[3] = src as u8;
     par[4..8].copy_from_slice(&frame_id.to_be_bytes());
     par[8..10].copy_from_slice(&(n as u16).to_be_bytes()); // idx == cnt
@@ -116,6 +146,9 @@ pub fn packetize_fec(
         for i in 0..SEG_PAYLOAD {
             par[HEADER_BYTES + i] ^= b[HEADER_BYTES + i];
         }
+    }
+    if seg < SEG_PAYLOAD {
+        par[PAR_SEG_AT..PAR_SEG_AT + 2].copy_from_slice(&(seg as u16).to_be_bytes());
     }
     let crc = crc32fast::hash(&par[..BLOCK_BYTES - CRC_BYTES]);
     par[BLOCK_BYTES - CRC_BYTES..].copy_from_slice(&crc.to_be_bytes());
@@ -132,6 +165,8 @@ pub struct Segment {
     pub payload: Vec<u8>,
     /// Some(len) if this is the PARITY block: length of the LAST data block.
     pub par_last_len: Option<usize>,
+    /// v40.48: a version-2 parity block's segment size (the length of every block but the last).
+    pub par_seg: Option<usize>,
 }
 
 /// Validate CRC and parse one received block. None => block corrupt.
@@ -143,7 +178,7 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
     if crc32fast::hash(&blk[..BLOCK_BYTES - CRC_BYTES]) != crc_rx {
         return None;
     }
-    if u16::from_be_bytes([blk[0], blk[1]]) != MAGIC || blk[2] != 1 {
+    if u16::from_be_bytes([blk[0], blk[1]]) != MAGIC || !(blk[2] == 1 || blk[2] == 2) {
         return None;
     }
     let src = SourceType::from_u8(blk[3])?;
@@ -158,6 +193,16 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
         return None;
     }
     let take = if is_par { SEG_PAYLOAD } else { len };
+    // version 2 is only ever a parity block carrying its segment size
+    let par_seg = if blk[2] == 2 {
+        let s = u16::from_be_bytes([blk[PAR_SEG_AT], blk[PAR_SEG_AT + 1]]) as usize;
+        if !is_par || s == 0 || s >= SEG_PAYLOAD - 1 {
+            return None;
+        }
+        Some(s)
+    } else {
+        None
+    };
     Some(Segment {
         frame_id,
         seg_idx,
@@ -165,6 +210,7 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
         src,
         payload: blk[HEADER_BYTES..HEADER_BYTES + take].to_vec(),
         par_last_len: if is_par { Some(len) } else { None },
+        par_seg,
     })
 }
 
@@ -176,6 +222,8 @@ struct Pending {
     parity: Option<Vec<u8>>,
     /// length of the LAST data block (from the parity header).
     last_len: usize,
+    /// v40.48: length of every other block (a version-2 parity says it; full otherwise).
+    seg: usize,
 }
 
 #[derive(Default)]
@@ -210,6 +258,7 @@ impl Reassembler {
             parts: vec![None; cnt],
             parity: None,
             last_len: 0,
+            seg: SEG_PAYLOAD,
         });
         if entry.parts.len() != cnt {
             return None; // inconsistent header, drop
@@ -219,6 +268,7 @@ impl Reassembler {
             Some(ll) => {
                 entry.parity = Some(seg.payload);
                 entry.last_len = ll;
+                entry.seg = seg.par_seg.unwrap_or(SEG_PAYLOAD);
             }
             None => entry.parts[seg.seg_idx as usize] = Some(seg.payload),
         }
@@ -246,7 +296,7 @@ impl Reassembler {
                     }
                 }
             }
-            let want = if idx + 1 == cnt { entry.last_len } else { SEG_PAYLOAD };
+            let want = if idx + 1 == cnt { entry.last_len } else { entry.seg };
             rec.truncate(want.min(SEG_PAYLOAD));
             entry.parts[idx] = Some(rec);
             self.fec_recovered += 1;
@@ -404,6 +454,42 @@ mod tests {
         let done = r.push(par);
         assert!(done.is_some(), "n=1: chi parity la du de dung lai");
         assert_eq!(&done.unwrap().2[..300], &data[..]);
+    }
+
+    #[test]
+    fn small_segments_recover_every_single_loss() {
+        // v40.48: blocks cut small (one frame at a slow rung once the board compacts them):
+        // lose any ONE block of a frame and the parity puts it back at its right length -
+        // including a middle block, and the first of a two-block frame, which only the
+        // version-2 parity's segment size can size.
+        for (len, seg) in [(3000usize, 424usize), (500, 424), (424, 424), (848, 424), (1300, 649), (10, 199)] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8 + 1).collect();
+            let blocks = packetize_fec_seg(9, SourceType::H264, &data, true, seg);
+            let n_data = len.div_ceil(seg).max(1);
+            assert_eq!(blocks.len(), n_data + 1);
+            for lost in 0..n_data {
+                let mut r = Reassembler::new();
+                let mut got = None;
+                for (k, b) in blocks.iter().enumerate() {
+                    if k == lost {
+                        continue;
+                    }
+                    let s = parse_block(b).expect("block parses");
+                    if let Some(f) = r.push(s) {
+                        got = Some(f);
+                    }
+                }
+                let (id, src, out) = got.unwrap_or_else(|| panic!("len {len} seg {seg}: lost {lost} not recovered"));
+                assert_eq!((id, src), (9, SourceType::H264));
+                assert_eq!(out, data, "len {len} seg {seg} lost {lost}");
+            }
+        }
+        // the old call is byte for byte what it was: version 1, full segments
+        let data: Vec<u8> = (0..5000).map(|i| (i % 7) as u8).collect();
+        let a = packetize_fec(3, SourceType::H264, &data, true);
+        let b = packetize_fec_seg(3, SourceType::H264, &data, true, SEG_PAYLOAD);
+        assert_eq!(a, b);
+        assert!(a.iter().all(|blk| blk[2] == 1));
     }
 
     #[test]

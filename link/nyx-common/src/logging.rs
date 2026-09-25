@@ -55,6 +55,20 @@ fn timestamp() -> String {
 }
 
 /// Write one line to console + log file.
+/// v40.48: a reader got a message kind it does not handle. Said ONCE per (reader, kind), so a
+/// dropped kind is visible in the log instead of vanishing (and a busy one does not flood it).
+pub fn log_unhandled(reader: &str, kind: &'static str) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<(String, &'static str)>> = Mutex::new(Vec::new());
+    let mut s = SEEN.lock().unwrap();
+    if s.iter().any(|(r, k)| r == reader && *k == kind) {
+        return;
+    }
+    s.push((reader.to_string(), kind));
+    drop(s);
+    log(&format!("{reader}: got Msg::{kind}, which it does not handle - dropped (said once)"));
+}
+
 pub fn log(msg: &str) {
     let Some(l) = LOGGER.get() else {
         println!("{msg}");

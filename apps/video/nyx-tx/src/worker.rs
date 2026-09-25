@@ -10,7 +10,7 @@ use nyx_common::codec::VideoEncoder;
 use nyx_common::logging::{StatusLogger, log};
 use nyx_common::source::{DataGen, PatternGen, RtspAu, RtspShared, SourceKind, bytes_to_image, resize_rgb};
 use nyx_common::{RgbFrame, encode_jpeg};
-use nyx_link::{BLOCK_BYTES as FRAME_PAYLOAD_BYTES, SourceType, packetize, packetize_fec};
+use nyx_link::{BLOCK_BYTES as FRAME_PAYLOAD_BYTES, SourceType, packetize};
 use nyx_proto::{Mcs, Msg, RV_SEQUENCE, TXB_FABRIC, TXB_PAIR, conv_frames};
 
 use crate::net::Net;
@@ -32,6 +32,10 @@ const MCS_SNR_THRESH: [f32; 6] = [0.0, 4.0, 7.0, 10.5, 15.5, 17.5];
 const INTERF_MARGIN_DB: f32 = 6.0;
 /// ...and the current rung's block success below this counts as "losing".
 const INTERF_LOSS_PROB: f32 = 0.9;
+/// v40.50: a climb lost again within this many seconds failed (see `climb_at` in the worker)...
+const CLIMB_FAIL_S: u64 = 10;
+/// ...and a rung held this long clears its back-off.
+const CLIMB_OK_S: u64 = 20;
 /// How many recent PHY frames stay cached for ARQ.
 const ARQ_CACHE: usize = 256;
 /// Max retransmissions per PHY frame (each combine at RX is worth ~+3 dB).
@@ -83,6 +87,35 @@ const DUP_GAP: Duration = Duration::from_millis(12);
 /// % of frames = 20 % of blocks (4 frames/block) -> NACK 4.6/s, torn frames, 0-3 pictures/s.
 /// Turning off the base layer + parity (~50 % fewer frames) gave 18-26 pictures/s at once.
 const TX_PACE_MS: f32 = 3.0;
+/// v40.48: what one frame costs the board this app sends through, microseconds - the longer of
+/// its transmit pace and its encoder, both read from the daemon's `stats` (`txpace_us`,
+/// `txenc_us`). 0 = not heard yet, and then TX_PACE_MS stands in (the daemon's default). The
+/// constant used to be the only source, so a board paced faster was never used faster.
+pub static BOARD_FRAME_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// v40.48: the board sends small conv blocks in compact form (`txcompact=1` in its stats, read
+/// by the GUI's board poll), so a block cut to `conv_seg_one_frame` bytes is ONE frame at its
+/// rung. Set per video frame into COMPACT_ON together with the app's own conv path.
+pub static BOARD_COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COMPACT_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Application bytes a block carries at conv step `i`, and the frames it takes on air.
+fn block_shape(i: usize) -> (f32, f32) {
+    if COMPACT_ON.load(Ordering::Relaxed) {
+        (nyx_proto::conv_seg_one_frame(i) as f32, 1.0)
+    } else {
+        (FRAME_PAYLOAD_BYTES as f32, conv_frames(i, FRAME_PAYLOAD_BYTES) as f32)
+    }
+}
+
+/// The time per frame on air the budget is sized from, ms.
+fn board_frame_ms(air_gap_ms: f32) -> f32 {
+    match BOARD_FRAME_US.load(Ordering::Relaxed) {
+        // the board paces start to start, and a frame is 0.713 ms long whatever the pace
+        us if us > 0 => (us as f32 / 1000.0).max(0.713),
+        _ => (0.713 + air_gap_ms.max(0.4)).max(TX_PACE_MS),
+    }
+}
 
 fn conv_air_ceiling_bps(
     air_gap_ms: f32,
@@ -92,13 +125,17 @@ fn conv_air_ceiling_bps(
     fps: f32,
     fec: bool,
 ) -> f32 {
-    let period_ms = (0.713 + air_gap_ms.max(0.4)).max(TX_PACE_MS);
-    let nfrag = conv_frames(mcs.index().min(5), FRAME_PAYLOAD_BYTES) as f32;
+    let period_ms = board_frame_ms(air_gap_ms);
+    // v40.48: with compact blocks a block is one frame and carries a rung-sized segment
+    let (seg_bytes, nfrag) = block_shape(mcs.index().min(5));
+    let payload_bits = if COMPACT_ON.load(Ordering::Relaxed) { seg_bytes * 8.0 } else { payload_bits };
     // Measured: right at the ceiling (328 frames/s) the receiving board loses ~1.4 % of frames;
     // with 1 frame/block (MCS5, 308 frames/s) that is still a clean 30 fps, but with 4 frames/block
     // (MCS0) one lost frame = one lost block -> 20 % of blocks. Multi-fragment rates must stay
     // further from the ceiling.
-    let safety = if nfrag >= 3.0 { 0.8 } else { 0.93 };
+    // v40.48: compact blocks are small - a picture is many of them and comes in a thicker burst;
+    // at 0.93 the board's queue dropped ~2 % of blocks at MCS0 (measured 20/9), so keep 0.8
+    let safety = if nfrag >= 3.0 || COMPACT_ON.load(Ordering::Relaxed) { 0.8 } else { 0.93 };
     let mut air_fps = 1000.0 / period_ms * safety;
     let nfrag0 = conv_frames(0, FRAME_PAYLOAD_BYTES) as f32;
     if simulcast {
@@ -284,7 +321,29 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut probe_rr: u64 = 0; // xoay vong bac probe
     let mut up_want: Option<usize> = None; // v32.2: climbing needs 2 windows in agreement
     let mut up_confirm = 0u32;
+    // v40.50: under interference, windows in a row that found a measured lower rung better
+    let mut interf_down = 0u32;
     let mut interf_on = false; // v40.45: interference regime (logged on change)
+    // v40.49: the last rung that held (block ok >= 0.9, no interference) with the SNR it had,
+    // and the lowest SNR reported since: a deep dip and a return to that SNR is an outage or a
+    // fade that is over, and the rung comes back in one step (see "back from")
+    let mut stable: Option<(usize, f32, Instant)> = None;
+    // v40.50: a rung climbed into and lost again within CLIMB_FAIL_S with the SNR well above what
+    // it needs (loss that is not SNR: bursts of interference, a band the receiver is weak in) is tried
+    // again only after a back-off that doubles per failure, 6 -> 12 -> 24 -> 30 s; holding it
+    // CLIMB_OK_S clears it, so does another channel. Probe blocks are too few to see a 10-15 %
+    // loss: on 2500 MHz on the bench (MCS5 CRC-fails 13 % at 30 dB) the climb was tried every
+    // ~20 s, and the 15 % of the time spent there lost as many frames as the other 85 %.
+    let mut climb_at: Option<(usize, Instant)> = None;
+    let mut retry_at: [Option<Instant>; 6] = [None; 6];
+    let mut retry_gap_s = [0u64; 6];
+    let mut retry_hz = 0u64;
+    let mut snr_dip = f32::MAX;
+    // ...and the delivered/needed ceiling (air_scale) the video had then
+    let mut stable_air = 1.0f32;
+    // ...and the resolution tier; `back from an outage` hands it to the ladder
+    let mut stable_tier = LADDER.len() - 1;
+    let mut ladder_restore: Option<usize> = None;
     let mut surv_cnt = 0u32;   // v40.45: consecutive dead windows while in it
     let mut clean_cnt = 0u32;  // v40.45: consecutive clean windows before leaving it
     // v40.45c: delayed second copies (parity blocks, retransmissions) while under interference
@@ -295,6 +354,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut base_in_last: u64 = 0; // v37: base stream kept separate
     let mut ok_base_last: u16 = 0;
     let mut mn_dbg = 0u32;
+    let (mut mn_dbg_ds, mut mn_dbg_dok) = ([0u64; 6], [0u16; 6]);
     let mut sent_win_t = Instant::now(); // v30.5: sent measurement window
     let mut sent_ps = 0.0f32;
     let mut segs_last: u64 = 0; // v31: segs_ok on the same window as CQ_IN
@@ -389,7 +449,12 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     const LTR_MAX_TRIES: u32 = 2;
     let mut retransmits: u64 = 0;
     // the rung the conv path is sending at right now
-    let low_rung = || crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) < ARQ_MIN_MCS;
+    // v40.48: the gate exists because a retry at MCS0/1 cost five/three frames of a fragmented
+    // block; a compact block is one frame at any rung, so there is nothing left to gate
+    let low_rung = || {
+        crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) < ARQ_MIN_MCS
+            && !COMPACT_ON.load(Ordering::Relaxed)
+    };
     // v20.11 rate diagnostic: time slept in the gap vs net.send per status window
     let mut tp_gap: u64 = 0;
     let mut tp_send: u64 = 0;
@@ -537,6 +602,27 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             .unwrap_or(0);
         if cfg.auto_res && cfg.txbits && link_cap_kbps > 1.0 {
             cur_tier = cur_tier.min(max_tier);
+            // v40.49: back from an outage (the rate control saw the SNR come back to where it
+            // was): the tier that held then, at once. The ladder's persistence, dwell and
+            // back-off are there against capacity hovering at a boundary; after a fade that is
+            // over they kept the picture at 480x360@20 for 20 s and more (simulator).
+            if let Some(t) = ladder_restore.take() {
+                let t = t.min(max_tier);
+                if t > cur_tier {
+                    log(&format!(
+                        "ladder: back from an outage -> {}x{}@{} as before",
+                        LADDER[t].0, LADDER[t].1, LADDER[t].2
+                    ));
+                    for i in (cur_tier + 1)..=t {
+                        tier_retry_at[i] = None;
+                        tier_backoff[i] = TIER_BACKOFF;
+                    }
+                    cur_tier = t;
+                    tier_since = Instant::now();
+                    tier_up_since = None;
+                    tier_down_since = None;
+                }
+            }
             // WIDE hysteresis: entering the rung above needs 30 % headroom (otherwise capacity
             // sitting right at the boundary flaps the resolution -> ugly H264 keyframes); leave on
             // a 15 % drop. Borderline capacity settles on the LOWER rung, which is more honest
@@ -727,17 +813,37 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             ds = ds.saturating_sub(dbase_sent);
                             dok = dok.saturating_sub(dbase_ok);
                         }
+                        mn_dbg_ds[i] = ds;
+                        mn_dbg_dok[i] = dok;
                         // v40.34: smooth the COUNTS, then divide. Clamping each window's
                         // ratio at 1.0 before averaging biased a 97 % link down to ~0.87
                         // (feedback counters run ahead in one window and lag in the next).
                         if ds > 0 || dok > 0 {
-                            let (ok_acc, sent_acc) = mn_acc[i];
+                            let (mut ok_acc, mut sent_acc) = mn_acc[i];
+                            // v40.49: the history weighs at most three windows like this one. A
+                            // rung that carried the stream (40 blocks/s) and then only its probes
+                            // (2/s) kept its fade-time counts for ~10 s: the simulator showed MCS2
+                            // at 0.24..0.48 at 24 dB and the climb back took 12 s.
+                            let cap = (3.0 * (ds as f32).max(dok as f32)).max(6.0);
+                            if sent_acc > cap {
+                                ok_acc *= cap / sent_acc;
+                                sent_acc = cap;
+                            }
                             mn_acc[i] = (0.6 * ok_acc + 0.4 * dok as f32, 0.6 * sent_acc + 0.4 * ds as f32);
                         }
                         if mn_acc[i].1 >= 2.0 && ds >= 1 {
                             mn_prob[i] = (mn_acc[i].0 / mn_acc[i].1).min(1.0);
                             mn_age[i] = Instant::now();
                         }
+                    }
+                    if std::env::var_os("NYX_MN_DBG").is_some() {
+                        let c = auto_mcs.index();
+                        log(&format!(
+                            "mndbg: cur={c} ds={} dok={} acc={:.1}/{:.1} prob={:.2} ok_age={} fb_age={}",
+                            mn_dbg_ds[c], mn_dbg_dok[c], mn_acc[c].0, mn_acc[c].1, mn_prob[c],
+                            fb.ok_changed.map_or(-1, |t| t.elapsed().as_millis() as i64),
+                            fb.updated.map_or(-1, |t| t.elapsed().as_millis() as i64),
+                        ));
                     }
                     mn_dbg = mn_dbg.wrapping_add(1);
                     if mn_dbg % 5 == 0 {
@@ -803,8 +909,10 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         (st.blocks_per_frame as i32).clamp(4, 8)
                     };
                     let thr = |i: usize, pb: f32| -> f32 {
-                        let nf = conv_frames(i, FRAME_PAYLOAD_BYTES) as f32;
-                        pb.max(0.0).powi(kbpf) * (FRAME_PAYLOAD_BYTES as f32) / nf
+                        // v40.48: useful bytes per frame of air - a rung-sized segment in one
+                        // frame with compact blocks, 2016/fragments without
+                        let (bytes, nf) = block_shape(i);
+                        pb.max(0.0).powi(kbpf) * bytes / nf
                     };
                     // candidates: ALL 6 rungs (minstrel considers them all, not just the
                     // neighbours: MCS3 -> 4 both use 2 fragments/block so their thr is equal, and
@@ -835,6 +943,19 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         } else {
                             continue; // bac tren mu -> cho probe
                         };
+                        // v40.49: no climb into a rung the SNR says cannot hold. The rungs a
+                        // fast step down jumps over keep their numbers from before the fade and
+                        // were climbed back into within 3 s (sim: MCS3 -> 4 at 16 dB, half its
+                        // frames lost). Clearing those numbers instead cost the climb after an
+                        // OUTAGE, where they are right again the moment the signal is back
+                        // (bench, 5 s outages: MCS3-4 instead of 5 twelve seconds after).
+                        if i > cur && MCS_SNR_THRESH[i] > fb.snr_db {
+                            continue;
+                        }
+                        // v40.50: a rung that just failed waits out its back-off
+                        if i > cur && retry_at[i].is_some_and(|t| Instant::now() < t) {
+                            continue;
+                        }
                         // (a floor of prob >= 0.7 for "reliable enough for whole frames" was tried
                         // and was WORSE: in transitions every rung is < 0.7 -> only MCS0 qualifies
                         // -> sinks to the bottom and sticks. Low frame probability at a high rung
@@ -869,6 +990,22 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     } else if best + 1 < cur {
                         best = cur - 1;
                     }
+                    // v40.50: under interference the rung below is measured by a few probe blocks
+                    // a window (see `below`): one window's luck is not a loss that depends on the
+                    // rung. Three windows in a row must agree (sim, WiFi-like bursts that kill
+                    // every rung alike: one window was enough to walk MCS5 -> 4 for 46 of 110 s,
+                    // 43 frames lost against 27). The survival and fading paths below still act
+                    // at once. The same whenever the SNR is well above what the rung needs (the
+                    // regime flag goes off after three clean windows and the probed rung below
+                    // then won the plain comparison: MCS5 -> 4 on a single window again).
+                    if (interf || snr_margin >= INTERF_MARGIN_DB) && best < cur {
+                        interf_down += 1;
+                        if interf_down < 3 {
+                            best = cur;
+                        }
+                    } else {
+                        interf_down = 0;
+                    }
                     // survival: the current rate is nearly dead -> go down at once, do not wait for
                     // argmax (argmax needs samples and a collapsing channel gives poor ones)
                     if mn_prob[cur] >= 0.0 && mn_prob[cur] < 0.2 && cur > 0 {
@@ -883,6 +1020,29 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         }
                     } else {
                         surv_cnt = 0;
+                    }
+                    // v40.49: a sudden fade. Going down one rung per window left the video on a
+                    // rung that loses half its frames for ~2 s at every sudden drop (simulator,
+                    // 24 -> 16 dB: MCS5 -> 4 -> 3). When the rung is failing anyway and the SNR
+                    // (honest now: it falls when nothing decodes) says a lower rung, go there at
+                    // once, at most three rungs; interference keeps its own rules.
+                    // A window that straddles the drop still shows the rung half alive (0.52 in
+                    // the simulator, with the SNR already at 1.4 dB): an SNR well under what the
+                    // rung needs counts with a milder loss, and far under it (> 6 dB) lifts the
+                    // three-rung limit (24 -> 5 dB took 5 -> 4 -> 1 -> 0 over 2 s, 3.6 s frozen).
+                    let snr_rung = (0..6)
+                        .rev()
+                        .find(|&r| MCS_SNR_THRESH[r] + 1.5 <= fb.snr_db)
+                        .unwrap_or(0);
+                    let under = MCS_SNR_THRESH[cur] - fb.snr_db;
+                    let failing = mn_prob[cur] >= 0.0
+                        && (mn_prob[cur] < 0.5 || (under > 3.0 && mn_prob[cur] < 0.8));
+                    if !interf && failing && snr_rung < cur {
+                        let floor = if under > 6.0 { 0 } else { cur.saturating_sub(3) };
+                        let target = snr_rung.max(floor);
+                        if target < best {
+                            best = target;
+                        }
                     }
                     // climbing needs 2 CONSECUTIVE windows in agreement (probes at the fade edge
                     // are noisy; a single good window often lies; stepping down stays immediate).
@@ -908,6 +1068,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     {
                         auto_mcs = Mcs::ALL[best];
                         last_step = Instant::now();
+                        interf_down = 0;
                         log(&format!(
                             "olla: {} -> {} (prob {:.2}/{:.2}/{:.2})",
                             Mcs::ALL[cur].label(),
@@ -917,22 +1078,134 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             if cur + 1 < 6 { mn_prob[cur + 1] } else { -1.0 },
                         ));
                     }
+                    // v40.49: back from an outage. The rung that held before, again at once when
+                    // the SNR that fell far below what it needs is back near where it was - the
+                    // climb (one rung per 3 s, two windows to agree) took ~14 s from MCS3 to 5
+                    // after every 5 s outage in the simulator, the video at 2/3 of its rate.
+                    // Interference keeps its own logic: its SNR does not dip.
+                    {
+                        let now_cur = auto_mcs.index();
+                        let snr = fb.snr_db;
+                        snr_dip = snr_dip.min(snr);
+                        if let Some((r, s0, at)) = stable {
+                            if now_cur < r
+                                && at.elapsed() < Duration::from_secs(60)
+                                && snr_dip < MCS_SNR_THRESH[r] - 6.0
+                                && snr >= s0 - 3.0
+                                && snr >= MCS_SNR_THRESH[r] + 3.0
+                            {
+                                log(&format!(
+                                    "olla: back from an outage (snr fell to {snr_dip:.1}, now {snr:.1} dB) -> {} as before",
+                                    Mcs::ALL[r].label()
+                                ));
+                                auto_mcs = Mcs::ALL[r];
+                                last_step = Instant::now();
+                                up_want = None;
+                                up_confirm = 0;
+                                snr_dip = snr;
+                                // its numbers are from the windows the outage began in (dead):
+                                // kept, they took it straight back down, and with the rungs
+                                // below cleared by the fast step down the climb started again
+                                // from nothing (bench: MCS3 / 2 12 s after a 5 s outage). A
+                                // clean slate the next real window outweighs.
+                                mn_prob[r] = 1.0;
+                                mn_acc[r] = (2.0, 2.0);
+                                // the video's ceiling too: it collapsed with delivery during the
+                                // outage and climbs x1.05 a window (bench: 1.67 -> 2.1 Mbps took
+                                // 9 s at MCS5 after the rung was back)
+                                air_scale = air_scale.max(stable_air);
+                                r_ema = r_ema.max(0.96);
+                                ladder_restore = Some(stable_tier);
+                            }
+                        }
+                        let c = auto_mcs.index();
+                        // not moved down while a deep dip is under way: the first window after
+                        // the signal returns, the SNR still climbing, would overwrite it
+                        let dipping = stable.is_some_and(|(r, _, at)| {
+                            c < r && snr_dip < MCS_SNR_THRESH[r] - 6.0 && at.elapsed() < Duration::from_secs(60)
+                        });
+                        // v40.50: kept fresh in the interference regime too - a rung at
+                        // >= 0.9 carried the stream whatever the regime says. On the bench the
+                        // regime is on most of the time, the record went stale (> 60 s) and a
+                        // 12 s outage was climbed back from MCS0 over 17 s.
+                        if c == now_cur && !dipping && fresh(c) && mn_prob[c] >= 0.9 && snr >= MCS_SNR_THRESH[c] {
+                            stable = Some((c, snr, Instant::now()));
+                            snr_dip = snr;
+                            stable_air = air_scale;
+                            stable_tier = cur_tier;
+                        }
+                    }
+                    // v40.50: climbs that failed (see `climb_at`)
+                    {
+                        let now_idx = auto_mcs.index();
+                        if hz_now != retry_hz {
+                            retry_hz = hz_now;
+                            retry_at = [None; 6];
+                            retry_gap_s = [0; 6];
+                            climb_at = None;
+                        }
+                        if now_idx > cur {
+                            climb_at = Some((now_idx, Instant::now()));
+                        } else if now_idx < cur {
+                            if let Some((r, t)) = climb_at {
+                                // (the interference margin: at a rung's edge the loss is the SNR
+                                // and the next climb is the fade ending - sim fade profile, MCS2
+                                // at 10 dB locked out 6-12 s with a 1.5 dB margin)
+                                if r == cur
+                                    && t.elapsed() < Duration::from_secs(CLIMB_FAIL_S)
+                                    && fb.snr_db >= MCS_SNR_THRESH[r] + INTERF_MARGIN_DB
+                                {
+                                    retry_gap_s[r] = (retry_gap_s[r] * 2).clamp(6, 30);
+                                    retry_at[r] = Some(Instant::now() + Duration::from_secs(retry_gap_s[r]));
+                                    log(&format!(
+                                        "olla: {} lost again {:.1} s after the climb at snr {:.1} dB (loss, not SNR) -> not tried again for {} s",
+                                        Mcs::ALL[r].label(), t.elapsed().as_secs_f32(), fb.snr_db, retry_gap_s[r]
+                                    ));
+                                }
+                            }
+                            climb_at = None;
+                        } else if let Some((r, t)) = climb_at {
+                            if r == now_idx && t.elapsed() >= Duration::from_secs(CLIMB_OK_S) {
+                                retry_gap_s[r] = 0;
+                                retry_at[r] = None;
+                                climb_at = None;
+                            }
+                        }
+                    }
                     // set the probe: the rung above the CURRENT one, only when sending enough and
                     // that rung is not yet known to be good (minstrel: no probes wasted on a rate
                     // already known)
                     let cur = auto_mcs.index();
                     // ROTATING probe over every uncertain rung above (minstrel keeps every rate's
-                    // statistics fresh; a rung known >= 0.95 and still fresh costs no probe)
-                    let mut pm = 0xFFu64;
+                    // statistics fresh; a rung known >= 0.95 and still fresh costs no probe).
+                    // v40.49: the rung just above is the only one a step can reach, so while it is
+                    // uncertain it gets half of the probe blocks in EVERY window and the rotation
+                    // shares the other half. One rung per window left it without data four
+                    // windows in five: 15-25 s from MCS0 back up after a fade, in the simulator.
+                    let uncertain = |i: usize| i < 6 && (!fresh(i) || mn_prob[i] < 0.95);
+                    let near = if uncertain(cur + 1) { Some(cur + 1) } else { None };
+                    let mut far = None;
                     for k in 1..6 {
                         let i = cur + ((probe_rr as usize + k) % (6 - cur).max(1));
-                        if i > cur && i < 6 && (!fresh(i) || mn_prob[i] < 0.95)
-                        {
-                            pm = i as u64;
+                        if i > cur + 1 && uncertain(i) {
+                            far = Some(i);
                             probe_rr = (i - cur) as u64;
                             break;
                         }
                     }
+                    // v40.50: and the rung BELOW while this one is losing. Under the interference
+                    // regime a lower rung counts only when measured (it must beat this one by 20 %,
+                    // an unmeasured one gets no optimism) - right for WiFi, whose bursts kill every
+                    // rung alike, but nothing measured it: on 2500 MHz on the bench (MCS5 13 %
+                    // CRC-failed at 30 dB, MCS4 4 %) the regime held MCS5 for 150 s, 139 frames lost.
+                    let losing = interf_on || (fresh(cur) && mn_prob[cur] < 0.95);
+                    let below = (cur > 0 && losing).then(|| cur - 1);
+                    let slots: Vec<usize> = [near, below, far].into_iter().flatten().take(2).collect();
+                    let pm = match slots.as_slice() {
+                        [a, b] => *a as u64 | (*b as u64) << 8,
+                        [a] => *a as u64 | 0xFF00,
+                        _ => 0xFFFF,
+                    };
                     crate::conv_tx::PROBE_MCS.store(
                         pm,
                         std::sync::atomic::Ordering::Relaxed,
@@ -979,6 +1252,11 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             }
         }
         let mcs = if cfg.auto_mcs { auto_mcs } else { cfg.mcs };
+        // v40.49: no probes with the rung set by hand, nor while blind (nobody counts them); the
+        // last probe rung used to stay set and every 12th block kept going out at it
+        if !cfg.auto_mcs || !fb_fresh {
+            crate::conv_tx::PROBE_MCS.store(0xFFFF, Ordering::Relaxed);
+        }
         // Publish for the conv transmit path (it runs on its own thread and cannot see this local).
         // This lets OLLA drive conv too; before, conv was pinned at MCS5 because only that rate
         // carried a block.
@@ -1521,7 +1799,18 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         }
         let t_pk = Instant::now();
         let mut blocks =
-            packetize_fec(frame_id, src_type, &app_data, cfg.fec);
+            {
+                // v40.48: cut the picture to one frame per block at the rung it will go out on,
+                // when the board compacts blocks (see BOARD_COMPACT)
+                let on = cfg.txconv && BOARD_COMPACT.load(Ordering::Relaxed);
+                COMPACT_ON.store(on, Ordering::Relaxed);
+                let seg = if on {
+                    nyx_proto::conv_seg_one_frame(crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) as usize)
+                } else {
+                    nyx_link::SEG_PAYLOAD
+                };
+                nyx_link::packetize_fec_seg(frame_id, src_type, &app_data, cfg.fec, seg)
+            };
         // v40.45c: the video parity block is the LAST block packetize_fec made (before the
         // text/data/info frames are appended); under interference it goes out twice.
         let parity_idx = if cfg.fec && !blocks.is_empty() { Some(blocks.len() - 1) } else { None };

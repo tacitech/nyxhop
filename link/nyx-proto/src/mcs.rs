@@ -115,6 +115,30 @@ pub fn conv_payload_bytes(cm: usize) -> usize {
     [447, 672, 897, 1347, 1797, 2022, 222][cm.min(CONV_MCS_COUNT - 1)]
 }
 
+/// v40.48: application bytes per block such that the block, sent in compact form by a board
+/// that does so (`txcompact=1` in its stats), is ONE frame at conv step `cm`: the frame
+/// payload minus the fragment byte (1), the compact header (4), the block's last four bytes
+/// (4) and nyx-link's block header (14). At MCS0 that is 424 B instead of a 1998 B block cut
+/// into five frames that dies if any one of them does.
+pub fn conv_seg_one_frame(cm: usize) -> usize {
+    conv_payload_bytes(cm).saturating_sub(23).clamp(1, 1998)
+}
+
+/// v40.48: frames a 2016-byte block really takes at conv step `cm` when the board compacts
+/// (`compact`): the bytes in use (up to the last non-zero one before the last four) plus the
+/// compact header and those four bytes - the same rule the board applies, which sends compact
+/// only when that saves frames. Pacing by the full length made the app hold a 424-byte block
+/// for five frames of air at MCS0, and its queue overflowed (measured 20/9: ~10 blocks/s
+/// dropped before they reached the board).
+pub fn conv_frames_block(cm: usize, block: &[u8], compact: bool) -> usize {
+    let full = conv_frames(cm, block.len());
+    if !compact || block.len() != 2016 {
+        return full;
+    }
+    let used = block[..2012].iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    conv_frames(cm, 4 + used + 4).min(full)
+}
+
 /// Frames a block of `block_len` bytes takes at conv step `cm` (one header byte per frame).
 pub fn conv_frames(cm: usize, block_len: usize) -> usize {
     block_len.div_ceil(conv_payload_bytes(cm) - 1).max(1)

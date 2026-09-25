@@ -226,6 +226,9 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                 fb.bler = bler;
                 fb.segs_ok = segs_ok;
                 fb.segs_lost = segs_lost;
+                if fb.ok_mcs != ok_mcs {
+                    fb.ok_changed = Some(std::time::Instant::now());
+                }
                 fb.ok_mcs = ok_mcs;
                 fb.ok_base = ok_base;
                 // Sticky until the worker consumes it with a keyframe.
@@ -271,7 +274,7 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                     shared.chan_changes.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Ok(_) => {}
+            Ok(other) => nyx_common::logging::log_unhandled("nyx-tx board link", other.kind()),
             Err(_) => return,
         }
     }

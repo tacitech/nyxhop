@@ -304,16 +304,45 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
     let mut segcnt_n = 0u64;
     let mut last_main = Instant::now();
     let mut vdec_reset_at = Instant::now();
+    // v40.49: the board is read on its own thread. Reading it here blocked this loop in a fade -
+    // no block, so no Feedback either: the far end went blind and stepped down one rung per 4 s,
+    // and the HUD kept its last numbers.
+    let Ok(mut rd) = s.try_clone() else { return };
+    let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel::<Msg>(256);
+    let _ = std::thread::Builder::new().name("board-rd".into()).spawn(move || {
+        while let Ok(m) = read_msg(&mut rd) {
+            if msg_tx.send(m).is_err() {
+                break;
+            }
+        }
+    });
+    // every way out of the session closes the socket, and with it the reader
+    struct Close(Option<TcpStream>);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            if let Some(s) = &self.0 {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+    let _close = Close(s.try_clone().ok());
+    let mut snr_starve = nyx_common::SnrStarve::default();
     loop {
         if sh.stop.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(msg) = read_msg(s) else { return };
+        let msg = match msg_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(m) => Some(m),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        snr_starve.apply(&mut snr);
         match msg {
             // the fabric already decoded; only reassembly + video decode remain (light,
             // phone-friendly)
-            Msg::DecFrame { payload, mcs, llr_sum, .. } => {
+            Some(Msg::DecFrame { payload, mcs, llr_sum, .. }) => {
                 segs_ok += 1;
+                snr_starve.frame();
                 // SNR heuristic straight from the frame, same anchor as nyx-rx:
                 // mean|llr| = llr_sum / frame_bit_capacity, 8 ~ the decode
                 // threshold of each MCS, +-6 dB per doubling. The board never
@@ -525,13 +554,29 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                 m.snr_db = snr;
             }
             // the daemon also pushes SNR telemetry through EqFrame/Feedback depending on mode
-            Msg::Feedback { snr_db, bler, .. } => {
+            Some(Msg::Feedback { snr_db, bler, .. }) => {
                 snr = snr_db;
                 let mut m = sh.metrics.lock().unwrap();
                 m.snr_db = snr_db;
                 m.bler = bler;
             }
-            _ => {}
+            Some(other) => nyx_common::logging::log_unhandled("nyx-mobile board link", other.kind()),
+            None => {
+                // nothing from the board: the live numbers still move (down)
+                let cut = Instant::now() - Duration::from_secs(2);
+                while fps_win.front().is_some_and(|t| *t < cut) {
+                    fps_win.pop_front();
+                }
+                while byte_win.front().is_some_and(|(t, _)| *t < cut) {
+                    byte_win.pop_front();
+                }
+                {
+                    let mut m = sh.metrics.lock().unwrap();
+                    m.rx_fps = fps_win.len() as f32 / 2.0;
+                    m.kbps = byte_win.iter().map(|(_, n)| *n).sum::<usize>() as f32 * 8.0 / 2.0 / 1000.0;
+                    m.snr_db = snr;
+                }
+            }
         }
         // Feedback every 150 ms (as nyx-rx on the PC): the TX needs it for OLLA and the bitrate
         // regulation loop (delivered/sent ratio) to track; too sparse and the TX guesses blind. 150

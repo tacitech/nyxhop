@@ -12,7 +12,7 @@ nothing counts hours, and the board never contacts us.
 | boards | 10 per email | as many as the job needs |
 | feature generations | the current one, with all its bug fixes, for ever | agreed with the work |
 | support | community (Discussions) | agreed with the work |
-| price | 0 | write to tacitechvn@gmail.com |
+| price | 0 | write to contact@tacitek.com |
 
 **Free covers commercial use too.** Sell what you build with it, run it in a company, put it in
 a product. Ten boards per email address, and nothing in them expires.
@@ -28,7 +28,7 @@ Bug-fix releases belong to the generation they fix and load on every licence of 
 1. In the app, open **Licence** and press **Copy** next to the DNA (15 hex digits). The aircraft's
    DNA shows in the ground app while the link is up, or in `nyx-tx` on the aircraft computer.
 2. Request it at **[nyxhop.com/licence.html](https://nyxhop.com/licence.html)**: a free licence comes
-   back on the page at once. Paid licences: write to **tacitechvn@gmail.com** with the DNA and the
+   back on the page at once. Paid licences: write to **contact@tacitek.com** with the DNA and the
    order number, and the file comes back by email.
 3. You receive a text file `nyxhop-<dna>.lic`.
 4. Paste its contents into the app's licence box and press **Apply here**. For the aircraft, paste

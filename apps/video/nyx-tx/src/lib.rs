@@ -237,6 +237,8 @@ pub struct FeedbackState {
     pub ok_mcs: [u16; 6],
     pub ok_base: u16,
     pub updated: Option<std::time::Instant>,
+    /// when `ok_mcs` last changed (the per-MCS numbers ride their own control frame)
+    pub ok_changed: Option<std::time::Instant>,
     /// v40.47: long-term reference feedback from the receiver, newest first out.
     /// (kind, idr_pic_id, marked, current) - kind 0 confirms a reference arrived,
     /// kind 1 asks to be repaired from it. See `nyx_common::codec::LtrReport`.
@@ -510,6 +512,7 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
     nyx_common::onvif::spawn(shared.rtsp.clone());
 
     let net = net::spawn(shared.clone());
+    spawn_board_limits(shared.clone());
     worker::spawn(shared.clone(), net);
     spawn_control(shared.clone(), opts.arg("--ctl", "127.0.0.1:7201"));
     // v40.22: user data TX -> RX: UDP in here -> Data frames in the video stream (ARQ like video)
@@ -564,6 +567,66 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
     // real end-to-end video rather than inferring it from tx2test counters. Control and observation
     // through the --ctl port, exactly as with the GUI.
     shared
+}
+
+/// v40.48: what the board says about its own transmit path, every 2 s, from its console
+/// (`stats` on :7202): the time one frame really takes on air (`txframe_us`, or its pace and
+/// encoder on an older daemon) and whether it sends small blocks compact (`txcompact`). The rate
+/// control and the block cutter depend on both. This used to ride the GUI's board poll, so a
+/// headless app never heard them.
+fn spawn_board_limits(shared: Arc<Shared>) {
+    use std::time::Duration;
+    std::thread::Builder::new()
+        .name("board-limits".into())
+        .spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            while !shared.stop.load(Ordering::Relaxed) {
+                let host = {
+                    let a = shared.channel_addr.lock().unwrap().clone();
+                    a.rsplit_once(':').map_or(a.clone(), |(h, _)| h.to_string())
+                };
+                let reply = (|| -> Option<String> {
+                    let addr = format!("{host}:7202").to_socket_addrs_first()?;
+                    let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(700)).ok()?;
+                    s.set_read_timeout(Some(Duration::from_millis(1500))).ok()?;
+                    s.write_all(b"stats\n").ok()?;
+                    let mut out = String::new();
+                    for line in BufReader::new(s).lines() {
+                        let l = line.ok()?;
+                        if l == "ok" {
+                            break;
+                        }
+                        out.push_str(&l);
+                        out.push('\n');
+                    }
+                    Some(out)
+                })();
+                if let Some(r) = reply {
+                    let kv = |k: &str| {
+                        r.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')?.trim().parse::<u64>().ok())
+                    };
+                    let frame_us = kv("txframe_us")
+                        .or_else(|| kv("txpace_us").map(|p| p.max(kv("txenc_us").unwrap_or(0))));
+                    if let Some(us) = frame_us {
+                        worker::BOARD_FRAME_US.store(us, Ordering::Relaxed);
+                    }
+                    worker::BOARD_COMPACT.store(kv("txcompact") == Some(1), Ordering::Relaxed);
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        })
+        .expect("spawn board-limits");
+}
+
+/// First address of `host:port`, for connect_timeout.
+trait FirstAddr {
+    fn to_socket_addrs_first(&self) -> Option<std::net::SocketAddr>;
+}
+impl FirstAddr for String {
+    fn to_socket_addrs_first(&self) -> Option<std::net::SocketAddr> {
+        use std::net::ToSocketAddrs;
+        self.to_socket_addrs().ok()?.next()
+    }
 }
 
 /// Stop the threads `setup` started (the window is gone or the mode changes).

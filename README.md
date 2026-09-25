@@ -293,7 +293,7 @@ much more. For distance, add the RF yourself: an antenna with gain at both ends,
 amplifier on the transmitting side, a low-noise amplifier on the receiving side. That part is
 outside NyxHop, and the power you end up radiating is yours to keep within your local rules.
 
-Another board, or one you would like to see on this list? Write to **tacitechvn@gmail.com**.
+Another board, or one you would like to see on this list? Write to **contact@tacitek.com**.
 
 ## General purpose, not a video product
 
@@ -317,11 +317,11 @@ The first ten boards per email address are free, commercial use included, and co
 feature generation with all its bug fixes, for ever. Licences are per board, not per pair, and
 a board runs 20 hours before it needs one at all. Past ten boards, or for anything else -
 another board, a feature you need, NyxHop inside something you sell - write to
-**tacitechvn@gmail.com**. Details in [docs/license.md](docs/license.md).
+**contact@tacitek.com**. Details in [docs/license.md](docs/license.md).
 
 ## Custom work and support
 
-Write to **tacitechvn@gmail.com** if you have a board we do not support yet, if you need a
+Write to **contact@tacitek.com** if you have a board we do not support yet, if you need a
 feature or an application the link does not have, if you are putting NyxHop inside something
 you sell, or if you want someone to tune it for your band, your range and your airframe.
 Questions about using it as it is belong in Issues and Discussions, where everyone can read
