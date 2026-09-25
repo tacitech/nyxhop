@@ -1,6 +1,6 @@
 # NyxHop
 
-**A frequency-hopping OFDM radio link for drones and robots, on off-the-shelf SDR boards.**
+**An OcuSync-style frequency-hopping link on any band from 70 MHz to 6 GHz, for drones and robots, on off-the-shelf SDR boards.**
 
 ![source public domain](https://img.shields.io/badge/source-public%20domain-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
@@ -8,23 +8,61 @@
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
 
-NyxHop turns a pair of software-defined-radio boards, an ADRV9364-Z7020 or an ANTSDR E200, into
-a private frequency-hopping data link, and gives you the software around it. The link moves
-blocks of bytes; what you put in them is your business: video, telemetry, files, your own
-protocol, all at once if you like. Anywhere between 70 MHz and 6 GHz that your hardware and
-your local rules allow.
+NyxHop is the kind of link DJI builds into its drones: the video hops, the control has its own
+hopping channel, the two ends are paired, the rate follows the channel and the link comes back
+by itself after a drop. The difference is where it goes: your own channel table anywhere from
+70 MHz to 6 GHz, several bands in one table, on off-the-shelf SDR boards (an ADRV9364-Z7020 or
+an ANTSDR E200). The link moves blocks of bytes; what you put in them is your business: video,
+telemetry, files, your own protocol, all at once if you like.
 
-On the bench it carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
+* **Hard to jam and hard to find**: no fixed, well-known frequencies to aim at, only the channels
+  you choose; it moves off a jammed channel by itself and keeps its power to what the link needs.
+* **Fully non-Chinese if you need it**: Analog Devices radios, AMD (Xilinx) FPGAs, our own
+  software from end to end.
+* **Made for your system**: we fit the link to your band, your hardware, your application and
+  your product ([below](#a-link-built-for-your-system)).
+
+It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
 ![The ground app: video on the left, the channel tables on the right](docs/img/ground-app.png)
 
 *The ground app holding 5795 MHz out of its video table, with the control channel on its own
 table down at 2.4 GHz.*
 
-If you know the OcuSync-style digital links on commercial drones, this is the same idea:
-hopping OFDM, a separate control channel, adaptive modulation, retransmission of what got
-lost. Built from boards anyone can buy, with the source of the apps and the protocol here to
-read and build on.
+## Like OcuSync, not tied to two bands
+
+| | DJI OcuSync | NyxHop |
+|---|---|---|
+| bands | the licence-free bands around 2.4 and 5 GHz | any channels you list from 70 MHz to 6 GHz; one table can span several bands and the link hops across them |
+| jamming and detection | the well-known 2.4 and 5 GHz bands, the ones drone detectors and jammers cover first | frequencies only you know, across bands; moves off a jammed channel by itself; transmit power held to what the link needs |
+| hardware | built into DJI aircraft, goggles and controllers | two off-the-shelf SDR boards, your camera, your computer or phone |
+| what it carries | DJI video and flight control | any bytes: video, MAVLink, files, your own protocol |
+| software | closed | apps and SDK in Rust, public domain |
+| origin | DJI, China | developed in Vietnam; can be built with no Chinese parts at all: Analog Devices radios, AMD (Xilinx) FPGAs, our own software |
+
+*OcuSync is a trademark of SZ DJI Technology Co., Ltd.; NyxHop is not affiliated with or endorsed by DJI.*
+
+## A link built for your system
+
+This repository is where we start, not a box we hand you. Write to **contact@tacitek.com** with
+what you are building and we fit the link to it:
+
+* **your band**: a channel plan anywhere from 70 MHz to 6 GHz, across several bands if you need
+  them, with hopping and power set for your rules and the spectrum where you operate;
+* **your hardware**: another AD936x board or your own board design, your power amplifier,
+  low-noise amplifier and antennas;
+* **your application**: video with the codec and latency you need, MAVLink and telemetry, an IP
+  bridge, several streams at once, or your own protocol over the link;
+* **your product**: NyxHop inside what you sell, your branding on the apps, boards in production
+  numbers, a support contract;
+* **range and robustness**: tuned for your distance, your airframe or robot and the interference
+  where you fly;
+* **fully non-Chinese** when your programme needs it;
+* **engineers with you**: the people who built the link sit with your integration until it does
+  what you need.
+
+To try it yourself first, everything below runs on two boards you can buy today, free for the
+first ten boards ([Try it free](#try-it-free)).
 
 The source code in this repository needs no licence: it is public domain
 ([Unlicense](LICENSE)), do what you like with it. The radio itself is a different matter: the
@@ -60,7 +98,7 @@ Budget an hour the first time.
 **You need**
 
 * Two boards, ADRV9364-Z7020 or ANTSDR E200 in any mix, with antennas for the band you will use.
-  On the bench, 1–3 m apart is fine.
+  For a first test, 1–3 m apart is fine.
 * A PC on the same Ethernet as the boards, with Python 3 (`pip install paramiko`) for the
   flashing tool. A USB camera on the transmitting side.
 * This repository: it carries the prebuilt board images in `deploy/`. The apps you build
@@ -284,12 +322,12 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
 Either board can be either end, and two of the same kind work. Ethernet between each board
 and its computer, 12 V supplies, antennas of your choice.
 
-<img src="docs/img/bench.jpg" width="420" alt="An ADRV9364-Z7020 and an ANTSDR E200 on the bench">
+<img src="docs/img/boards.jpg" width="420" alt="An ADRV9364-Z7020 and an ANTSDR E200">
 
-*A pair on the bench: ADRV9364-Z7020 on the left, ANTSDR E200 on the right.*
+*A pair of boards: ADRV9364-Z7020 on the left, ANTSDR E200 on the right.*
 
-The boards transmit at the power their own front end gives, which is enough for a bench and not
-much more. For distance, add the RF yourself: an antenna with gain at both ends, a power
+The boards transmit at the power their own front end gives, which is enough for a short-range
+test and not much more. For distance, add the RF yourself: an antenna with gain at both ends, a power
 amplifier on the transmitting side, a low-noise amplifier on the receiving side. That part is
 outside NyxHop, and the power you end up radiating is yours to keep within your local rules.
 
@@ -311,21 +349,14 @@ bytes, read them out at the far end. It is Rust with nothing platform-specific i
 Windows and Linux on x86-64, Linux on ARM boards, Android 12 or later. Nothing on the PC or the
 phone needs a radio driver: the modem runs on the board.
 
-## Pricing
+## Try it free
 
-The first ten boards per email address are free, commercial use included, and cover the current
-feature generation with all its bug fixes, for ever. Licences are per board, not per pair, and
-a board runs 20 hours before it needs one at all. Past ten boards, or for anything else -
-another board, a feature you need, NyxHop inside something you sell - write to
-**contact@tacitek.com**. Details in [docs/license.md](docs/license.md).
-
-## Custom work and support
-
-Write to **contact@tacitek.com** if you have a board we do not support yet, if you need a
-feature or an application the link does not have, if you are putting NyxHop inside something
-you sell, or if you want someone to tune it for your band, your range and your airframe.
-Questions about using it as it is belong in Issues and Discussions, where everyone can read
-the answer.
+A board runs 20 hours before it needs a licence at all, and the first ten boards per email
+address are free, commercial use included, covering the current feature generation with all its
+bug fixes, for ever. Licences are per board, not per pair. More boards, or a link made for your
+system: **contact@tacitek.com** ([above](#a-link-built-for-your-system)). Details in
+[docs/license.md](docs/license.md). Questions about using it as it is belong in Issues and
+Discussions, where everyone can read the answer.
 
 ## Repository layout
 

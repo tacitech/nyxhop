@@ -15,11 +15,11 @@
   same rate, no blocks dropped), the receiver copes better with weak signals (fewer lost frames at
   every level tried, about 1 dB at the middle rates), and at the slowest rate the link carries
   about five times the video it did, close to 30 fps, with the longest freeze halved.
-* Back sooner after the signal drops out: on the bench, full frame rate about 3 s after a 5 or 12 s
-  outage (it took 9 to 14 s), and the link goes back to the channel it held before.
-* Interference that hits only the fast rates (a neighbouring LTE band on the bench): the link now
-  measures the rate below and moves there instead of holding on, frames lost over 150 s down from
-  1536 to 340. Interference that hits every rate alike, like WiFi, is handled as before.
+* Back sooner after the signal drops out: full frame rate about 3 s after a 5 or 12 s outage (it
+  took 9 to 14 s), and the link goes back to the channel it held before.
+* Interference that hits only the fast rates: the link now measures the rate below and moves there
+  instead of holding on, frames lost over 150 s down from 1536 to 340. Interference that hits every
+  rate alike, like WiFi, is handled as before.
 * Distance readout steady to about 0.3 m (it wandered by ±9 m) and no jump after a power cycle;
   about 5 ms less glass-to-glass delay.
 * Channels: user-defined tables over 70 MHz–6 GHz, Auto policy (hold the best channel, re-scan
@@ -35,7 +35,7 @@
   switch in every settings drawer turns a board into the other end; the apps follow it.
 * The camera straight into the board: `nyx-ipcam` runs on the board's own ARM and sends an IP
   camera with no computer on the aircraft (prebuilt in `deploy/ipcam/`, one-command installer,
-  a PC window to set it up, a test camera for the bench). Either board, follows the board's role.
+  a PC window to set it up, a test camera). Either board, follows the board's role.
 * Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card).
 * Licence per board, checked offline; free tier.
 * Licensing of the repository: the source code is public domain (Unlicense), no licence needed;

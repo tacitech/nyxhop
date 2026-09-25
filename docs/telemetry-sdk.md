@@ -14,7 +14,7 @@ content-agnostic.
 Datagrams up to 210 bytes each way. Change the ports with `--tlm-in` and `--tlm-out` on either app
 (`--tlm-in 0` disables the input).
 
-Measured on the bench: ground → aircraft 100 % of packets, aircraft → ground 98.6 % with 77 ms
+Over the air: ground → aircraft 100 % of packets, aircraft → ground 98.6 % with 77 ms
 median latency.
 
 ### Example: MAVLink to a ground-control station
