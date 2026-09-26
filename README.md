@@ -17,6 +17,8 @@ telemetry, files, your own protocol, all at once if you like.
 
 * **Hard to jam and hard to find**: no fixed, well-known frequencies to aim at, only the channels
   you choose; it moves off a jammed channel by itself and keeps its power to what the link needs.
+* **Distance without GPS**: the link measures the distance between its two ends from its own
+  radio signal, steady to about 0.3 m, so it keeps working where GPS is jammed or spoofed.
 * **Fully non-Chinese if you need it**: Analog Devices radios, AMD (Xilinx) FPGAs, our own
   software from end to end.
 * **Made for your system**: we fit the link to your band, your hardware, your application and
@@ -27,12 +29,8 @@ It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen
 https://github.com/user-attachments/assets/14d6323c-f7dd-44ca-af5e-d8da4cafcae8
 
 *Two boards and the NyxHop app at each end: pairing, a fixed channel, a jump to another band,
-Auto, your own channel tables, the distance between the boards and messages both ways.*
-
-![The ground app: video on the left, the channel tables on the right](docs/img/ground-app.png)
-
-*The ground app holding 5795 MHz out of its video table, with the control channel on its own
-table down at 2.4 GHz.*
+Auto, your own channel tables, the distance between the boards measured by the link itself
+(no GPS) and messages both ways.*
 
 ## Like OcuSync, not tied to two bands
 
