@@ -24,11 +24,10 @@ telemetry, files, your own protocol, all at once if you like.
 
 It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
-[![Watch the demo: pairing, channels on several bands, the distance between the boards and messages, in two minutes](docs/img/demo.jpg)](https://nyxhop.com/#demo)
+https://github.com/user-attachments/assets/14d6323c-f7dd-44ca-af5e-d8da4cafcae8
 
 *Two boards and the NyxHop app at each end: pairing, a fixed channel, a jump to another band,
-Auto, your own channel tables, the distance between the boards and messages both ways. Click
-to play.*
+Auto, your own channel tables, the distance between the boards and messages both ways.*
 
 ![The ground app: video on the left, the channel tables on the right](docs/img/ground-app.png)
 
