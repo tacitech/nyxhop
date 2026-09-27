@@ -251,16 +251,6 @@ def kv(reply, key):
     return m.group(1) if m else ""
 
 
-def wait_nyxhop(ip, limit):
-    t0 = time.time()
-    while time.time() - t0 < limit:
-        r = console(ip, "role")
-        if "role=" in r:
-            return kv(r, "role")
-        time.sleep(3)
-    return ""
-
-
 def set_role(ip, role):
     if kv(console(ip, "role"), "role") == role:
         return True
@@ -317,16 +307,22 @@ def main():
         todo.append(f"write {os.path.basename(a.frm)} to {len(plutos)} Pluto(s)")
     if changes:
         todo.append(f"change {len(changes)} address(es)")
+    if a.pair:
+        todo.append("pair the two")
+    if a.list:
+        print("Would: " + (", ".join(todo) or "nothing") + " (--list: nothing written)")
+        return
     if not todo:
         print("Nothing to change.")
-        return
-    if a.list:
-        print("Would: " + ", ".join(todo) + " (--list: nothing written)")
         return
     if not a.yes and input("Go ahead: " + ", ".join(todo) + "? [y/N] ").strip().lower() != "y":
         return
 
     for p in plutos:
+        # NyxHop already running there answers until the Pluto has written its flash and
+        # restarts: only an answer after it went away counts
+        p["restarts"] = bool(frm) or id(p) in changes
+        p["seen_down"] = not console(p["ip"], "role")
         text = p["cfg"]
         if id(p) in changes:
             ip, host, _ = changes[id(p)]
@@ -339,15 +335,26 @@ def main():
         if frm:
             print(f"{p['drive']}: copying the firmware ...")
             write_file(os.path.join(p["drive"], "pluto.frm"), frm)
-        print(f"{p['drive']}: ejecting - the Pluto writes it and restarts, do not unplug it")
-        eject(p["drive"])
+        if frm or id(p) in changes:
+            print(f"{p['drive']}: ejecting - the Pluto writes it and restarts, do not unplug it")
+            eject(p["drive"])
 
     print("Waiting for NyxHop to answer (a minute or two) ...")
-    for p in plutos:
-        role = wait_nyxhop(p["ip"], 420) if frm or id(p) in changes else kv(console(p["ip"], "role"), "role")
-        p["role"] = role
-        state = f"NyxHop running, role {role}" if role else "no answer from NyxHop"
-        print(f"  {p['ip']:<16}{state}")
+    t0 = time.time()
+    left = [p for p in plutos]
+    while left and time.time() - t0 < 480:
+        for p in list(left):
+            role = kv(console(p["ip"], "role"), "role")
+            if not role:
+                p["seen_down"] = True
+            elif p["seen_down"] or not p["restarts"]:
+                p["role"] = role
+                print(f"  {p['ip']:<16}NyxHop running, role {role}")
+                left.remove(p)
+        time.sleep(2)
+    for p in left:
+        print(f"  {p['ip']:<16}no answer from NyxHop" if p["seen_down"] else
+              f"  {p['ip']:<16}did not restart: was its drive ejected?")
     if a.pair and all(p.get("role") for p in plutos):
         ground, aircraft = plutos
         print(f"Pairing: {ground['ip']} ground, {aircraft['ip']} aircraft ...")

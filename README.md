@@ -213,10 +213,11 @@ another board, meet without calibration.
 
 A PlutoSDR starts on its own channel tables, video 2500, 3300, 3600 MHz and control 433,
 922 MHz; an ADRV9364 or an E200 starts on video 5.8 GHz and control 2.4 GHz. Two Plutos pair
-as they are. To pair a Pluto with one of the other boards, give that board the Pluto's tables
-first (**Channel**, then **Apply**, in the app connected to it). A Pluto at the aircraft end
-receives the control at 40 dB of gain, which suits the sub-GHz pool; move its control pool
-higher and raise the gain under **Radio** to about 62 dB.
+as they are. A Pluto and one of the other boards need tables that suit both, set on both ends
+before pairing (**Channel**, then **Apply**, in the app connected to each board): video
+`2500,3300,3600` and control `2412,2432,2452,2472` work for every board. A Pluto at the aircraft
+end receives the control at 40 dB of gain, right for the sub-GHz pool; with the control on
+2.4 GHz raise it under **Radio** to about 62 dB.
 
 ### 3. The apps
 
