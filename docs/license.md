@@ -1,19 +1,22 @@
 # Licence
 
-Every NyxHop board needs a licence, except a PlutoSDR, which is free outright: nothing on this
-page applies to it. The first ten are free, commercial use included; past that, and for the
-coming feature generations, write to us and we will quote you. Nothing expires, nothing counts
-hours, and the board never contacts us.
+**PlutoSDR: free.** NyxHop on a PlutoSDR needs no licence, has no time limit and asks for no
+sign-up, commercial use included. Nothing further down this page applies to it.
+
+Every other NyxHop board (ADRV9364-Z7020, ANTSDR E200) needs a licence. The first ten are free,
+commercial use included; past that, and for the coming feature generations, write to us and we
+will quote you. Nothing expires, nothing counts hours, and the board never contacts us.
 
 ## Tiers
 
-| | free | anything beyond that |
-|---|---|---|
-| who it is for | anyone, hobby or commercial, up to ten boards | more boards, a board of your own, features of your own, or NyxHop inside something you sell |
-| boards | 10 per email | as many as the job needs |
-| feature generations | the current one, with all its bug fixes, for ever | agreed with the work |
-| support | community (Discussions) | agreed with the work |
-| price | 0 | write to contact@tacitek.com |
+| | PlutoSDR | ADRV9364 / E200, free | anything beyond that |
+|---|---|---|---|
+| who it is for | anyone, hobby or commercial | anyone, hobby or commercial, up to ten boards | more boards, a board of your own, features of your own, or NyxHop inside something you sell |
+| boards | as many as you like | 10 per email | as many as the job needs |
+| licence file | none | one per board, from the website | agreed with the work |
+| feature generations | every Pluto release | the current one, with all its bug fixes, for ever | agreed with the work |
+| support | community (Discussions) | community (Discussions) | agreed with the work |
+| price | 0 | 0 | write to contact@tacitek.com |
 
 **Free covers commercial use too.** Sell what you build with it, run it in a company, put it in
 a product. Ten boards per email address, and nothing in them expires.

@@ -2,15 +2,11 @@
 
 **An OcuSync-style frequency-hopping link on any band from 70 MHz to 6 GHz, for drones and robots, on off-the-shelf SDR boards.**
 
-![PlutoSDR free](https://img.shields.io/badge/PlutoSDR-free-brightgreen)
 ![source public domain](https://img.shields.io/badge/source-public%20domain-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
-
-> **Free on a PlutoSDR.** Two ADALM-Plutos make a complete NyxHop link: no licence, no time
-> limit, no sign-up, commercial use included. One command sets them up ([how](#plutosdr)).
 
 NyxHop is the kind of link DJI builds into its drones: the video hops, the control has its own
 hopping channel, the two ends are paired, the rate follows the channel and the link comes back
@@ -27,6 +23,8 @@ telemetry, files, your own protocol, all at once if you like.
   software from end to end.
 * **Made for your system**: we fit the link to your band, your hardware, your application and
   your product ([below](#a-link-built-for-your-system)).
+* **Free on a PlutoSDR**: two ADALM-Plutos make a complete NyxHop link with no licence, no time
+  limit and no sign-up. One command sets them up ([below](#plutosdr)).
 
 It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
@@ -359,9 +357,12 @@ and the SDK crates in [docs/telemetry-sdk.md](docs/telemetry-sdk.md).
 
 ### 4. The licence
 
-Every board starts with a **20-hour grace period**, counted by the board itself, so you can do
-all of the above first. Each board needs its own licence, and the simplest way is to do each
-one in the app that is connected to it:
+**PlutoSDR: free, nothing to do.** NyxHop on a PlutoSDR needs no licence, has no time limit and
+never asks for one, commercial use included.
+
+**ADRV9364-Z7020 and ANTSDR E200**: every board starts with a **20-hour grace period**, counted
+by the board itself, so you can do all of the above first. Each board needs its own licence, and
+the simplest way is to do each one in the app that is connected to it:
 
 1. Open **Licence** in the drawer and press **Copy** next to the board's DNA.
 2. Ask for a licence with it at **[nyxhop.com/licence.html](https://nyxhop.com/licence.html)**:
@@ -373,8 +374,6 @@ Do that in `nyx-rx` for the ground board and in `nyx-tx` for the aircraft board.
 flowing, the ground app also shows the aircraft's DNA and a **Send to aircraft** button, which
 saves the walk to the aircraft next time; it needs the video link, so it is not there while the
 aircraft is still locked. A licence is bound to its board, works offline and never expires.
-
-A PlutoSDR needs none of this: it is free, with no grace period to count down.
 
 ### If something is off
 
@@ -436,8 +435,8 @@ phone needs a radio driver: the modem runs on the board.
 
 ## Try it free
 
-A PlutoSDR is free outright. Any other board runs 20 hours before it needs a licence at all,
-and the first ten boards per email address are free, commercial use included, covering the
+**A PlutoSDR is free outright: no licence, no time limit, no sign-up.** Any other board runs 20
+hours before it needs a licence at all, and the first ten boards per email address are free, commercial use included, covering the
 current feature generation with all its bug fixes, for ever. Licences are per board, not per
 pair. More boards, or a link made for your
 system: **contact@tacitek.com** ([above](#a-link-built-for-your-system)). Details in
