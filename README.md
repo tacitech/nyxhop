@@ -2,11 +2,15 @@
 
 **An OcuSync-style frequency-hopping link on any band from 70 MHz to 6 GHz, for drones and robots, on off-the-shelf SDR boards.**
 
+![PlutoSDR free](https://img.shields.io/badge/PlutoSDR-free-brightgreen)
 ![source public domain](https://img.shields.io/badge/source-public%20domain-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
+
+> **Free on a PlutoSDR.** Two ADALM-Plutos make a complete NyxHop link: no licence, no time
+> limit, no sign-up, commercial use included. One command sets them up ([how](#plutosdr)).
 
 NyxHop is the kind of link DJI builds into its drones: the video hops, the control has its own
 hopping channel, the two ends are paired, the rate follows the channel and the link comes back
@@ -23,8 +27,6 @@ telemetry, files, your own protocol, all at once if you like.
   software from end to end.
 * **Made for your system**: we fit the link to your band, your hardware, your application and
   your product ([below](#a-link-built-for-your-system)).
-* **Free on a PlutoSDR**: two ADALM-Plutos make a complete NyxHop link with no licence, no time
-  limit and no sign-up. One command sets them up ([below](#plutosdr)).
 
 It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
