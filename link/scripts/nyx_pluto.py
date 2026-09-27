@@ -264,8 +264,24 @@ def set_role(ip, role):
     return False
 
 
+def same_tables(ground, aircraft):
+    """The two ends meet only on the same tables (the pairing frame goes out on the first
+    control channel): give the aircraft end the ground end's, when they differ."""
+    g, a = console(ground, "hop status"), console(aircraft, "hop status")
+    moved = False
+    for key, cmd in (("hop_table", "hop chans"), ("hop_ctl_table", "hop ctlchans")):
+        want = kv(g, key)
+        if want and kv(a, key) != want:
+            print(f"  aircraft end {key.replace('hop_', '').replace('_', ' ')} {kv(a, key)} -> {want} (the ground end's)")
+            console(aircraft, f"{cmd} {want}", timeout=6)
+            moved = True
+    if moved:
+        time.sleep(10)          # a control table changes at the next epoch
+
+
 def pair(ground, aircraft):
     """The ground end binds, the aircraft end accepts: the key goes over the air."""
+    same_tables(ground, aircraft)
     for attempt in range(3):
         console(aircraft, "link accept 60")
         tag = kv(console(ground, "link bind 20"), "link_tag")
