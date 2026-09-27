@@ -16,6 +16,7 @@
 *.dtb -text
 *.gz -text
 *.ko -text
+*.frm -text
 *.apk -text
 *.png -text
 *.jpg -text

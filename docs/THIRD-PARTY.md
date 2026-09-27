@@ -11,6 +11,7 @@ covering the NyxHop binaries.
 | Linux device tree derived from Analog Devices' tree | `deploy/adrv9364/devicetree.dtb` | GPL-2.0 / X11, as in the Linux tree |
 | `u-dma-buf` kernel module by ikwzm | `deploy/adrv9364/u-dma-buf.ko` | Dual BSD/GPL |
 | Buildroot root filesystem with BusyBox 1.31.1, from the ANTSDR stock firmware | inside `deploy/e200/uramdisk.image.gz` | GPL-2.0 and the licences of the packages it contains |
+| Analog Devices' PlutoSDR firmware v0.39: Linux kernel, device trees, the stock FPGA design and the Buildroot root filesystem with BusyBox | inside `deploy/pluto/pluto.frm` | GPL-2.0 (Linux, BusyBox), ADI's terms for the FPGA design, and the licences of the packages it contains |
 
 ## Getting the source of the GPL parts
 
@@ -23,6 +24,9 @@ Take it from where we did:
   binary (`strings BOOT.BIN | grep U-Boot` prints it).
 * `u-dma-buf`: <https://github.com/ikwzm/udmabuf>.
 * The E200 root filesystem: the ANTSDR firmware sources from MicroPhase.
+* The PlutoSDR firmware: <https://github.com/analogdevicesinc/plutosdr-fw>, tag `v0.39`, and
+  the repositories it pulls in (Linux, Buildroot, HDL). NyxHop only adds its own files to the
+  root filesystem; everything else in `pluto.frm` is that release as ADI builds it.
 
 If you would rather have it from us, ask and we will send the exact sources those binaries were
 built from, on a medium of your choice, for no more than the cost of the copy.

@@ -2935,7 +2935,7 @@ impl RxApp {
         });
         {
             let msgs = self.shared.msgs.lock().unwrap().clone();
-            if let Some(t) = nu::messages_section(ui, &msgs, &mut self.msg_buf) {
+            if let Some(t) = nu::messages_section(ui, &msgs, &mut self.msg_buf, "Aircraft") {
                 send_msg(&self.shared, &Msg::UserText { text: t.clone() });
                 let mut m = self.shared.msgs.lock().unwrap();
                 m.push(format!("→ {t}"));

@@ -1,8 +1,9 @@
 # Licence
 
-Every NyxHop board needs a licence. The first ten are free, commercial use included; past that,
-and for the coming feature generations, write to us and we will quote you. Nothing expires,
-nothing counts hours, and the board never contacts us.
+Every NyxHop board needs a licence, except a PlutoSDR, which is free outright: nothing on this
+page applies to it. The first ten are free, commercial use included; past that, and for the
+coming feature generations, write to us and we will quote you. Nothing expires, nothing counts
+hours, and the board never contacts us.
 
 ## Tiers
 

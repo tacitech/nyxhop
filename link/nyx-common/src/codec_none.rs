@@ -32,6 +32,14 @@ impl VideoEncoder {
     pub fn encode(&mut self, _frame: &RgbFrame, _force_idr: bool) -> Vec<u8> {
         Vec::new()
     }
+
+    pub fn ltr_marked_ok(&mut self, _idr_pic_id: u32, _ltr_frame_num: i32) -> bool {
+        false
+    }
+
+    pub fn request_ltr_recovery(&mut self, _idr_pic_id: u32, _last_correct: i32, _current: i32) -> bool {
+        false
+    }
 }
 
 pub struct VideoDecoder;

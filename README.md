@@ -11,8 +11,8 @@
 NyxHop is the kind of link DJI builds into its drones: the video hops, the control has its own
 hopping channel, the two ends are paired, the rate follows the channel and the link comes back
 by itself after a drop. The difference is where it goes: your own channel table anywhere from
-70 MHz to 6 GHz, several bands in one table, on off-the-shelf SDR boards (an ADRV9364-Z7020 or
-an ANTSDR E200). The link moves blocks of bytes; what you put in them is your business: video,
+70 MHz to 6 GHz, several bands in one table, on off-the-shelf SDR boards (an ADRV9364-Z7020, an
+ANTSDR E200 or a PlutoSDR). The link moves blocks of bytes; what you put in them is your business: video,
 telemetry, files, your own protocol, all at once if you like.
 
 * **Hard to jam and hard to find**: no fixed, well-known frequencies to aim at, only the channels
@@ -23,6 +23,8 @@ telemetry, files, your own protocol, all at once if you like.
   software from end to end.
 * **Made for your system**: we fit the link to your band, your hardware, your application and
   your product ([below](#a-link-built-for-your-system)).
+* **Free on a PlutoSDR**: two ADALM-Plutos make a complete NyxHop link with no licence, no time
+  limit and no sign-up. One command sets them up ([below](#plutosdr)).
 
 It carries an H.264 camera stream at **30 fps**, **28 ms** from camera to screen (61 ms with the two-layer simulcast switched on, which keeps a picture through fades).
 
@@ -100,10 +102,11 @@ Budget an hour the first time.
 
 **You need**
 
-* Two boards, ADRV9364-Z7020 or ANTSDR E200 in any mix, with antennas for the band you will use.
-  For a first test, 1–3 m apart is fine.
+* Two boards, ADRV9364-Z7020, ANTSDR E200 or PlutoSDR in any mix, with antennas for the band you
+  will use. For a first test, 1–3 m apart is fine.
 * A PC on the same Ethernet as the boards, with Python 3 (`pip install paramiko`) for the
-  flashing tool. A USB camera on the transmitting side.
+  flashing tools (a PlutoSDR plugs into its computer's USB instead; its tool needs nothing but
+  Python). A USB camera on the transmitting side.
 * This repository: it carries the prebuilt board images in `deploy/`. The apps you build
   yourself, with Rust 1.85 or newer: `cargo build --release` at the repository root, once, for
   all of them.
@@ -121,6 +124,13 @@ from a microSD card and the board is stock again the moment you take the card ou
 FAT32 card in and power up: a stock board comes up at `192.168.1.10`. Another address is one
 command on the board, once: `ssh root@192.168.1.10`, then `fw_setenv ipaddr_eth 192.168.0.12`
 and reboot.
+
+**PlutoSDR**: nothing to install here; step 2 does it. Plugged into USB, a Pluto shows a drive
+named PlutoSDR and is a small network of its own: the Pluto at `192.168.2.1` (user `root`,
+password `analog`), this computer at `192.168.2.10`. On Windows, if that address does not
+answer, install ADI's PlutoSDR USB drivers. A Pluto at the aircraft end still needs a computer
+on its USB cable, the one with the camera: a laptop, or a small board running
+`nyx-tx --headless` (step 3).
 
 ### 2. NyxHop on the board
 
@@ -147,6 +157,67 @@ Run the same command again to update a board; tables, pairing and licence are ke
 `--verify-only` only checks a running board. `--scan` lists every board it finds on the network,
 with role and address, no password needed.
 
+#### PlutoSDR
+
+**The quick way.** Plug the Pluto in (or both, if one computer holds the two ends), wait until
+its drive shows up, then from the repository root:
+
+```bash
+python link/scripts/nyx_pluto.py           # NyxHop onto every Pluto plugged in here
+python link/scripts/nyx_pluto.py --pair    # two Plutos here: one ground, one aircraft, paired
+```
+
+It lists the Pluto(s) it found and what it will do, and asks before writing (`--list` only
+shows). It writes the firmware through the Pluto's own drive, gives each Pluto a network of its
+own when it needs one (below), waits until NyxHop answers and prints the command that opens the
+app on it. Nothing but Python 3 is needed, and nothing is left to do on the Pluto. Leave the
+Pluto plugged in while its LED blinks fast: that is it writing its flash (a minute or two).
+
+**By hand**, the same thing, one Pluto at a time:
+
+1. **Firmware.** Copy `deploy/pluto/pluto.frm` onto the Pluto's drive and eject the drive (the
+   Eject in Windows Explorer, the Finder or your Linux file manager: it is the eject that tells
+   the Pluto to act). The LED blinks fast while it writes the firmware, then the Pluto restarts;
+   when its drive shows up again it runs NyxHop, as the receiving end until the app says
+   otherwise.
+2. **Network, when needed.** Every Pluto comes as `192.168.2.1`, so a Pluto needs another
+   network when a second Pluto is plugged into the same computer, or when this computer already
+   has something on `192.168.2.x`: look at `ipconfig` (Windows), `ip addr` (Linux) or `ifconfig`
+   (macOS) with the Pluto unplugged. Virtual machine software often sits there, `192.168.2.1`
+   included. Open `config.txt` on the Pluto's drive in a text editor and change three lines:
+
+   ```ini
+   [NETWORK]
+   ipaddr = 192.168.3.1
+   ipaddr_host = 192.168.3.10
+
+   [ACTIONS]
+   reset = 1
+   ```
+
+   `ipaddr` is the Pluto (the address you give the app), `ipaddr_host` this computer, and both
+   must share the first three numbers. A second Pluto takes `192.168.4.1` / `192.168.4.10`, a
+   third `192.168.5.x`, and so on. `reset = 1` makes the Pluto restart with the new address as
+   soon as you save and eject; without it the address waits for the next power-up. When the
+   drive shows up again, `config.txt` shows the address in use (and `reset = 0` again), and
+   `ping 192.168.3.1` answers. Both steps fit in one eject: copy `pluto.frm`, edit
+   `config.txt`, then eject.
+
+Either way, an update later is the same copy and keeps role, pairing and tables; ADI's own
+`pluto.frm` copied the same way puts the stock firmware back. NyxHop keeps ADI's firmware
+underneath, so the Pluto still works with other SDR software once NyxHop is off:
+`ssh root@192.168.2.1` (its address), then `touch /mnt/jffs2/nyxhop.off` and `reboot`;
+`rm /mnt/jffs2/nyxhop.off` and `reboot` bring NyxHop back, pairing and tables as they were. The
+Pluto tunes its frequency to the board at the other end by itself, so two Plutos, or a Pluto and
+another board, meet without calibration.
+
+A PlutoSDR starts on its own channel tables, video 2500, 3300, 3600 MHz and control 433,
+922 MHz; an ADRV9364 or an E200 starts on video 5.8 GHz and control 2.4 GHz. Two Plutos pair
+as they are. To pair a Pluto with one of the other boards, give that board the Pluto's tables
+first (**Channel**, then **Apply**, in the app connected to it). A Pluto at the aircraft end
+receives the control at 40 dB of gain, which suits the sub-GHz pool; move its control pool
+higher and raise the gain under **Radio** to about 62 dB.
+
 ### 3. The apps
 
 `cargo build --release` at the repository root puts them in `target/release/`. One app serves
@@ -157,8 +228,9 @@ nyxhop
 ```
 
 It asks which end this computer is (**Ground station**: this computer shows the video;
-**Aircraft**: this computer has the camera) and which board it is plugged into, puts the board
-into the matching role (the board restarts, about ten seconds), and opens the ground or the
+**Aircraft**: this computer has the camera) and which board it is plugged into (its address; a
+Pluto's is `192.168.2.1` unless you changed it), puts the board into the matching role (the
+board restarts, about ten seconds), and opens the ground or the
 aircraft screen. It remembers the choice; `nyxhop --mode rx --board 192.168.0.12` or
 `--mode tx --board 192.168.0.10` skips the question. So a pair of boards can change ends from
 the apps alone: choose the other end on each computer, and both boards follow.
@@ -210,9 +282,10 @@ An IP camera needs no computer on the aircraft. `nyx-ipcam` is the transmitting 
 the board's own ARM: it runs beside the radio, pulls the camera's RTSP stream over the board's
 Ethernet port and puts the camera's H.264 on air as it is. Nothing is decoded or encoded on the
 board, so the two ARM cores stay with the radio. What flies is a board, a camera and a cable.
+It runs on the ADRV9364 and the E200, the boards with an Ethernet port for the camera.
 
 ```bash
-python link/scripts/nyx_ipcam_install.py 192.168.0.10     # either board, once NyxHop runs on it
+python link/scripts/nyx_ipcam_install.py 192.168.0.10     # ADRV9364 or E200, once NyxHop runs on it
 ```
 
 That writes the prebuilt program from `deploy/ipcam/` onto the board and starts it on every
@@ -298,10 +371,14 @@ flowing, the ground app also shows the aircraft's DNA and a **Send to aircraft**
 saves the walk to the aircraft next time; it needs the video link, so it is not there while the
 aircraft is still locked. A licence is bound to its board, works offline and never expires.
 
+A PlutoSDR needs none of this: it is free, with no grace period to count down.
+
 ### If something is off
 
 * **The app cannot connect**: can you ping the board? Is the PC on the same network? Forgot
-  the address: `python link/scripts/nyx_flash.py --scan`.
+  the address: `python link/scripts/nyx_flash.py --scan`. A Pluto's address is `ipaddr` in
+  `config.txt` on its drive (`python link/scripts/nyx_pluto.py --list` shows every Pluto
+  plugged in, and whether another network card of this computer is in its way).
 * **Connected but no video**: both pills must say *linked*; if not, press **Link aircraft** in
   the ground app again (and **Accept link** in the aircraft app if that board is already
   paired). A pill saying *locked* is a board past its grace period: licence it from the app
@@ -312,7 +389,8 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
   *scan* while the receiver looks for a better channel.
 * **Looking deeper**: the board console answers on TCP 7202 (`nc 192.168.0.12 7202`, then
   `hop status`, `license`, `stats`), the apps write logs next to the executable in `logs/`, and
-  the daemon log is `/home/root/radio.out` (ADRV9364) or `/tmp/nyxhop/radio.out` (E200).
+  the daemon log is `/home/root/radio.out` (ADRV9364), `/tmp/nyxhop/radio.out` (E200) or
+  `/tmp/nyxhop/node.log` (PlutoSDR).
 
 ## Hardware
 
@@ -320,10 +398,11 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
 |---|---|---|
 | ADRV9364-Z7020 | AD9364 | ready |
 | ANTSDR E200 | AD9361 | ready |
-| PlutoSDR | AD9363 | in progress |
+| PlutoSDR | AD9363 | ready, free |
 
-Either board can be either end, and two of the same kind work. Ethernet between each board
-and its computer, 12 V supplies, antennas of your choice.
+Any board can be either end, in any mix, and two of the same kind work. Ethernet between an
+ADRV9364 or an E200 and its computer, with a 12 V supply; a PlutoSDR runs from its USB cable,
+which is its network too. Antennas of your choice.
 
 <img src="docs/img/boards.jpg" width="420" alt="An ADRV9364-Z7020 and an ANTSDR E200">
 
@@ -354,9 +433,10 @@ phone needs a radio driver: the modem runs on the board.
 
 ## Try it free
 
-A board runs 20 hours before it needs a licence at all, and the first ten boards per email
-address are free, commercial use included, covering the current feature generation with all its
-bug fixes, for ever. Licences are per board, not per pair. More boards, or a link made for your
+A PlutoSDR is free outright. Any other board runs 20 hours before it needs a licence at all,
+and the first ten boards per email address are free, commercial use included, covering the
+current feature generation with all its bug fixes, for ever. Licences are per board, not per
+pair. More boards, or a link made for your
 system: **contact@tacitek.com** ([above](#a-link-built-for-your-system)). Details in
 [docs/license.md](docs/license.md). Questions about using it as it is belong in Issues and
 Discussions, where everyone can read the answer.
@@ -365,12 +445,12 @@ Discussions, where everyone can read the answer.
 
 ```
 link/         the transmission system: protocol, block framing, shared app support,
-              board console, the flashing tool
+              board console, the flashing tools (nyx_flash.py; nyx_pluto.py for PlutoSDRs)
 apps/video/   the apps (ground, transmitting, Android, the camera app for the board's ARM
               with its PC window and a test camera) - video and the UDP data pipe
 apps/data/    the tool that measures the pipe
-deploy/       prebuilt board images you flash (deploy/adrv9364, deploy/e200) and the camera
-              app built for the boards (deploy/ipcam)
+deploy/       prebuilt board images you flash (deploy/adrv9364, deploy/e200, deploy/pluto) and
+              the camera app built for the boards (deploy/ipcam)
 docs/         licence terms, SDK notes, legal
 ```
 
@@ -379,9 +459,9 @@ docs/         licence terms, SDK notes, legal
 | what | licence |
 |---|---|
 | Source code in this repository: `link/`, `apps/`, `docs/` | public domain ([Unlicense](LICENSE)): no licence needed |
-| Binaries in `deploy/adrv9364` and `deploy/e200`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md) |
+| Binaries in `deploy/adrv9364`, `deploy/e200` and `deploy/pluto`: FPGA design, radio daemon, board images | [EULA](docs/EULA.md) |
 | `deploy/ipcam/`: a build of `apps/video/nyx-ipcam` for the boards | public domain, like its source |
-| Third-party components inside the board images (U-Boot, BusyBox and others) | their own licences, see [THIRD-PARTY.md](docs/THIRD-PARTY.md) |
+| Third-party components inside the board images (U-Boot, Linux, BusyBox and others) | their own licences, see [THIRD-PARTY.md](docs/THIRD-PARTY.md) |
 
 Radio use is subject to the laws of your country: you are responsible for the frequencies and the
 power you transmit.

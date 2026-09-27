@@ -36,7 +36,10 @@
 * The camera straight into the board: `nyx-ipcam` runs on the board's own ARM and sends an IP
   camera with no computer on the aircraft (prebuilt in `deploy/ipcam/`, one-command installer,
   a PC window to set it up, a test camera). Either board, follows the board's role.
-* Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card).
+* Boards: ADRV9364-Z7020 on ADI Kuiper Linux (one-command installer), ANTSDR E200 (SD card),
+  PlutoSDR (one file copied onto its USB drive, or one command for every Pluto plugged in:
+  firmware, a network of its own, pairing; free, no licence). Any board takes either end, in any
+  mix. A PlutoSDR tunes its frequency to the board at the other end by itself.
 * Licence per board, checked offline; free tier.
 * Licensing of the repository: the source code is public domain (Unlicense), no licence needed;
   the board images stay under the EULA.

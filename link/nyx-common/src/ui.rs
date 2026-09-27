@@ -697,22 +697,55 @@ pub fn connection_section(ui: &mut egui::Ui, addr: &mut String, hint: &str, conn
     connect
 }
 
-/// Two-way text over the air. Returns the line to send, if any.
-pub fn messages_section(ui: &mut egui::Ui, msgs: &[String], buf: &mut String) -> Option<String> {
+/// Two-way text over the air. The log keeps "→ " for sent and "← " for received; the list names
+/// who said it (`peer` = the other end), since the arrows are not in the proportional font.
+/// Returns the line to send, if any.
+pub fn messages_section(ui: &mut egui::Ui, msgs: &[String], buf: &mut String, peer: &str) -> Option<String> {
     let mut out = None;
     th::section(ui, "Messages", false, |ui| {
-        egui::ScrollArea::vertical().id_salt("nyx_msgs").max_height(120.0).stick_to_bottom(true).show(ui, |ui| {
+        // min_scrolled_height: near the bottom of the drawer the list only got the room left on
+        // screen (two lines and a half)
+        let list = egui::ScrollArea::vertical().id_salt("nyx_msgs").max_height(170.0).min_scrolled_height(150.0);
+        list.stick_to_bottom(true).show(ui, |ui| {
             for m in msgs {
-                ui.label(m);
+                let (who, col, text) = if let Some(t) = m.strip_prefix("→ ") {
+                    ("You", th::CYAN, t)
+                } else if let Some(t) = m.strip_prefix("← ") {
+                    (peer, th::GOOD, t)
+                } else {
+                    ("", th::DIM, m.as_str())
+                };
+                // one label per line (a row of two widgets is a touch-target tall)
+                let fmt = |style: egui::TextStyle, color| egui::TextFormat {
+                    font_id: style.resolve(ui.style()),
+                    color,
+                    valign: egui::Align::Center,
+                    ..Default::default()
+                };
+                let mut job = egui::text::LayoutJob::default();
+                if !who.is_empty() {
+                    job.append(who, 0.0, fmt(egui::TextStyle::Small, col));
+                }
+                job.append(text, if who.is_empty() { 0.0 } else { 10.0 }, fmt(egui::TextStyle::Body, ui.visuals().text_color()));
+                job.wrap.max_width = ui.available_width();
+                ui.label(job);
             }
         });
+        // Send on the right, the field takes what is left: a width guessed from the button made
+        // the row wider than the drawer, and a wide drawer grew over the video every frame
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 100.0).hint_text("type a message…"));
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (action(ui, "Send") || enter) && !buf.trim().is_empty() {
-                out = Some(buf.trim().to_string());
-                buf.clear();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let send = action(ui, "Send");
+                let r = ui.add(egui::TextEdit::singleline(buf).desired_width(f32::INFINITY).hint_text("type a message…"));
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (send || enter) && !buf.trim().is_empty() {
+                    out = Some(buf.trim().to_string());
+                    buf.clear();
+                    if enter {
+                        r.request_focus();
+                    }
+                }
+            });
         });
     });
     out

@@ -13,6 +13,12 @@ source locations in `../docs/THIRD-PARTY.md`.
                        nyxhop.service  u-dma-buf.ko  fir10MHz.ftr  nyx-radio-A.cfg  nyx-radio-B.cfg
     deploy/e200/       nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-A-e200.cfg  nyx-radio-B-e200.cfg
     deploy/ipcam/      nyx-ipcam  nyx-ipcam.service  e200/   (the camera app for the board's ARM)
+    deploy/pluto/      pluto.frm   (the PlutoSDR's whole firmware: ADI's, with NyxHop inside)
+
+The PlutoSDR takes `pluto/pluto.frm` through its own USB drive: `../link/scripts/nyx_pluto.py`
+does it for every Pluto plugged in (firmware, a network of its own, `--pair` for two), or copy
+the file onto the drive and eject it, as for any Pluto firmware update. The PlutoSDR is free to
+use: no licence, no grace period.
 
 `ipcam/` is the exception to the licence note above: it is a build of `apps/video/nyx-ipcam`
 for the boards' ARM, public domain like its source, and `link/scripts/nyx_ipcam_install.py`
@@ -25,3 +31,4 @@ Usage (from the repository root):
     python link/scripts/nyx_flash.py --host <ip> --role rx            # ADRV9364 ground
     python link/scripts/nyx_flash.py --host 192.168.0.12 --role rx --board e200
     python link/scripts/nyx_ipcam_install.py <ip>                     # the camera app, either board
+    python link/scripts/nyx_pluto.py --pair                           # two PlutoSDRs plugged in here
