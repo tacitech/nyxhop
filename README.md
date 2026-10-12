@@ -1,6 +1,6 @@
 # NyxHop
 
-**An OcuSync-style frequency-hopping link on any band from 70 MHz to 6 GHz, for drones and robots, on off-the-shelf SDR boards.**
+**An FPGA modem for OcuSync-style frequency-hopping links on any band from 70 MHz to 6 GHz, for drones and robots.**
 
 ![source public domain](https://img.shields.io/badge/source-public%20domain-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
@@ -11,8 +11,9 @@
 NyxHop is the kind of link DJI builds into its drones: the video hops, the control has its own
 hopping channel, the two ends are paired, the rate follows the channel and the link comes back
 by itself after a drop. The difference is where it goes: your own channel table anywhere from
-70 MHz to 6 GHz, several bands in one table, on off-the-shelf SDR boards (an ADRV9364-Z7020, an
-ANTSDR E200 or a PlutoSDR). The link moves blocks of bytes; what you put in them is your business: video,
+70 MHz to 6 GHz, several bands in one table. The whole modem is in the FPGA chip (on an
+ADRV9364-Z7020, an ANTSDR E200 or a PlutoSDR); the computer only sends and receives data. The link
+moves blocks of bytes; what you put in them is your business: video,
 telemetry, files, your own protocol, all at once if you like.
 
 * **Hard to jam and hard to find**: no fixed, well-known frequencies to aim at, only the channels
@@ -40,7 +41,7 @@ Auto, your own channel tables, the distance between the boards measured by the l
 |---|---|---|
 | bands | the licence-free bands around 2.4 and 5 GHz | any channels you list from 70 MHz to 6 GHz; one table can span several bands and the link hops across them |
 | jamming and detection | the well-known 2.4 and 5 GHz bands, the ones drone detectors and jammers cover first | frequencies only you know, across bands; moves off a jammed channel by itself; transmit power held to what the link needs |
-| hardware | built into DJI aircraft, goggles and controllers | two off-the-shelf SDR boards, your camera, your computer or phone |
+| hardware | built into DJI aircraft, goggles and controllers | two NyxHop FPGA modems, your camera, your computer or phone |
 | what it carries | DJI video and flight control | any bytes: video, MAVLink, files, your own protocol |
 | software | closed | apps and SDK in Rust, public domain |
 | origin | DJI, China | developed in Vietnam; can be built with no Chinese parts at all: Analog Devices radios, AMD (Xilinx) FPGAs, our own software |
@@ -81,8 +82,8 @@ says exactly which is which.
 flowchart LR
     CAM["Camera"] --> TX["nyx-tx<br/>PC or small SBC"]
     FC["Flight controller"] <-.-> TX
-    TX -- "Ethernet" --> BA["SDR board"]
-    BA == "radio link" ==> BB["SDR board"]
+    TX -- "Ethernet" --> BA["FPGA board"]
+    BA == "radio link" ==> BB["FPGA board"]
     BB -- "Ethernet" --> RX["nyx-rx<br/>PC or Android"]
     RX <-.-> GCS["Ground control station"]
     IPC["IP camera"] -. "Ethernet, no computer" .-> BA
@@ -102,7 +103,7 @@ Budget an hour the first time.
 
 **You need**
 
-* Two boards, ADRV9364-Z7020, ANTSDR E200 or PlutoSDR in any mix, with antennas for the band you
+* Two FPGA boards, ADRV9364-Z7020, ANTSDR E200 or PlutoSDR in any mix, with antennas for the band you
   will use. For a first test, 1–3 m apart is fine.
 * A PC on the same Ethernet as the boards, with Python 3 (`pip install paramiko`) for the
   flashing tools (a PlutoSDR plugs into its computer's USB instead; its tool needs nothing but
@@ -396,11 +397,11 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
 
 ## Hardware
 
-| board | transceiver | status |
-|---|---|---|
-| ADRV9364-Z7020 | AD9364 | ready |
-| ANTSDR E200 | AD9361 | ready |
-| PlutoSDR | AD9363 | ready, free |
+| FPGA board | FPGA | transceiver | status |
+|---|---|---|---|
+| ADRV9364-Z7020 | Zynq-7020 | AD9364 | ready |
+| ANTSDR E200 | Zynq-7020 | AD9361 | ready |
+| PlutoSDR | Zynq-7010 | AD9363 | ready, free |
 
 Any board can be either end, in any mix, and two of the same kind work. Ethernet between an
 ADRV9364 or an E200 and its computer, with a 12 V supply; a PlutoSDR runs from its USB cable,
