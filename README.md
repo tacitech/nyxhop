@@ -44,7 +44,7 @@ Auto, your own channel tables, the distance between the boards measured by the l
 | hardware | built into DJI aircraft, goggles and controllers | two NyxHop FPGA modems, your camera, your computer or phone |
 | what it carries | DJI video and flight control | any bytes: video, MAVLink, files, your own protocol |
 | software | closed | apps and SDK in Rust, public domain |
-| origin | DJI, China | developed in Vietnam; can be built with no Chinese parts at all: Analog Devices radios, AMD (Xilinx) FPGAs, our own software |
+| origin | DJI, China | can be built with no Chinese parts at all: Analog Devices radios, AMD (Xilinx) FPGAs, our own software |
 
 *OcuSync is a trademark of SZ DJI Technology Co., Ltd.; NyxHop is not affiliated with or endorsed by DJI.*
 
@@ -406,10 +406,6 @@ aircraft is still locked. A licence is bound to its board, works offline and nev
 Any board can be either end, in any mix, and two of the same kind work. Ethernet between an
 ADRV9364 or an E200 and its computer, with a 12 V supply; a PlutoSDR runs from its USB cable,
 which is its network too. Antennas of your choice.
-
-<img src="docs/img/boards.jpg" width="420" alt="An ADRV9364-Z7020 and an ANTSDR E200">
-
-*A pair of boards: ADRV9364-Z7020 on the left, ANTSDR E200 on the right.*
 
 The boards transmit at the power their own front end gives, which is enough for a short-range
 test and not much more. For distance, add the RF yourself: an antenna with gain at both ends, a power
