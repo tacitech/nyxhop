@@ -1,12 +1,13 @@
 # NyxHop
 
-**A frequency-hopping video and data link for drones and robots. The whole modem runs in an FPGA;
-the channels are yours, anywhere from 70 MHz to 6 GHz.**
+**A frequency-hopping video and data link for drones and robots, up to 48 Mbit/s. The whole modem
+runs in an FPGA; the channels are yours, anywhere from 70 MHz to 6 GHz.**
 
 ![source public domain](https://img.shields.io/badge/source-public%20domain-blue)
 ![board images EULA](https://img.shields.io/badge/board%20images-EULA-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)
+![rate](https://img.shields.io/badge/up%20to-48%20Mbit%2Fs-brightgreen)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
 
 [![NyxHop demo: the two links on a spectrum analyser, live video, an LTE jammer, 48 Mbit/s and the IP bridge](docs/img/nyxhop-demo.jpg)](docs/img/nyxhop-demo.mp4)
@@ -14,6 +15,14 @@ the channels are yours, anywhere from 70 MHz to 6 GHz.**
 *Two minutes: the video and control links on a spectrum analyser, live video, an LTE
 jammer on the video channel and the link moving away from it, 48 Mbit/s, the four channel widths
 and an IP network over the radio.*
+
+## What you can use it for
+
+| | |
+|---|---|
+| **Video** | Live video at 30 fps from a USB camera, an IP camera (RTSP), a phone camera or a video file. The bitrate follows the link, up to 48 Mbit/s. An IP camera can plug straight into the aircraft board, with no computer on board. |
+| **Data** | Telemetry and your own data, both ways. MAVLink over a UDP pipe: ground UDP 14555 to aircraft 14556, aircraft 14557 to ground 14558; point your ground control station and your flight controller at it ([details](docs/telemetry-sdk.md)). Your own protocol with the Rust SDK (`link/nyx-proto`, `link/nyx-link`): bytes in at one end, out at the other. |
+| **IP bridge: your private Wi-Fi** | The two ends become one private network, like a Wi-Fi that reaches kilometres and that only your two boards can join. Laptops, phones, IP cameras and servers at either end talk to each other: ping, SSH, web, file copies, video calls. About 24 Mbit/s from the aircraft to the ground and 1.5 Mbit/s back, next to the video. [How](#ip-bridge-a-private-network-over-the-link). |
 
 ## What it does
 
@@ -30,15 +39,6 @@ and an IP network over the radio.*
   signal.
 * **Non-Chinese if you need it**: Analog Devices radios, AMD (Xilinx) FPGAs, our own software.
 * **Free on a PlutoSDR**: no licence, no time limit, no sign-up.
-
-## What you can send
-
-| | |
-|---|---|
-| **Video** | A USB camera, an IP camera (RTSP), a phone camera or a video file, at 30 fps; the bitrate follows the link. An IP camera can plug straight into the aircraft board, with no computer on board. |
-| **Telemetry** | MAVLink both ways over a UDP pipe: ground UDP 14555 to aircraft 14556, aircraft 14557 to ground 14558. Point your ground control station and your flight controller at it. [Details](docs/telemetry-sdk.md). |
-| **Data** | Your own protocol with the Rust SDK (`link/nyx-proto`, `link/nyx-link`): bytes in at one end, out at the other. |
-| **IP network** | Two networks joined over the radio, next to the video: ping, SSH, web, file copies, iperf3, IP cameras. About 24 Mbit/s from the aircraft to the ground and 1.5 Mbit/s back. |
 
 ## Getting started
 
@@ -71,7 +71,7 @@ tables (*Auto* picks the best channel, *Off* holds one), the channel width, the 
 **4. The licence.** See [below](#licence): the first 100 hours of running are free, and so is a
 licence for your first ten boards.
 
-### IP network over the link
+### IP bridge: a private network over the link
 
 ```bash
 python link/scripts/nyx_ip.py on  --air 192.168.0.10 --ground 192.168.0.11
