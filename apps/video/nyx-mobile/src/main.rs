@@ -4,6 +4,7 @@
 //!   cargo run --release -p nyx-mobile --bin nyx-mobile-desktop -- 192.168.0.12
 fn main() -> eframe::Result {
     nyx_common::logging::init("mobile");
+    nyx_common::i18n::init(std::path::Path::new("."));
     let board = std::env::args().nth(1);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

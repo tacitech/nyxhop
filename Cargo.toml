@@ -12,11 +12,13 @@ members = [
     "apps/video/nyx-fakecam",
     "apps/video/nyx-ipcam-ctl",
     "apps/nyxhop",
+    "apps/nyx-bitrate",
 ]
 
 [workspace.dependencies]
 num-complex = "0.4"
 crc32fast = "1"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.dev]
 opt-level = 2

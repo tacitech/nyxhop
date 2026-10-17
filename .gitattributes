@@ -17,9 +17,12 @@
 *.gz -text
 *.ko -text
 *.frm -text
+*.mp4 -text
+*.jpg -text
 *.apk -text
 *.png -text
 *.jpg -text
 deploy/**/nyx-radio-node -text
 deploy/**/nyxctl -text
 deploy/**/nyx-ipcam -text
+deploy/**/nyx-bridge -text

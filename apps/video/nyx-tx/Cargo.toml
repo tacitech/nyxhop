@@ -3,12 +3,6 @@ name = "nyx-tx"
 version = "0.1.0"
 edition = "2024"
 
-# The window binary; the library also builds headless (an on-board camera app hosts it).
-[[bin]]
-name = "nyx-tx"
-path = "src/main.rs"
-required-features = ["gui"]
-
 [features]
 default = ["gui", "h264", "webcam", "rtsp", "onvif"]
 # The window (TxApp). Off in an on-board camera app, which runs headless.
@@ -46,3 +40,6 @@ eframe = { version = "0.35.0", optional = true, default-features = false, featur
     "glow",
     "android-native-activity",
 ] }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }

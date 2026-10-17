@@ -10,10 +10,13 @@ default = []
 eframe = { version = "0.35.0", default-features = false, features = [
     "accesskit",
     "default_fonts",
-    "wgpu", # v40.21: OpenGL (glow) crash trong igxelpgicd64.dll Intel — 5 lan/6 ngay (3/9)
+    "wgpu", # v40.21: OpenGL (glow) crashed in Intel's igxelpgicd64.dll - 5 times in 6 days (3/9)
 ] }
 egui = "0.35.0"
 num-complex = { workspace = true }
 nyx-link = { path = "../../../link/nyx-link" }
 nyx-proto = { path = "../../../link/nyx-proto" }
 nyx-common = { path = "../../../link/nyx-common" }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }

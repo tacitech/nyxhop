@@ -10,6 +10,8 @@ pub enum SourceKind {
     /// An IP camera: H.264 over RTSP, decoded here and fed on like the webcam.
     Rtsp,
     RandomData,
+    /// A video file, decoded by ffmpeg in real time and looped, fed on like the webcam.
+    File,
 }
 
 impl SourceKind {
@@ -20,6 +22,7 @@ impl SourceKind {
             SourceKind::Webcam => if cfg!(target_os = "android") { "Phone camera" } else { "Webcam" },
             SourceKind::Rtsp => "IP camera (RTSP)",
             SourceKind::RandomData => "Random data",
+            SourceKind::File => "Video file",
         }
     }
 }
@@ -188,6 +191,163 @@ impl WebcamShared {
     pub fn want(&self) -> Option<(usize, usize)> {
         let v = self.want_wh.load(std::sync::atomic::Ordering::Relaxed);
         (v != 0).then(|| ((v >> 32) as usize, (v & 0xffff_ffff) as usize))
+    }
+}
+
+// ------------------------------------------------------------- video file --
+
+/// A video file played in real time on a loop: ffmpeg decodes it (`vfile`), the latest picture
+/// waits here for the transmit worker, which takes it on its own tick like the webcam's and
+/// encodes it at the link's rate.
+pub struct FileShared {
+    pub wanted: std::sync::atomic::AtomicBool,
+    pub stop: std::sync::atomic::AtomicBool,
+    pub path: std::sync::Mutex<String>,
+    pub frame: std::sync::Mutex<Option<RgbFrame>>,
+    pub status: std::sync::Mutex<String>,
+}
+
+impl FileShared {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(FileShared {
+            wanted: std::sync::atomic::AtomicBool::new(false),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            path: std::sync::Mutex::new(String::new()),
+            frame: std::sync::Mutex::new(None),
+            status: std::sync::Mutex::new(String::from("idle")),
+        })
+    }
+
+    pub fn status(&self) -> String {
+        self.status.lock().unwrap().clone()
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub mod vfile {
+    use std::io::Read;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use super::FileShared;
+    use crate::RgbFrame;
+    use crate::logging::log;
+
+    /// The largest picture decoded: the encoder never sends more than 1080p.
+    const MAX_W: usize = 1920;
+    const MAX_H: usize = 1080;
+    const FPS: u32 = 30;
+
+    /// Background thread: ffmpeg runs only while `wanted` is set and a file is named.
+    pub fn spawn(shared: Arc<FileShared>) {
+        std::thread::Builder::new()
+            .name("vfile".into())
+            .spawn(move || run(shared))
+            .expect("spawn video file thread");
+    }
+
+    fn set_status(shared: &FileShared, s: String) {
+        log(&format!("video file: {s}"));
+        *shared.status.lock().unwrap() = s;
+    }
+
+    /// ffmpeg / ffprobe beside the program, else on the PATH.
+    fn tool(name: &str) -> Command {
+        let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+        let local = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(&exe))).filter(|p| p.exists());
+        let mut c = Command::new(local.map_or_else(|| std::path::PathBuf::from(&exe), |p| p));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // no console window flashing up behind the app
+            c.creation_flags(0x0800_0000);
+        }
+        c
+    }
+
+    /// The file's picture size, fitted inside MAX_W x MAX_H (even, as the encoder wants).
+    fn size(path: &str) -> Result<(usize, usize), String> {
+        let out = tool("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path])
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("ffprobe: {e} (is ffmpeg installed?)"))?;
+        let t = String::from_utf8_lossy(&out.stdout);
+        let mut it = t.trim().split(',').map(|v| v.trim().parse::<usize>().ok());
+        let (Some(Some(w)), Some(Some(h))) = (it.next(), it.next()) else {
+            let e = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("not a video ({})", e.lines().next().unwrap_or("no picture stream")));
+        };
+        let k = (MAX_W as f64 / w as f64).min(MAX_H as f64 / h as f64).min(1.0);
+        let even = |v: f64| ((v / 2.0).round() as usize * 2).max(2);
+        Ok((even(w as f64 * k), even(h as f64 * k)))
+    }
+
+    fn open(path: &str, w: usize, h: usize) -> Result<Child, String> {
+        tool("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", path, "-an", "-vf"])
+            .arg(format!("scale={w}:{h},fps={FPS}"))
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("ffmpeg: {e} (is ffmpeg installed?)"))
+    }
+
+    fn run(shared: Arc<FileShared>) {
+        loop {
+            if shared.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let path = shared.path.lock().unwrap().trim().trim_matches('"').to_string();
+            if !shared.wanted.load(Ordering::Relaxed) || path.is_empty() {
+                if shared.frame.lock().unwrap().take().is_some() {
+                    set_status(&shared, "idle".into());
+                }
+                std::thread::sleep(Duration::from_millis(150));
+                continue;
+            }
+            let (w, h) = match size(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    set_status(&shared, format!("cannot open {path}: {e}"));
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+            };
+            let mut child = match open(&path, w, h) {
+                Ok(c) => c,
+                Err(e) => {
+                    set_status(&shared, e);
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+            };
+            let name = std::path::Path::new(&path).file_name().map_or(path.clone(), |n| n.to_string_lossy().to_string());
+            set_status(&shared, format!("playing {name} {w}x{h} {FPS} fps, looped"));
+            let mut out = child.stdout.take().expect("ffmpeg stdout");
+            let mut buf = vec![0u8; w * h * 3];
+            loop {
+                if shared.stop.load(Ordering::Relaxed)
+                    || !shared.wanted.load(Ordering::Relaxed)
+                    || shared.path.lock().unwrap().trim().trim_matches('"') != path
+                {
+                    break;
+                }
+                if out.read_exact(&mut buf).is_err() {
+                    set_status(&shared, format!("{name}: the decoder stopped"));
+                    std::thread::sleep(Duration::from_secs(1));
+                    break;
+                }
+                *shared.frame.lock().unwrap() = Some(RgbFrame { width: w, height: h, rgb: buf.clone() });
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 

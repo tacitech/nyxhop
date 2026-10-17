@@ -27,6 +27,7 @@ use nyx_common::source::SourceKind;
 use nyx_common::start::{Chooser, Event, Role};
 use nyx_common::{RgbFrame, decode_jpeg, theme as th, to_color_image, Opts};
 use nyx_link::{Reassembler, SourceType, parse_block};
+use nyx_common::i18n::t;
 use nyx_proto::{Msg, read_msg, write_msg};
 
 #[cfg(target_os = "android")]
@@ -190,6 +191,11 @@ pub struct Shared {
     pub partial: AtomicBool,
     /// v40.33: the aircraft's licence lines (SourceType::Info) for the UI.
     pub far_lic: Mutex<String>,
+    /// Text both ways, as the PC ground station shows it ("→ " sent, "← " received): the
+    /// aircraft's arrives in the video stream (SourceType::Text), ours goes to the board as
+    /// UserText and on over the control channel.
+    pub msgs: Mutex<Vec<String>>,
+    pub msg_out: Mutex<Vec<String>>,
 }
 
 impl Shared {
@@ -198,6 +204,8 @@ impl Shared {
             frame: Mutex::new(None),
             frame_ver: AtomicU64::new(0),
             far_lic: Mutex::new(String::new()),
+            msgs: Mutex::new(Vec::new()),
+            msg_out: Mutex::new(Vec::new()),
             metrics: Mutex::new(Metrics::default()),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -214,6 +222,14 @@ impl Shared {
         while l.len() > 6 {
             l.pop_front();
         }
+    }
+}
+
+fn push_msg(sh: &Shared, line: String) {
+    let mut m = sh.msgs.lock().unwrap();
+    m.push(line);
+    if m.len() > 200 {
+        m.remove(0);
     }
 }
 
@@ -374,7 +390,8 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                     // THERE (>= 60 % of its blocks): one torn band, but the video MOVES instead of
                     // freezing until an IDR (the encoder cuts independent slices).
                     if sh.partial.load(Ordering::Relaxed) {
-                        done.extend(r.take_stale(sid, 2, 0.6));
+                        // v40.53: not while retransmissions are still filling it in (nyx-rx)
+                        done.extend(r.take_stale(sid, 2, 0.6, std::time::Duration::from_millis(250)));
                     }
                     n_stale += (done.len() - before) as u64;
                     let mut ready: Vec<(u32, SourceType, Vec<u8>)> = Vec::new();
@@ -511,6 +528,12 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                                 *sh.far_lic.lock().unwrap() = String::from_utf8_lossy(&data).into_owned();
                                 None
                             }
+                            SourceType::Text => {
+                                let t = String::from_utf8_lossy(&data).into_owned();
+                                log(&format!("MSG received: {t}"));
+                                push_msg(sh, format!("← {t}"));
+                                None
+                            }
                             _ => None,
                         };
                         if let Some(f) = pic {
@@ -594,6 +617,13 @@ fn session(sh: &Arc<Shared>, s: &mut TcpStream) {
                 });
             }
         }
+        // our messages, to the board (on to the aircraft over the control channel)
+        let out: Vec<String> = std::mem::take(&mut *sh.msg_out.lock().unwrap());
+        for text in out {
+            if write_msg(s, &Msg::UserText { text }).is_err() {
+                return;
+            }
+        }
         let fb_due = if need_idr { 100 } else { 150 };
         if last_fb.elapsed() >= Duration::from_millis(fb_due) {
             last_fb = Instant::now();
@@ -634,6 +664,7 @@ pub struct RxApp {
     form: nyx_common::ui::RadioForm,
     chan_form: nyx_common::ui::ChannelForm,
     show_log: bool,
+    msg_buf: String,
 }
 
 impl RxApp {
@@ -661,6 +692,7 @@ impl RxApp {
             form: nyx_common::ui::RadioForm::default(),
             chan_form: nyx_common::ui::ChannelForm::default(),
             show_log: false,
+            msg_buf: String::new(),
         }
     }
 
@@ -680,21 +712,31 @@ impl RxApp {
             );
         }
         nu::radio_section(ui, &st, nu::Role::Ground, &mut self.form, &self.board, &mut |_hz| {});
+        {
+            let msgs = self.sh.msgs.lock().unwrap().clone();
+            if let Some(t) = nu::messages_section(ui, &msgs, &mut self.msg_buf, t("Aircraft", "Máy bay")) {
+                self.sh.msg_out.lock().unwrap().push(t.clone());
+                push_msg(&self.sh, format!("→ {t}"));
+            }
+        }
         if nu::connection_section(ui, &mut self.addr_buf, "192.168.0.12:7011", connected, None) {
             *self.sh.addr.lock().unwrap() = self.addr_buf.trim().to_string();
             self.sh.say("reconnecting…");
         }
-        th::section(ui, "Advanced", false, |ui| {
+        th::section(ui, t("Advanced", "Nâng cao"), false, |ui| {
             // App-side options (the board knows nothing about these).
             let mut part = self.sh.partial.load(Ordering::Relaxed);
             if ui
-                .checkbox(&mut part, "Show partial frames")
-                .on_hover_text("Deliver frames that are missing blocks instead of waiting: a torn stripe rather than a freeze.")
+                .checkbox(&mut part, t("Show partial frames", "Hiện hình thiếu mảnh"))
+                .on_hover_text(t(
+                    "Deliver frames that are missing blocks instead of waiting: a torn stripe rather than a freeze.",
+                    "Hiện cả hình bị thiếu mảnh thay vì chờ: hình có vệt rách thay vì đứng hình.",
+                ))
                 .changed()
             {
                 self.sh.partial.store(part, Ordering::Relaxed);
             }
-            ui.checkbox(&mut self.show_log, "Connection log");
+            ui.checkbox(&mut self.show_log, t("Connection log", "Nhật ký kết nối"));
             if self.show_log {
                 egui::ScrollArea::vertical().id_salt("log").max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
                     for l in self.sh.log.lock().unwrap().iter() {
@@ -735,17 +777,17 @@ impl eframe::App for RxApp {
             fps: m.rx_fps,
             kbps: m.kbps,
             mcs: m.mcs.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
-            pills: vec![nu::link_pill(&st), nu::licence_pill(&st), nu::mode_pill(&st)],
+            pills: vec![nu::link_pill(&st), nu::mode_pill(&st)],
             banner: None,
-            title: "NYXHOP · GROUND".into(),
-            empty_text: "waiting for video…".into(),
+            title: t("NYXHOP · GROUND", "NYXHOP · MẶT ĐẤT").into(),
+            empty_text: t("waiting for video…", "đang chờ hình…").into(),
             plates: self.hud_plates,
             range: nu::range_of(&st),
         };
         let tex = self.tex.clone();
         let mut open = self.drawer_open;
         let mut plates = self.hud_plates;
-        nu::screen(root, &mut open, &mut plates, "Settings", |ui| self.drawer(ui), |ui| nu::hud(ui, tex.as_ref(), &data));
+        nu::screen(root, &mut open, &mut plates, t("Settings", "Cài đặt"), |ui| self.drawer(ui), |ui| nu::hud(ui, tex.as_ref(), &data));
         self.drawer_open = open;
         self.hud_plates = plates;
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -775,7 +817,7 @@ impl Host {
         if let Some(b) = board_override {
             cfg.board = b;
         }
-        let chooser = Chooser::new(cfg.board.clone(), cfg.set_role, "this phone");
+        let chooser = Chooser::new(cfg.board.clone(), cfg.set_role, t("this phone", "điện thoại này"));
         // The wired network, for every socket of this process (the role poll, the video, the
         // console): bound as soon as a cable is there, checked again every few seconds so
         // plugging it in later works too. Binding is process-wide and sticks.
@@ -902,6 +944,7 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
     // every nyx_common log line to logcat as well (`adb logcat -s nyxhop`)
     nyx_common::logging::set_hook(|s| log::info!(target: "nyxhop", "{s}"));
     jni_ctx::remember(app.vm_as_ptr().cast(), app.activity_as_ptr().cast());
+    nyx_common::i18n::init(std::path::Path::new(FILES_DIR));
     let opts = eframe::NativeOptions {
         android_app: Some(app),
         ..Default::default()

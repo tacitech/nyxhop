@@ -14,3 +14,6 @@ nyx-common = { path = "../../link/nyx-common" }
 nyx-proto = { path = "../../link/nyx-proto" }
 nyx-rx = { path = "../video/nyx-rx" }
 nyx-tx = { path = "../video/nyx-tx" }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }

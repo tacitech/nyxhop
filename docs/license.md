@@ -5,7 +5,7 @@ sign-up, commercial use included. Nothing further down this page applies to it.
 
 Every other NyxHop board (ADRV9364-Z7020, ANTSDR E200) needs a licence. The first ten are free,
 commercial use included; past that, and for the coming feature generations, write to us and we
-will quote you. Nothing expires, nothing counts hours, and the board never contacts us.
+will quote you. A licence never expires, and the board never contacts us.
 
 ## Tiers
 
@@ -30,7 +30,8 @@ Bug-fix releases belong to the generation they fix and load on every licence of 
 ## Getting a licence
 
 1. In the app, open **Licence** and press **Copy** next to the DNA (15 hex digits). The aircraft's
-   DNA shows in the ground app while the link is up, or in `nyx-tx` on the aircraft computer.
+   DNA shows in the ground screen while the link is up, or in the aircraft screen on the aircraft
+   computer.
 2. Request it at **[nyxhop.com/licence.html](https://nyxhop.com/licence.html)**: a free licence comes
    back on the page at once. Paid licences: write to **contact@tacitek.com** with the DNA and the
    order number, and the file comes back by email.
@@ -42,11 +43,18 @@ Bug-fix releases belong to the generation they fix and load on every licence of 
 The licence pill turns to *licensed*. The file is stored on the board (and on the E200's SD card)
 and loads at every boot.
 
-## Grace period
+## 100 running hours before a licence
 
-A board without a licence works for 100 hours of operation on the ADRV9364 (20 hours on the
-ANTSDR E200), counted by the board, so you can test before asking for a licence. After that video stops until a licence is loaded; control, pairing
-and the apps keep working so you can still read the DNA and apply the file.
+A new ADRV9364-Z7020 runs NyxHop for **100 hours** before it needs a licence (an ANTSDR E200 for
+20 hours), so you can test everything first.
+
+These are **running hours**: the board counts only the time it is switched on and running
+NyxHop. Switched off, it counts nothing. A board that sits in a drawer for a month has used none
+of its hours; 100 hours is, for example, 50 sessions of two hours or four days running non-stop.
+
+When the hours are used up, the video stops until a licence is loaded. Control, pairing and the
+apps keep working, so you can still read the DNA and apply the licence. `license` on the board
+console shows the minutes used.
 
 ## What the DNA is, and privacy
 

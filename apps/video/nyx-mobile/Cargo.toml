@@ -3,8 +3,8 @@ name = "nyx-mobile"
 version = "0.1.0"
 edition = "2024"
 
-# cdylib = thư viện Android nạp qua NativeActivity; rlib + bin để chạy thử
-# trên PC (cùng code, khỏi phải cắm máy mới biết logic đúng chưa).
+# cdylib = the Android library NativeActivity loads; rlib + bin to try it on a PC (the same
+# code, no phone needed to see the logic work).
 [lib]
 name = "nyx_mobile"
 crate-type = ["cdylib", "rlib"]
@@ -16,9 +16,9 @@ path = "src/main.rs"
 [dependencies]
 egui = "0.35.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
-# h264 BẬT: đã kiểm openh264 (C++ qua cc) CROSS-COMPILE ĐƯỢC bằng NDK cho
-# aarch64-linux-android — khỏi cần MediaCodec/JNI. MJPEG (image, thuần Rust)
-# vẫn dùng được song song.
+# h264 ON: openh264 (C++ through cc) is checked to CROSS-COMPILE with the NDK for
+# aarch64-linux-android - no MediaCodec/JNI needed. MJPEG (image, pure Rust) still works
+# beside it.
 nyx-common = { path = "../../../link/nyx-common", default-features = false, features = ["h264"] }
 nyx-link = { path = "../../../link/nyx-link" }
 nyx-proto = { path = "../../../link/nyx-proto" }

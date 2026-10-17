@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::i18n::t;
 use crate::logging::log;
 use crate::theme as th;
 pub use crate::ui::Role;
@@ -30,10 +31,18 @@ impl Role {
             Role::Aircraft => nyx_proto::DEFAULT_TX_PORT,
         }
     }
+    /// The end's name in English (the hosts' log lines use it).
     pub fn label(self) -> &'static str {
         match self {
             Role::Ground => "Ground station",
             Role::Aircraft => "Aircraft",
+        }
+    }
+    /// The end's name on screen, in the language in use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Ground => t("Ground station", "Trạm mặt đất"),
+            Role::Aircraft => t("Aircraft", "Máy bay"),
         }
     }
     /// `rx`/`ground` or `tx`/`aircraft` (a config file, a command line).
@@ -87,6 +96,21 @@ pub fn board_role_of(board: &str) -> Option<String> {
         .ok()?
         .iter()
         .find_map(|l| l.strip_prefix("role=").map(str::to_string))
+}
+
+/// The board's word for an end (`rx`, `tx`) in the Vietnamese status lines of the start screen.
+fn end_vi(word: &str) -> &str {
+    match word {
+        "rx" => "mặt đất",
+        "tx" => "máy bay",
+        o => o,
+    }
+}
+
+/// `s` with its first letter in upper case (a Vietnamese sentence that starts with the device).
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// What the preparation thread reports back while the board is being switched.
@@ -156,6 +180,18 @@ impl Chooser {
         self.prep.lock().unwrap().status.clone()
     }
 
+    /// `device` in the language on screen. The hosts pass "this computer" / "this phone", or
+    /// its Vietnamese as it was when the app started; either way it follows a later switch.
+    fn device_word(&self) -> &'static str {
+        const PAIRS: [(&str, &str); 3] =
+            [("this computer", "máy tính này"), ("this phone", "điện thoại này"), ("this device", "thiết bị này")];
+        PAIRS
+            .iter()
+            .find(|(en, vi)| self.device == *en || self.device == *vi)
+            .map(|&(en, vi)| t(en, vi))
+            .unwrap_or(self.device)
+    }
+
     /// Keep asking the board which end it is (2 s), except while a switch is in progress.
     fn spawn_role_poll(&self) {
         let slot = self.board_role.clone();
@@ -195,30 +231,44 @@ impl Chooser {
         let prep = self.prep.clone();
         let busy = self.busy.clone();
         *prep.lock().unwrap() = Prep::default();
-        let set = |prep: &Arc<Mutex<Prep>>, s: String| {
+        // the log keeps the English line; the screen shows the line in the language in use
+        let set = |prep: &Arc<Mutex<Prep>>, s: String, vi: String| {
             log(&s);
-            prep.lock().unwrap().status = s;
+            prep.lock().unwrap().status = if crate::i18n::vi() { vi } else { s };
         };
         std::thread::Builder::new()
             .name("prepare".into())
             .spawn(move || {
                 let addr = console_addr(&board);
                 let want = role.board_role();
+                let want_vi = end_vi(want);
                 if set_role {
                     match board_role_of(&board) {
-                        Some(r) if r == want => set(&prep, format!("board {board} is already the {want} end")),
+                        Some(r) if r == want => set(
+                            &prep,
+                            format!("board {board} is already the {want} end"),
+                            format!("mạch {board} đã ở vai trò {want_vi}"),
+                        ),
                         Some(r) => {
-                            set(&prep, format!("board {board}: {r} end -> {want} end, restarting..."));
+                            set(
+                                &prep,
+                                format!("board {board}: {r} end -> {want} end, restarting..."),
+                                format!("mạch {board}: {} → {want_vi}, đang khởi động lại...", end_vi(&r)),
+                            );
                             match console(&addr, &format!("role {want}"), Duration::from_secs(4)) {
                                 Ok(lines) if lines.iter().any(|l| l.starts_with("err")) => {
-                                    set(&prep, format!("board refused: {}", lines.join(" ")));
+                                    set(
+                                        &prep,
+                                        format!("board refused: {}", lines.join(" ")),
+                                        format!("mạch từ chối: {}", lines.join(" ")),
+                                    );
                                     prep.lock().unwrap().failed = true;
                                     busy.store(false, Ordering::Relaxed);
                                     return;
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
-                                    set(&prep, format!("board {board}: {e}"));
+                                    set(&prep, format!("board {board}: {e}"), format!("mạch {board}: {e}"));
                                     prep.lock().unwrap().failed = true;
                                     busy.store(false, Ordering::Relaxed);
                                     return;
@@ -236,17 +286,33 @@ impl Chooser {
                                     back = true;
                                     break;
                                 }
-                                set(&prep, format!("board {board} restarting as the {want} end... {secs} s"));
+                                set(
+                                    &prep,
+                                    format!("board {board} restarting as the {want} end... {secs} s"),
+                                    format!("mạch {board} đang khởi động lại với vai trò {want_vi}... {secs} s"),
+                                );
                             }
                             if !back {
-                                set(&prep, format!("board {board} did not come back as the {want} end"));
+                                set(
+                                    &prep,
+                                    format!("board {board} did not come back as the {want} end"),
+                                    format!("mạch {board} không lên lại với vai trò {want_vi}"),
+                                );
                                 prep.lock().unwrap().failed = true;
                                 busy.store(false, Ordering::Relaxed);
                                 return;
                             }
-                            set(&prep, format!("board {board} is the {want} end"));
+                            set(
+                                &prep,
+                                format!("board {board} is the {want} end"),
+                                format!("mạch {board} đã ở vai trò {want_vi}"),
+                            );
                         }
-                        None => set(&prep, format!("board {board} does not answer; starting anyway")),
+                        None => set(
+                            &prep,
+                            format!("board {board} does not answer; starting anyway"),
+                            format!("mạch {board} không trả lời; vẫn bắt đầu"),
+                        ),
                     }
                 }
                 prep.lock().unwrap().done = Some(role);
@@ -294,30 +360,35 @@ impl Chooser {
         // whole thing scrolls
         let short = ui.available_height() < 700.0;
         let wide = ui.available_width() >= 640.0;
+        let device = self.device_word();
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(if short { 6.0 } else { 24.0 });
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("NYXHOP").size(if short { 24.0 } else { 30.0 }).color(th::CYAN).strong());
-                ui.label(egui::RichText::new(format!("Which end is {}?", self.device)).size(16.0).color(th::DIM));
+                let ask = if crate::i18n::vi() { format!("{} là đầu nào?", cap(device)) } else { format!("Which end is {device}?") };
+                ui.label(egui::RichText::new(ask).size(16.0).color(th::DIM));
             });
-            ui.add_space(if short { 8.0 } else { 20.0 });
+            ui.add_space(if short { 4.0 } else { 10.0 });
             let board_role = self.board_role();
-            th::section(ui, "Board", true, |ui| {
-                th::row(ui, "Address", |ui| {
+            th::section(ui, t("Board", "Mạch"), true, |ui| {
+                th::row(ui, t("Address", "Địa chỉ"), |ui| {
                     let r = ui.add_enabled(!busy, egui::TextEdit::singleline(&mut self.board).desired_width(200.0));
                     if r.changed() {
                         *self.poll_board.lock().unwrap() = self.board.trim().to_string();
                     }
                 });
                 let txt = match board_role.as_deref() {
-                    Some("rx") => "answers: the receiving end (ground)".to_string(),
-                    Some("tx") => "answers: the transmitting end (aircraft)".to_string(),
-                    Some(o) => format!("answers: {o}"),
-                    None => "no answer yet".to_string(),
+                    Some("rx") => t("answers: the receiving end (ground)", "trả lời: đầu thu (mặt đất)").to_string(),
+                    Some("tx") => t("answers: the transmitting end (aircraft)", "trả lời: đầu phát (máy bay)").to_string(),
+                    Some(o) => crate::tf!("answers: {o}", "trả lời: {o}"),
+                    None => t("no answer yet", "chưa trả lời").to_string(),
                 };
                 ui.label(egui::RichText::new(txt).small().color(th::DIM));
-                ui.checkbox(&mut self.set_role, "Put the board into the matching role")
-                    .on_hover_text("Sends `role rx|tx`; the board restarts in about 10 s. Off: use the board as it is.");
+                ui.checkbox(&mut self.set_role, t("Put the board into the matching role", "Chuyển mạch sang vai trò tương ứng"))
+                    .on_hover_text(t(
+                        "Sends `role rx|tx`; the board restarts in about 10 s. Off: use the board as it is.",
+                        "Gửi `role rx|tx`; mạch khởi động lại trong khoảng 10 s. Tắt: dùng mạch như hiện tại.",
+                    ));
             });
             ui.add_space(12.0);
             let mut chosen = None;
@@ -325,12 +396,12 @@ impl Chooser {
                 for (i, role) in [Role::Ground, Role::Aircraft].into_iter().enumerate() {
                     let ui = &mut cols[if wide { i } else { 0 }];
                     let sub = match role {
-                        Role::Ground => format!("{} shows the video", self.device),
-                        Role::Aircraft => format!("{} has the camera", self.device),
+                        Role::Ground => crate::tf!("{device} shows the video", "{device} hiện hình"),
+                        Role::Aircraft => crate::tf!("{device} has the camera", "{device} có camera"),
                     };
                     let suggested = board_role.as_deref() == Some(role.board_role());
                     let text = egui::RichText::new(format!("{}
-{sub}", role.label())).size(17.0);
+{sub}", role.name())).size(17.0);
                     let big = egui::vec2(ui.available_width(), 72.0);
                     let btn = egui::Button::new(if suggested { text.color(th::GOOD) } else { text }).min_size(big);
                     if ui.add_enabled(!busy, btn).clicked() {

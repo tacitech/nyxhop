@@ -20,6 +20,31 @@ use nyx_common::logging::{self, StatusLogger, log};
 use nyx_common::source::bytes_to_image;
 use nyx_common::{RgbFrame, decode_jpeg, to_color_image};
 use nyx_link::{Reassembler, SourceType, parse_block};
+
+/// v40.54: how long an incomplete frame waits for more of its blocks - the round trip of a
+/// retransmission while they come back, the hole's hold alone once they do not
+fn partial_quiet_now(shared: &Shared) -> u64 {
+    let q = shared.partial_quiet_ms.load(Ordering::Relaxed);
+    if shared.arq_dead.load(Ordering::Relaxed) {
+        q.min(shared.hole_oneway_ms.load(Ordering::Relaxed))
+    } else {
+        q
+    }
+}
+
+/// v40.53: an incomplete frame is given up (delivered as it is, or skipped) only once no block has
+/// come for it in this long (`set partialquiet <ms>`, 0 = as until 7/10: two ids later, at once) -
+/// its retransmissions are not cut off - and at the latest PARTIAL_MAX after its first block. The
+/// NACK round trip measured 53-219 ms on the bench.
+const PARTIAL_QUIET_MS: u64 = 250;
+const PARTIAL_MAX: Duration = Duration::from_millis(800);
+/// v40.54 ONE WAY: NACKs going out this long with not one retransmission back = nothing is coming
+/// (the way back is dead, or the transmitter is on a rung it does not retransmit at): a hole is
+/// then held only `holeoneway` ms (the picture's own parity blocks follow its data at once), not
+/// the round trip. Bench 8/10, the ground's control off: every hole held 300 ms for a
+/// retransmission that never came - 26 freezes over 300 ms a minute.
+const ARQ_DEAD_AFTER: Duration = Duration::from_secs(3);
+const HOLE_ONEWAY_MS: u64 = 80;
 use nyx_common::Opts;
 use nyx_proto::{DEFAULT_RX_PORT, Mcs, Msg, cli_arg, read_msg, write_msg};
 
@@ -107,6 +132,14 @@ pub struct Shared {
     /// next key frame. `set conceal 0|1`. It matters most for a camera passed through, which
     /// cannot be asked for a key frame at all.
     conceal: AtomicBool,
+    /// v40.53: NACKs outstanding at once (`set nackcap`): the board names up to 33 a control frame
+    /// now and repeats them; 8 was the cap while it carried two, once each.
+    nack_cap: std::sync::atomic::AtomicUsize,
+    partial_quiet_ms: AtomicU64,
+    /// v40.54: how long a hole is held once no retransmission comes back (`set holeoneway <ms>`,
+    /// 0 = the round trip always, as before), and whether that is the case now
+    hole_oneway_ms: AtomicU64,
+    arq_dead: AtomicBool,
     ldpc_iters: std::sync::atomic::AtomicUsize,
     /// I/Q format probe (0=asis 1=conj 2=swap 3=swap+conj 4=negI).
     iq_mode: std::sync::atomic::AtomicUsize,
@@ -155,7 +188,7 @@ pub fn run(opts: Opts) -> eframe::Result {
             let m = shared.ui.lock().unwrap().metrics.clone();
             log(&format!(
                 "hl mcs={:?} snr={:.1} bler={:.3} rx_fps={:.1} disp_fps={:.1} \
-                 lop={} pics={}/{} segs={}/{} goodput={:.0}kbps conn={}",
+                 layer={} pics={}/{} segs={}/{} goodput={:.0}kbps conn={}",
                 m.active_mcs.map(|x| x.index()),
                 m.snr_db,
                 m.bler_recent,
@@ -173,6 +206,12 @@ pub fn run(opts: Opts) -> eframe::Result {
         return Ok(());
     }
 
+    // the language picked in the drawer is remembered next to the exe
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| ".".into());
+    nyx_common::i18n::init(&exe_dir);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 900.0])
@@ -220,6 +259,10 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         udp_out: Mutex::new(None),
         udp_mode: AtomicBool::new(!opts.arg("--udp", "").is_empty()),
         conceal: AtomicBool::new(opts.arg("--conceal", "1") != "0"),
+        nack_cap: std::sync::atomic::AtomicUsize::new(32),
+        partial_quiet_ms: AtomicU64::new(PARTIAL_QUIET_MS),
+        hole_oneway_ms: AtomicU64::new(HOLE_ONEWAY_MS),
+        arq_dead: AtomicBool::new(false),
         dropped: AtomicU64::new(0),
         bicm_enabled: AtomicBool::new(true),
         ldpc_iters: std::sync::atomic::AtomicUsize::new(30),
@@ -300,7 +343,8 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
 
     // Bounded queue between the socket reader and the demod worker: if
     // demodulation cannot keep up, drop frames rather than grow forever.
-    let (iq_tx, iq_rx) = sync_channel::<CapItem>(16);
+    // (128: decoded blocks come here too, ~750-2000 a second from an ofdm64 board - 16 was ~10 ms)
+    let (iq_tx, iq_rx) = sync_channel::<CapItem>(128);
     let sweep_tx = iq_tx.clone(); // the demod_loop sweeper pushes stale stash entries into the pool
     spawn_net(shared.clone(), iq_tx);
     spawn_net_writer(shared.clone(), net_rx);
@@ -431,7 +475,7 @@ ok");
             Some("stats") => {
                 let m = shared.ui.lock().unwrap().metrics.clone();
                 format!(
-                    "mcs={:?}\nsnr={:.1}\ncfo={:.0}\nbler={:.3}\nsegs_ok={}\nsegs_lost={}\nframes_rx={}\nframes_lost={}\nrx_fps={:.1}\ndisp_fps={:.1}\nlayer={}\npics={}/{}\ngoodput_kbps={:.0}\nharq={}/{}\nbicm={}/{}\nsig_fail={}\ndisp_gap_ms={:.0}/{:.0}/{:.0}\nhitches_10s={}\nlat_ms={:.0}/{:.0}\nok",
+                    "mcs={:?}\nsnr={:.1}\ncfo={:.0}\nbler={:.3}\nsegs_ok={}\nsegs_lost={}\nframes_rx={}\nframes_lost={}\nrx_fps={:.1}\ndisp_fps={:.1}\nlayer={}\npics={}/{}\ngoodput_kbps={:.0}\nharq={}/{}\nbicm={}/{}\nsig_fail={}\ndisp_gap_ms={:.0}/{:.0}/{:.0}\nhitches_10s={}\nlat_ms={:.0}/{:.0}\narq_dead={}\nok",
                     m.active_mcs.map(|x| x.index()),
                     m.snr_db, m.cfo_hz, m.bler_recent, m.segs_ok, m.segs_lost,
                     m.frames_rx, m.frames_lost, m.rx_fps, m.disp_fps,
@@ -440,7 +484,8 @@ ok");
                     m.harq_combines, m.harq_recovered, m.bicm_runs, m.bicm_rescues,
                     m.sig_failures,
                     m.disp_gap_p50, m.disp_gap_p95, m.disp_gap_max, m.hitches_10s,
-                    m.lat_p50, m.lat_p95
+                    m.lat_p50, m.lat_p95,
+                    u8::from(shared.arq_dead.load(Ordering::Relaxed))
                 )
             }
             Some("set") => {
@@ -470,6 +515,18 @@ ok");
                     "conceal" => parse_bool(val)
                         .map(|v| shared.conceal.store(v, Ordering::Relaxed))
                         .is_some(),
+                    "partialquiet" => val
+                        .parse::<u64>()
+                        .map(|v| shared.partial_quiet_ms.store(v.min(1000), Ordering::Relaxed))
+                        .is_ok(),
+                    "holeoneway" => val
+                        .parse::<u64>()
+                        .map(|v| shared.hole_oneway_ms.store(v.min(1000), Ordering::Relaxed))
+                        .is_ok(),
+                    "nackcap" => val
+                        .parse::<usize>()
+                        .map(|v| shared.nack_cap.store(v.clamp(1, 64), Ordering::Relaxed))
+                        .is_ok(),
                     _ => return format!("err unknown key {key}"),
                 };
                 if ok {
@@ -576,6 +633,7 @@ fn read_loop(
     let mut eqf_last: Option<std::time::Instant> = None;
     let mut llrf_cnt = 0u64;
     let mut decf_cnt = 0u64;
+    let mut decf_drop = 0u64;
     let mut decf_nz = 0u64; // v40.25 diagnostic: DecFrames with mcs != 0 (probe frames)
     let mut decf_last: Option<std::time::Instant> = None;
     let mut llrf_last: Option<std::time::Instant> = None;
@@ -665,10 +723,13 @@ fn read_loop(
                 shared.disp_mcs.store(mcs, Ordering::Relaxed);
                 *shared.fd_last.lock().unwrap() =
                     Some(std::time::Instant::now());
-                let _ = iq_tx.try_send((
-                    seq, 0xFF, 0, Instant::now(),
-                    RxCapture::Dec { mcs, seq_lsb, iters, llr_sum, payload },
-                ));
+                if iq_tx
+                    .try_send((seq, 0xFF, 0, Instant::now(), RxCapture::Dec { mcs, seq_lsb, iters, llr_sum, payload }))
+                    .is_err()
+                {
+                    // the demod side is behind: this block is lost here, not on the air
+                    decf_drop += 1;
+                }
                 let due = decf_last.is_none_or(|t| {
                     t.elapsed() >= std::time::Duration::from_secs(1)
                 });
@@ -676,7 +737,7 @@ fn read_loop(
                     decf_last = Some(std::time::Instant::now());
                     log(&format!(
                         "DECF seq={seq} cnt={decf_cnt} mcs={mcs} \
-                         lsb={seq_lsb:02x} iters={iters} sum={llr_sum}"
+                         lsb={seq_lsb:02x} iters={iters} sum={llr_sum} dropped_here={decf_drop}"
                     ));
                 }
             }
@@ -701,7 +762,7 @@ fn mcs_disp_short(idx: usize) -> String {
 }
 fn mcs_disp_label(idx: usize) -> String {
     match idx {
-        6 => "QPSK×2 repeat".into(),
+        6 => nyx_common::i18n::t("QPSK×2 repeat", "QPSK×2 lặp").into(),
         i => Mcs::from_index(i)
             .map(|m| m.label().to_string())
             .unwrap_or_else(|| "—".into()),
@@ -1363,7 +1424,9 @@ fn predemod_dec(
         samples: Vec::new(), grid: Vec::new(), is_grid: true,
         fit_state: Some(false), frames,
     };
-    let Some(mcs) = Mcs::from_index(mcs_idx as usize) else {
+    // v40.53: rung 6 (the repeat step, QPSK 1/2 x2) is not in the Mcs table; the block is
+    // decoded already, the type only sizes the SNR heuristic - the daemon used 16128 bits then
+    let Some(mcs) = Mcs::from_index(if mcs_idx == 6 { 0 } else { mcs_idx as usize }) else {
         return fail(Vec::new());
     };
     if payload.len() != nyx_link::BLOCK_BYTES {
@@ -1374,9 +1437,14 @@ fn predemod_dec(
         ));
         return fail(Vec::new());
     }
-    let mean_abs = llr_sum as f32 / mcs.frame_bit_capacity() as f32;
+    // ...and as the daemon encodes it for a rung outside its table: 16128 bits, base 20 dB
+    // (nyx-radio-node rx2 path, `_ => 20.0`); base 8 read the air SNR 12 dB low, 0 dB on screen
+    // and to the transmitter, whose climb out of MCS0 waits on the SNR
+    let cap = if mcs_idx == 6 { 16128 } else { mcs.frame_bit_capacity() };
+    let mean_abs = llr_sum as f32 / cap as f32;
     let base = match mcs.bits_per_sym() {
-        2 => 8.0f32,
+        _ if mcs_idx == 6 => 20.0f32,
+        2 => 8.0,
         4 => 14.0,
         _ => 20.0,
     };
@@ -1550,11 +1618,15 @@ fn demod_loop(
     // Highest link-level (TX block) sequence seen, reconstructed from the
     // SIG's 8-bit LSB in hardware mode — see below.
     let mut last_link_seq: Option<u64> = None;
+    // retries that came back further than the 8-bit window reaches (see link_seq)
+    let mut retx_far = 0u64;
     // NACKed sequences still unseen: (first-nack time, attempts). If the
     // retransmission itself is lost on air nobody would ever re-ask — this
     // re-NACKs up to twice more before giving up.
     let mut outstanding_nacks: std::collections::HashMap<u64, (Instant, u8)> =
         std::collections::HashMap::new();
+    // v40.54: since when NACKs have gone out with no retransmission back (see ARQ_DEAD_AFTER)
+    let mut nack_unanswered: Option<Instant> = None;
     // Sequences already delivered: a duplicate retransmission (our re-NACK
     // racing the in-flight one) must be dropped SILENTLY. Its rv1+ payload
     // is parity-only and not self-decodable, so decoding it "fresh" fails
@@ -1613,6 +1685,12 @@ fn demod_loop(
                     pre_starve = Instant::now();
                     p
                 }
+                // the result of an idx the valve below jumped past (its worker was slow): late,
+                // taken now as any late frame is. Kept in pending_pre it stayed there for good, and
+                // the next jump - the burst after a channel width change, 14/10 - went BACK to it:
+                // a capture a minute old decoded as new, its frame id read as the TX renumbering,
+                // the decoder recreated and 6 pictures lost
+                Ok((idx, p)) if idx < next_pre_idx => p,
                 Ok((idx, p)) => {
                     pending_pre.insert(idx, p);
                     if pending_pre.len() >= 8 {
@@ -1737,8 +1815,12 @@ fn demod_loop(
                 }
             }
         };
+        // v40.53: a block the fabric decoded at rung 6 (the repeat step) goes through as MCS0;
+        // it is not counted in ok_mcs (the transmitter's table has no rung 6)
+        let sig_rep2 = matches!(sig_res, Some((s, true)) if s.mcs_index == 6)
+            && pre_i.is_some_and(|i| pre_frames[i].decoded.is_some());
         let control = match sig_res {
-            Some((sig, true)) => match Mcs::from_index(sig.mcs_index as usize) {
+            Some((sig, true)) => match Mcs::from_index(if sig_rep2 { 0 } else { sig.mcs_index as usize }) {
                 Some(m) => {
                     // Header mcs 0xFF = sentinel from the radio node ("only
                     // the SIG knows") — skip the cross-check then. It only
@@ -1798,11 +1880,19 @@ fn demod_loop(
             Some(match last_link_seq {
                 None => lsb as u64,
                 Some(p) => {
-                    let mut d = (lsb as i32 - (p & 0xFF) as i32).rem_euclid(256);
-                    if d > 128 {
-                        d -= 256;
+                    let (full, retry) = resolve_link_seq(lsb, p, |back| {
+                        outstanding_nacks.get(&back).is_some_and(|(t, _)| t.elapsed() < Duration::from_millis(500))
+                    });
+                    if retry {
+                        retx_far += 1;
+                        if retx_far <= 20 || retx_far % 100 == 0 {
+                            log(&format!(
+                                "arq: retry of seq {full} came {} blocks late - taken as it, not 256 on (#{retx_far})",
+                                p - full
+                            ));
+                        }
                     }
-                    (p as i64 + d as i64).max(0) as u64
+                    full
                 }
             })
         } else {
@@ -1818,10 +1908,22 @@ fn demod_loop(
             // transport (measured 73 Mbps of IQ at MCS0) and causes MORE
             // losses. Beyond the cap, let the frames go — the reorder
             // stage skips them and the fast-IDR path repairs the video.
-            if full > p + 1 && full - p <= 32 && outstanding_nacks.len() < 8 {
+            // v40.53: with the cap above 8 only the NACKs still worth answering count (a block not
+            // back 400 ms after it was asked for is given up); 8 counted every one of the last 2 s
+            let cap = shared.nack_cap.load(Ordering::Relaxed);
+            let open = if cap > 8 {
+                outstanding_nacks.values().filter(|(t, _)| t.elapsed() < Duration::from_millis(400)).count()
+            } else {
+                outstanding_nacks.len()
+            };
+            if full > p + 1 && full - p <= 32 && open < cap {
                 for missing in p + 1..full {
                     send_msg(&shared, &Msg::Nack { seq: missing });
+                    // pairs with "nack-in" in nyx-tx's log (same PC clock): how long a NACK
+                    // takes to reach the transmitter, apart from the retransmission's way back
+                    log(&format!("nack-out seq={missing} lsb={}", missing & 0xFF));
                     outstanding_nacks.entry(missing).or_insert((Instant::now(), 1));
+                    nack_unanswered.get_or_insert_with(Instant::now);
                 }
             }
         }
@@ -1830,6 +1932,7 @@ fn demod_loop(
             // the "hold frames for retx" limit in take_stale; guessing it was wrong.
             if let Some((t0, _)) = outstanding_nacks.remove(&full) {
                 log(&format!("retx-rtt seq={full} ms={}", t0.elapsed().as_millis()));
+                nack_unanswered = None;
             }
             if last_link_seq.map_or(true, |p| full > p) {
                 last_link_seq = Some(full);
@@ -1844,6 +1947,20 @@ fn demod_loop(
         // the fast-IDR path repairs the stream — cheaper than fighting for
         // the same airtime twice.
         outstanding_nacks.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(2));
+        {
+            let dead = shared.hole_oneway_ms.load(Ordering::Relaxed) > 0
+                && nack_unanswered.is_some_and(|t| t.elapsed() >= ARQ_DEAD_AFTER);
+            if dead != shared.arq_dead.swap(dead, Ordering::Relaxed) {
+                log(&if dead {
+                    format!(
+                        "arq: no retransmission back for {} s - holes held {} ms (one way)",
+                        ARQ_DEAD_AFTER.as_secs(), shared.hole_oneway_ms.load(Ordering::Relaxed)
+                    )
+                } else {
+                    "arq: retransmissions back - holes held for the round trip".to_string()
+                });
+            }
+        }
 
         // Where the NEXT frame in this capture would start: known once the
         // SIG decodes (frame length follows from the MCS). Back off ~0.5
@@ -2082,7 +2199,7 @@ fn demod_loop(
                 if is_base {
                     // base layer: small frames (usually 1 block + parity); staleness is simply by
                     // ITS OWN newest id
-                    for p in reasm_base.take_stale(sid, 2, 0.6) {
+                    for p in reasm_base.take_stale(sid, 2, 0.6, Duration::ZERO) {
                         completed_frames.push(p);
                     }
                 }
@@ -2093,7 +2210,8 @@ fn demod_loop(
                 if !is_base && shared.partial_ok.load(Ordering::Relaxed) {
                     // (gate !is_base: a base block's sid is its OWN sequence; counting it into the
                     // main funnel makes stale eviction use the wrong mark)
-                    for p in reasm.take_stale(sid, 2, 0.6) {
+                    let quiet = Duration::from_millis(partial_quiet_now(&shared));
+                    for p in reasm.take_stale(sid, 2, 0.6, quiet) {
                         completed_frames.push(p);
                     }
                 }
@@ -2128,7 +2246,7 @@ fn demod_loop(
             // sentinel there -> ok_mcs stayed empty, the minstrel table starved for statistics ->
             // the controller sank to MCS0 and stuck).
             let mi = mcs.index();
-            if mi < 6 {
+            if mi < 6 && !sig_rep2 {
                 ok_mcs[mi] = ok_mcs[mi].wrapping_add(1);
             }
             if seg_src_base {
@@ -2140,7 +2258,9 @@ fn demod_loop(
             // unreadable, hardware mode) has nothing the TX could look up.
             if link_seq.is_some() || mcs_byte != 0xFF {
                 send_msg(&shared, &Msg::Nack { seq });
+                log(&format!("nack-out seq={seq} lsb={}", seq & 0xFF));
                 outstanding_nacks.entry(seq).or_insert((Instant::now(), 1));
+                nack_unanswered.get_or_insert_with(Instant::now);
             }
         }
 
@@ -2179,7 +2299,7 @@ fn demod_loop(
         // here on delivery.
         if delivered {
             last_mcs = mcs;
-            shared.disp_mcs.store(mcs.index() as u8, Ordering::Relaxed);
+            shared.disp_mcs.store(if sig_rep2 { 6 } else { mcs.index() as u8 }, Ordering::Relaxed);
         }
         last_demod = demod;
         // Move to the next frame inside this capture, if the window can
@@ -2259,6 +2379,7 @@ fn demod_loop(
                 // restart the RX took 4+ minutes to settle by itself).
                 last_link_seq = None;
                 outstanding_nacks.clear();
+                nack_unanswered = None;
                 delivered_seqs.clear();
                 delivered_order.clear();
                 harq = HarqCache::new();
@@ -2272,6 +2393,10 @@ fn demod_loop(
         // on request, so waiting out another retransmission beats skipping: up to a third of the
         // camera's key-frame interval, which is what skipping would cost.
         let hold = match pass_info_at {
+            // v40.54: nothing is coming back to wait for
+            _ if shared.arq_dead.load(Ordering::Relaxed) => {
+                Duration::from_millis(shared.hole_oneway_ms.load(Ordering::Relaxed))
+            }
             Some(t) if t.elapsed() < Duration::from_secs(10) => {
                 Duration::from_millis(u64::from(cam_gop_ms / 3).clamp(400, 800))
             }
@@ -2308,6 +2433,13 @@ fn demod_loop(
             } else if pending
                 .values()
                 .any(|(_, _, t)| t.elapsed() > hold)
+                // v40.53: not while its retransmissions are still coming in (a keyframe of tens of
+                // blocks at a low rung is 200 ms on air before the first one can come back)
+                && !reasm.progressing(
+                    n,
+                    Duration::from_millis(partial_quiet_now(&shared)),
+                    PARTIAL_MAX,
+                )
             {
                 // The hole at `n` is not coming back in time: skip to the
                 // oldest frame we do have and mark the loss.
@@ -2679,7 +2811,7 @@ fn demod_loop(
                 "status | mcs={} synced={} snr={:.1}dB cfo={:+.0}Hz preBER={:.2e} \
                  bler={:.1}% segs={}/{} vframes={}/{} rx_fps={:.1} goodput={:.0}kbps \
                  sync_fail={} sig_fail={} backlog_drop={} harq={}/{} bicm={}/{} \
-                 pics={}/{} okm={:?}",
+                 pics={}/{} okm={:?} fec={}/{}",
                 last_mcs.label(),
                 last_demod.synced as u8,
                 snr_smooth,
@@ -2702,6 +2834,9 @@ fn demod_loop(
                 pics_ok,
                 pics_fail,
                 ok_mcs,
+                // v40.53: frames the parity rebuilt / of them with more than one block lost
+                reasm.fec_recovered,
+                reasm.fec_recovered_multi,
             ));
         }
     }
@@ -2767,6 +2902,12 @@ pub struct RxApp {
     ev_live: Option<bool>,
     ev_lost_at: Option<Instant>,
     ev_banner: Option<(String, egui::Color32, Instant, bool)>,
+    /// the channel Auto holds (0 = searching) and the channel width (Hz), as last seen
+    ev_hold: Option<u64>,
+    ev_bw: Option<u64>,
+    /// a channel or width banner holds the HUD until then (the MCS steps a jammed or moved
+    /// channel brings along wait)
+    ev_prio_until: Option<Instant>,
     /// v40.46 latency test: the millisecond counter under the video (drawer), and the counter
     /// value the picture was frozen at (F / the button)
     counter_on: bool,
@@ -2785,7 +2926,7 @@ impl RxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.11");
                 format!("{host}:7202")
             }),
-            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range"],
+            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range", "chbw"],
         );
         RxApp {
             shared,
@@ -2804,21 +2945,60 @@ impl RxApp {
             ev_live: None,
             ev_lost_at: None,
             ev_banner: None,
+            ev_hold: None,
+            ev_bw: None,
+            ev_prio_until: None,
             counter_on: false,
             range_known: 0.0,
             frozen: None,
         }
     }
 
-    /// Event banner for the HUD: MCS moves, signal lost / recovered.
-    fn banner(&mut self, mcs: Option<usize>, live: bool) -> Option<(String, egui::Color32)> {
+    /// Event banner for the HUD: MCS moves, signal lost / recovered, the channel Auto moves to, the
+    /// channel width.
+    fn banner(&mut self, mcs: Option<usize>, live: bool, st: &nyx_common::boardctl::BoardState) -> Option<(String, egui::Color32)> {
         use nyx_common::theme as th;
+        let mhz = |hz: u64| {
+            let t = format!("{:.1}", hz as f64 / 1e6);
+            t.strip_suffix(".0").map_or(t.clone(), str::to_string)
+        };
+        let num = |k: &str| st.kv.get(k).and_then(|v| v.parse::<u64>().ok());
+        if st.kv.get("hop_mode").map(String::as_str) == Some("auto") {
+            if let Some(h) = num("hop_hold_hz") {
+                match self.ev_hold {
+                    Some(old) if old == h => {}
+                    Some(old) if old > 0 && h > 0 => {
+                        self.ev_banner = Some((nyx_common::tf!("CHANNEL {} → {} MHz", "ĐỔI KÊNH {} → {} MHz", mhz(old), mhz(h)), th::GOOD, Instant::now(), false));
+                        self.ev_prio_until = Some(Instant::now() + std::time::Duration::from_secs(5));
+                    }
+                    Some(old) if old > 0 => {
+                        self.ev_banner = Some((nyx_common::tf!("{} MHz DEGRADED · FINDING A BETTER CHANNEL", "KÊNH {} MHz XẤU · ĐANG TÌM KÊNH TỐT HƠN", mhz(old)), th::WARN, Instant::now(), false));
+                        self.ev_prio_until = Some(Instant::now() + std::time::Duration::from_secs(5));
+                    }
+                    Some(_) if h > 0 => {
+                        self.ev_banner = Some((nyx_common::tf!("NOW ON {} MHz", "ĐÃ SANG {} MHz", mhz(h)), th::GOOD, Instant::now(), false));
+                        self.ev_prio_until = Some(Instant::now() + std::time::Duration::from_secs(5));
+                    }
+                    _ => {}
+                }
+                self.ev_hold = Some(h);
+            }
+        }
+        if let Some(d) = num("chbw_div").filter(|d| *d > 0) {
+            let w = 20_000_000 / d;
+            if let Some(old) = self.ev_bw.filter(|o| *o != w) {
+                self.ev_banner = Some((nyx_common::tf!("BANDWIDTH {} → {} MHz", "BĂNG THÔNG {} → {} MHz", mhz(old), mhz(w)), th::CYAN, Instant::now(), false));
+                self.ev_prio_until = Some(Instant::now() + std::time::Duration::from_secs(5));
+            }
+            self.ev_bw = Some(w);
+        }
+        let prio = self.ev_prio_until.is_some_and(|t| Instant::now() < t);
         if let (Some(prev), Some(cur)) = (self.ev_mcs, mcs) {
-            if cur != prev {
+            if cur != prev && !prio {
                 let (txt, c) = if cur < prev {
-                    (format!("LINK ADAPTING · MCS {prev} → {cur}"), th::WARN)
+                    (nyx_common::tf!("LINK ADAPTING · MCS {prev} → {cur}", "LINK ĐANG ĐIỀU CHỈNH · MCS {prev} → {cur}"), th::WARN)
                 } else {
-                    (format!("LINK IMPROVED · MCS {prev} → {cur}"), th::GOOD)
+                    (nyx_common::tf!("LINK IMPROVED · MCS {prev} → {cur}", "LINK TỐT LÊN · MCS {prev} → {cur}"), th::GOOD)
                 };
                 self.ev_banner = Some((txt, c, Instant::now(), false));
             }
@@ -2828,12 +3008,17 @@ impl RxApp {
         }
         if self.ev_live == Some(true) && !live {
             self.ev_lost_at = Some(Instant::now());
-            self.ev_banner = Some(("SIGNAL LOST - AUTO-RECOVERING".into(), th::BAD, Instant::now(), true));
+            self.ev_banner = Some((
+                nyx_common::i18n::t("SIGNAL LOST - AUTO-RECOVERING", "MẤT TÍN HIỆU - ĐANG TỰ KHÔI PHỤC").into(),
+                th::BAD,
+                Instant::now(),
+                true,
+            ));
         }
         if self.ev_live == Some(false) && live {
             if let Some(t0) = self.ev_lost_at.take() {
                 self.ev_banner = Some((
-                    format!("LINK RECOVERED · {:.1}s", t0.elapsed().as_secs_f32()),
+                    nyx_common::tf!("LINK RECOVERED · {:.1}s", "LINK ĐÃ KHÔI PHỤC · {:.1}s", t0.elapsed().as_secs_f32()),
                     th::GOOD,
                     Instant::now(),
                     false,
@@ -2843,7 +3028,7 @@ impl RxApp {
         self.ev_live = Some(live);
         match &self.ev_banner {
             Some((txt, c, t0, sticky)) if *sticky && !live => Some((txt.clone(), *c)),
-            Some((txt, c, t0, _)) if t0.elapsed().as_secs_f32() < 4.0 => Some((txt.clone(), *c)),
+            Some((txt, c, t0, _)) if t0.elapsed().as_secs_f32() < 5.0 => Some((txt.clone(), *c)),
             Some(_) => {
                 self.ev_banner = None;
                 None
@@ -2862,39 +3047,66 @@ impl RxApp {
 
     /// Everything behind the gear.
     fn drawer(&mut self, ui: &mut egui::Ui) {
+        use nyx_common::i18n::t;
         use nyx_common::theme as th;
+        use nyx_common::tf;
         use nyx_common::ui as nu;
         let st = self.board.snapshot();
         let connected = self.shared.connected.load(Ordering::Relaxed);
 
+
         // v40.46: the link measures its own length (two-way ranging on the boards' sample
         // clocks). The radios add a fixed delay of their own; Zero removes it once, with the
         // antennas a known distance apart.
-        th::section(ui, "Range", true, |ui| {
+        section(ui, "Range", t("Range", "Khoảng cách"), true, |ui| {
             let hw = st.kv.get("range_hw").map(String::as_str);
             match (nu::range_of(&st), hw) {
                 (Some((m, s)), _) => {
                     let pairs = st.kv.get("range_pairs").cloned().unwrap_or_default();
                     let ppm = st.kv.get("range_ppm").cloned().unwrap_or_default();
-                    th::kv(ui, "Distance", &format!("{m:.1} m  ±{s:.1}"));
-                    th::kv(ui, "Frames in the fit", &format!("{pairs} (video / control)"));
-                    th::kv(ui, "Clocks apart", &format!("{ppm} ppm"));
+                    th::kv(ui, t("Distance", "Khoảng cách"), &format!("{m:.1} m  ±{s:.1}"));
+                    th::kv(ui, t("Frames in the fit", "Khung dùng để tính"), &tf!("{pairs} (video / control)", "{pairs} (video / điều khiển)"));
+                    th::kv(ui, t("Clocks apart", "Lệch đồng hồ"), &format!("{ppm} ppm"));
                 }
                 (None, Some("1")) => {
-                    ui.label(egui::RichText::new("waiting: it needs video coming down and control going up").small().color(th::DIM));
+                    ui.label(
+                        egui::RichText::new(t(
+                            "waiting: it needs video coming down and control going up",
+                            "đang chờ: cần có video về và lệnh điều khiển đi lên",
+                        ))
+                        .small()
+                        .color(th::DIM),
+                    );
                 }
                 (None, Some(_)) => {
-                    ui.label(egui::RichText::new("this board's FPGA design has no time stamps (update the board)").small().color(th::DIM));
+                    ui.label(
+                        egui::RichText::new(t(
+                            "this board's FPGA design has no time stamps (update the board)",
+                            "thiết kế FPGA của mạch này không có mốc thời gian (hãy cập nhật mạch)",
+                        ))
+                        .small()
+                        .color(th::DIM),
+                    );
                 }
                 (None, None) => {
-                    ui.label(egui::RichText::new("the board does not answer `range` (update the board)").small().color(th::DIM));
+                    ui.label(
+                        egui::RichText::new(t(
+                            "the board does not answer `range` (update the board)",
+                            "mạch không trả lời lệnh `range` (hãy cập nhật mạch)",
+                        ))
+                        .small()
+                        .color(th::DIM),
+                    );
                 }
             }
-            th::row(ui, "Antennas apart", |ui| {
+            th::row(ui, t("Antennas apart", "Ăng-ten cách nhau"), |ui| {
                 ui.add(egui::DragValue::new(&mut self.range_known).speed(0.1).range(0.0..=100_000.0).suffix(" m"));
                 if ui
-                    .add_enabled(nu::range_of(&st).is_some(), egui::Button::new("Zero"))
-                    .on_hover_text("The reading becomes this distance: removes the radios' own delay. Do it once per pair of boards, with the antennas a measured distance apart.")
+                    .add_enabled(nu::range_of(&st).is_some(), egui::Button::new(t("Zero", "Hiệu chỉnh")))
+                    .on_hover_text(t(
+                        "The reading becomes this distance: removes the radios' own delay. Do it once per pair of boards, with the antennas a measured distance apart.",
+                        "Số đo sẽ thành đúng khoảng cách này, bỏ đi độ trễ riêng của hai mạch. Làm một lần cho mỗi cặp mạch, khi đã đo sẵn khoảng cách giữa hai ăng-ten.",
+                    ))
                     .clicked()
                 {
                     self.board.send(format!("range zero {:.2}", self.range_known));
@@ -2902,20 +3114,25 @@ impl RxApp {
             });
         });
 
-        th::section(ui, "Latency test", true, |ui| {
+        section(ui, "Latency test", t("Latency test", "Đo độ trễ"), true, |ui| {
             if ui
-                .checkbox(&mut self.counter_on, "Counter on screen")
-                .on_hover_text("A millisecond counter under the video with a Freeze button (F).")
+                .checkbox(&mut self.counter_on, t("Counter on screen", "Bộ đếm trên màn hình"))
+                .on_hover_text(t(
+                    "A millisecond counter under the video with a Freeze button (F).",
+                    "Bộ đếm mili giây dưới video, kèm nút dừng hình (F).",
+                ))
                 .changed()
                 && !self.counter_on
             {
                 self.frozen = None;
             }
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "Turn on \"Counter in the picture\" in the aircraft app (or film this counter with its \
                      camera). Freeze stops the picture and the counter together: the difference is the delay.",
-                )
+                    "Bật \"Bộ đếm trong hình\" ở app máy bay (hoặc quay bộ đếm này bằng camera của nó). \
+                     Dừng hình sẽ dừng cả hình lẫn bộ đếm cùng lúc: phần chênh lệch chính là độ trễ.",
+                ))
                 .small()
                 .color(th::DIM),
             );
@@ -2935,7 +3152,7 @@ impl RxApp {
         });
         {
             let msgs = self.shared.msgs.lock().unwrap().clone();
-            if let Some(t) = nu::messages_section(ui, &msgs, &mut self.msg_buf, "Aircraft") {
+            if let Some(t) = nu::messages_section(ui, &msgs, &mut self.msg_buf, t("Aircraft", "Máy bay")) {
                 send_msg(&self.shared, &Msg::UserText { text: t.clone() });
                 let mut m = self.shared.msgs.lock().unwrap();
                 m.push(format!("→ {t}"));
@@ -2963,22 +3180,31 @@ impl RxApp {
                 log(&format!("connect requested -> {}", self.addr_buf.trim()));
             }
         }
-        th::section(ui, "Advanced", false, |ui| {
-            th::row(ui, "Smoothing", |ui| {
+        section(ui, "Advanced", t("Advanced", "Nâng cao"), false, |ui| {
+            th::row(ui, t("Smoothing", "Làm mượt"), |ui| {
                 let mut j = self.shared.jitter_ms.load(Ordering::Relaxed);
                 if ui
                     .add(egui::Slider::new(&mut j, 0..=200).suffix(" ms"))
-                    .on_hover_text("Playout buffer: higher = smoother but more delay. ~80 ms is OcuSync-like; 0 = lowest latency.")
+                    .on_hover_text(t(
+                        "Playout buffer: higher = smoother but more delay. ~80 ms is OcuSync-like; 0 = lowest latency.",
+                        "Bộ đệm phát hình: cao hơn = mượt hơn nhưng trễ hơn. ~80 ms giống OcuSync; 0 = trễ thấp nhất.",
+                    ))
                     .changed()
                 {
                     self.shared.jitter_ms.store(j, Ordering::Relaxed);
                 }
             });
-            th::row(ui, "I/Q format", |ui| {
+            th::row(ui, t("I/Q format", "Định dạng I/Q"), |ui| {
                 let cur = self.shared.iq_mode.load(Ordering::Relaxed).to_string();
                 if let Some(v) = nu::segmented(
                     ui,
-                    &[("as-is", "0"), ("conj", "1"), ("swap", "2"), ("swap+conj", "3"), ("neg-I", "4")],
+                    &[
+                        (t("as-is", "giữ nguyên"), "0"),
+                        (t("conj", "liên hợp"), "1"),
+                        (t("swap", "đổi I/Q"), "2"),
+                        (t("swap+conj", "đổi+liên hợp"), "3"),
+                        (t("neg-I", "đảo dấu I"), "4"),
+                    ],
                     &cur,
                 ) {
                     let m: usize = v.parse().unwrap_or(0);
@@ -2987,27 +3213,33 @@ impl RxApp {
                 }
             });
             ui.add_space(6.0);
-            th::card_title(ui, "decode details");
+            th::card_title(ui, t("decode details", "chi tiết giải mã"));
             let metrics = self.shared.ui.lock().unwrap().metrics.clone();
             let dm = self.shared.disp_mcs.load(Ordering::Relaxed);
             egui::Grid::new("rx_stats").num_columns(2).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
                 let kvs: [(&str, String); 16] = [
-                    ("MCS from air", mcs_disp_label(dm as usize)),
-                    ("SNR est", format!("{:.1} dB", metrics.snr_db)),
-                    ("CFO est", format!("{:+.0} Hz", metrics.cfo_hz)),
-                    ("pre-FEC BER", format!("{:.2e}", metrics.pre_ber)),
-                    ("BLER recent", format!("{:.1} %", metrics.bler_recent * 100.0)),
-                    ("Sync metric", format!("{:.2}", metrics.sync_metric)),
-                    ("Segments ok / lost", format!("{} / {}", metrics.segs_ok, metrics.segs_lost)),
-                    ("Sync failures", format!("{}", metrics.sync_failures)),
-                    ("Video frames / lost", format!("{} / {}", metrics.frames_rx, metrics.frames_lost)),
-                    ("Backlog dropped", format!("{}", metrics.backlog_dropped)),
-                    ("Displayed rate", format!("{:.1} fps", metrics.disp_fps)),
-                    ("Frames on air", format!("{:.1} fps", metrics.rx_fps)),
-                    ("Goodput", format!("{:.0} kbit/s", metrics.goodput_kbps)),
-                    ("Layer shown", if metrics.layer_main { "main".into() } else { "base".into() }),
-                    ("HARQ combines / recovered", format!("{} / {}", metrics.harq_combines, metrics.harq_recovered)),
-                    ("BICM-ID runs / rescues · SIG fails", format!("{} / {} · {}", metrics.bicm_runs, metrics.bicm_rescues, metrics.sig_failures)),
+                    (t("MCS from air", "MCS trên sóng"), mcs_disp_label(dm as usize)),
+                    (t("SNR est", "SNR ước tính"), format!("{:.1} dB", metrics.snr_db)),
+                    (t("CFO est", "CFO ước tính"), format!("{:+.0} Hz", metrics.cfo_hz)),
+                    (t("pre-FEC BER", "BER trước FEC"), format!("{:.2e}", metrics.pre_ber)),
+                    (t("BLER recent", "BLER gần đây"), format!("{:.1} %", metrics.bler_recent * 100.0)),
+                    (t("Sync metric", "Chỉ số đồng bộ"), format!("{:.2}", metrics.sync_metric)),
+                    (t("Segments ok / lost", "Đoạn tốt / mất"), format!("{} / {}", metrics.segs_ok, metrics.segs_lost)),
+                    (t("Sync failures", "Lỗi đồng bộ"), format!("{}", metrics.sync_failures)),
+                    (t("Video frames / lost", "Khung video / mất"), format!("{} / {}", metrics.frames_rx, metrics.frames_lost)),
+                    (t("Backlog dropped", "Bỏ do tồn đọng"), format!("{}", metrics.backlog_dropped)),
+                    (t("Displayed rate", "Tốc độ hiển thị"), format!("{:.1} fps", metrics.disp_fps)),
+                    (t("Frames on air", "Khung trên sóng"), format!("{:.1} fps", metrics.rx_fps)),
+                    (t("Goodput", "Thông lượng thực"), format!("{:.0} kbit/s", metrics.goodput_kbps)),
+                    (
+                        t("Layer shown", "Lớp đang hiện"),
+                        if metrics.layer_main { t("main", "chính").into() } else { t("base", "nền").into() },
+                    ),
+                    (t("HARQ combines / recovered", "HARQ gộp / cứu được"), format!("{} / {}", metrics.harq_combines, metrics.harq_recovered)),
+                    (
+                        t("BICM-ID runs / rescues · SIG fails", "BICM-ID chạy / cứu được · SIG lỗi"),
+                        format!("{} / {} · {}", metrics.bicm_runs, metrics.bicm_rescues, metrics.sig_failures),
+                    ),
                 ];
                 for (k, v) in kvs {
                     ui.label(egui::RichText::new(k).color(th::DIM));
@@ -3017,6 +3249,24 @@ impl RxApp {
             });
         });
     }
+}
+
+/// `theme::section` with its egui id kept apart from the title it shows: the title follows the
+/// language, the id stays the English name, so a section left open or closed stays that way when
+/// the language changes.
+fn section(ui: &mut egui::Ui, id: &str, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
+    use nyx_common::theme as th;
+    th::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::CollapsingHeader::new(egui::RichText::new(title.to_uppercase()).monospace().size(11.0).color(th::DIM))
+            .id_salt(id)
+            .default_open(open)
+            .show_unindented(ui, |ui| {
+                ui.add_space(4.0);
+                add(ui);
+            });
+    });
+    ui.add_space(4.0);
 }
 
 impl eframe::App for RxApp {
@@ -3077,7 +3327,7 @@ impl eframe::App for RxApp {
         let dm = self.shared.disp_mcs.load(Ordering::Relaxed) as usize;
         let live = connected && m.rx_fps >= 5.0;
         let mcs = Mcs::from_index(dm).map(|x| x.index());
-        let banner = self.banner(mcs, live);
+        let banner = self.banner(mcs, live, &st);
         let data = nu::HudData {
             connected,
             live,
@@ -3085,10 +3335,10 @@ impl eframe::App for RxApp {
             fps: m.disp_fps,
             kbps: m.goodput_kbps,
             mcs: mcs_disp_short(dm),
-            pills: vec![nu::link_pill(&st), nu::licence_pill(&st), nu::mode_pill(&st)],
+            pills: vec![nu::link_pill(&st), nu::mode_pill(&st)],
             banner,
-            title: "NYXHOP · GROUND".into(),
-            empty_text: "waiting for video…".into(),
+            title: nyx_common::i18n::t("NYXHOP · GROUND", "NYXHOP · MẶT ĐẤT").into(),
+            empty_text: nyx_common::i18n::t("waiting for video…", "đang chờ hình…").into(),
             plates: self.hud_plates,
             range: nu::range_of(&st),
         };
@@ -3100,7 +3350,8 @@ impl eframe::App for RxApp {
             .then(|| nyx_common::stamp::fmt(self.frozen.unwrap_or_else(nyx_common::stamp::counter_ms)));
         let frozen = self.frozen.is_some();
         let mut freeze_tap = false;
-        nu::screen(root, &mut open, &mut plates, "Settings", |ui| self.drawer(ui), |ui| {
+        let settings = nyx_common::i18n::t("Settings", "Cài đặt");
+        nu::screen(root, &mut open, &mut plates, settings, |ui| self.drawer(ui), |ui| {
             let gear = nu::hud(ui, tex.as_ref(), &data);
             if let Some(t) = &counter {
                 freeze_tap = nu::counter_box(ui, t, frozen);
@@ -3113,5 +3364,64 @@ impl eframe::App for RxApp {
         self.drawer_open = open;
         self.hud_plates = plates;
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
+/// The full link sequence of a block whose SIG carries the 8 bits `lsb`, the newest seen being `p`:
+/// the signed wrap-around delta (a retransmission of an older block resolves BACKWARD instead of
+/// aliasing 250 frames ahead) - unless it answers a NACK of ours further back than that window
+/// reaches (`nacked_recently`), then it is that block (the bool). A retransmission comes back after
+/// the blocks sent meanwhile, and in a dense burst those are more than 128 (14/10: a width change's
+/// held queue drained at 20 MHz, the retries of its losses came back 158 blocks on, read 98 AHEAD -
+/// then the next retries 9, 2, 12, 11 ahead, each a NACK of blocks the transmitter had not made
+/// yet, while the real holes behind went un-asked). Only for a jump no NACK covers (> 32: the
+/// stream itself never moves so) and a NACK just sent: a NACK left unanswered (an RS parity row is
+/// never resent) shares its 8 bits with every 256th block after it - taken at any jump, 9 new
+/// blocks a second were read as old ones.
+fn resolve_link_seq(lsb: u8, p: u64, nacked_recently: impl Fn(u64) -> bool) -> (u64, bool) {
+    let mut d = (lsb as i32 - (p & 0xFF) as i32).rem_euclid(256);
+    if d > 128 {
+        d -= 256;
+    }
+    let ahead = (p as i64 + d as i64).max(0) as u64;
+    match ahead.checked_sub(256) {
+        Some(back) if d > 32 && nacked_recently(back) => (back, true),
+        _ => (ahead, false),
+    }
+}
+
+#[cfg(test)]
+mod link_seq_tests {
+    use super::resolve_link_seq;
+
+    /// 14/10 00:28:47: the newest block 60850, the retries of five blocks lost in the drained
+    /// queue arrive - each must be itself, and the newest must not move
+    #[test]
+    fn late_retries_are_themselves() {
+        let nacked = [60692u64, 60701, 60703, 60715, 60726];
+        let p = 60850;
+        for &s in &nacked {
+            let (full, retry) = resolve_link_seq((s & 0xFF) as u8, p, |b| nacked.contains(&b));
+            // (one under 128 back reads back by itself)
+            assert_eq!((full, retry), (s, p - s > 128), "retry of {s}");
+        }
+        // without the NACKs: the aliasing the log showed (98 ahead)
+        assert_eq!(resolve_link_seq((60692 & 0xFF) as u8, p, |_| false), (60948, false));
+    }
+
+    /// a new block a few on, its 8 bits those of an unanswered NACK 255 back: new
+    #[test]
+    fn new_block_beats_stale_nack() {
+        let p = 10_000u64;
+        let (full, retry) = resolve_link_seq(((p + 1) & 0xFF) as u8, p, |b| b == p + 1 - 256);
+        assert_eq!((full, retry), (p + 1, false));
+    }
+
+    /// a burst lost (40 blocks) with no NACK at 256 back: ahead, as before; a near retry: behind
+    #[test]
+    fn burst_and_near_retry() {
+        let p = 5_000u64;
+        assert_eq!(resolve_link_seq(((p + 41) & 0xFF) as u8, p, |_| false), (p + 41, false));
+        assert_eq!(resolve_link_seq(((p - 30) & 0xFF) as u8, p, |_| true), (p - 30, false));
     }
 }

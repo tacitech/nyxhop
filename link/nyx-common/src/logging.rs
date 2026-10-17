@@ -44,6 +44,15 @@ pub fn init(app: &'static str) {
         lines: std::sync::atomic::AtomicU64::new(0),
     });
     log(&format!("=== {app} started (pid {}) ===", std::process::id()));
+    // A panic into the log too: the PC apps have no console on Windows, so a panic's message
+    // went nowhere - nyx-rx vanished on 4/10 with nothing in rx.log after "predemod worker
+    // stalled?". The default hook still runs after (stderr, backtrace).
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let name = std::thread::current().name().unwrap_or("?").to_string();
+        log(&format!("PANIC in thread '{name}': {info}"));
+        prev(info);
+    }));
 }
 
 fn timestamp() -> String {

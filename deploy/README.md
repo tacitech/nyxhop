@@ -14,6 +14,10 @@ source locations in `../docs/THIRD-PARTY.md`.
     deploy/e200/       nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-A-e200.cfg  nyx-radio-B-e200.cfg
     deploy/ipcam/      nyx-ipcam  nyx-ipcam.service  e200/   (the camera app for the board's ARM)
     deploy/pluto/      pluto.frm   (the PlutoSDR's whole firmware: ADI's, with NyxHop inside)
+    deploy/bridge/     nyx-bridge  (the IP bridge for the ADRV9364: link/scripts/nyx_ip.py)
+
+`adrv9364/` and `pluto/` run the current radio and pair with each other in any mix. `e200/` is
+the previous generation: an E200 pairs with another E200.
 
 The PlutoSDR takes `pluto/pluto.frm` through its own USB drive: `../link/scripts/nyx_pluto.py`
 does it for every Pluto plugged in (firmware, a network of its own, `--pair` for two), or copy
@@ -32,3 +36,4 @@ Usage (from the repository root):
     python link/scripts/nyx_flash.py --host 192.168.0.12 --role rx --board e200
     python link/scripts/nyx_ipcam_install.py <ip>                     # the camera app, either board
     python link/scripts/nyx_pluto.py --pair                           # two PlutoSDRs plugged in here
+    python link/scripts/nyx_ip.py on --air <ip> --ground <ip>         # IP network over the link

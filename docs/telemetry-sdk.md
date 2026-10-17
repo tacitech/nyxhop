@@ -8,10 +8,10 @@ content-agnostic.
 
 | direction | into | out of | path over the air | use |
 |---|---|---|---|---|
-| ground → aircraft | `nyx-rx` UDP 14555 | `nyx-tx` UDP 14556 | control channel, small frames, repeated twice | RC, commands, parameters |
-| aircraft → ground | `nyx-tx` UDP 14557 | `nyx-rx` UDP 14558 | video stream, retransmitted like video | telemetry, logs |
+| ground → aircraft | ground screen UDP 14555 | aircraft screen UDP 14556 | control channel, small frames, repeated twice | RC, commands, parameters |
+| aircraft → ground | aircraft screen UDP 14557 | ground screen UDP 14558 | video stream, retransmitted like video | telemetry, logs |
 
-Datagrams up to 210 bytes each way. Change the ports with `--tlm-in` and `--tlm-out` on either app
+Datagrams up to 210 bytes each way. Change the ports with `--tlm-in` and `--tlm-out` on `nyxhop`
 (`--tlm-in 0` disables the input).
 
 Over the air: ground → aircraft 100 % of packets, aircraft → ground 98.6 % with 77 ms
@@ -19,8 +19,9 @@ median latency.
 
 ### Example: MAVLink to a ground-control station
 
-Aircraft side, flight controller on a serial port → MAVLink router → UDP to `nyx-tx` port 14557.
-Ground side, `nyx-rx` outputs on 14558 → point QGroundControl or Mission Planner at UDP 14558.
+Aircraft side, flight controller on a serial port → MAVLink router → UDP to the aircraft screen's
+port 14557. Ground side, the ground screen outputs on 14558 → point QGroundControl or Mission
+Planner at UDP 14558.
 Commands go the other way through 14555 → 14556.
 
 `mav_sim.py` in `apps/data/` generates real MAVLink heartbeats and RC overrides, sends them
@@ -38,8 +39,8 @@ Every component has a line-based TCP console: send a command, read lines until `
 | component | port | examples |
 |---|---|---|
 | board daemon | 7202 | `stats`, `hop status`, `hop chanq`, `hop chans …`, `hop auto rx 1000`, `hop manual 5815`, `license`, `link` |
-| `nyx-rx` | 7203 | `stats`, `get` |
-| `nyx-tx` | 7204 | `stats`, `set fps 20`, `set quality 60`, `set source webcam`, `set auto 1` |
+| ground screen (`nyxhop`) | 7203 | `stats`, `get` |
+| aircraft screen (`nyxhop`) | 7201 | `stats`, `set fps 20`, `set quality 60`, `set source webcam`, `set auto 1` |
 
 `stats` prints `key=value` lines: frames, pictures decoded and failed, retransmissions, SNR, MCS,
 bitrate, channel. Poll it from a script to log a flight.

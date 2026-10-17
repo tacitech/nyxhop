@@ -139,6 +139,43 @@ pub fn conv_frames_block(cm: usize, block: &[u8], compact: bool) -> usize {
     conv_frames(cm, 4 + used + 4).min(full)
 }
 
+/// Branch B (feature/ofdm64): on a board whose stats say `phy=ofdm64` a block is ONE packet of
+/// the 64-point OFDM PHY at 20 Msps, whatever its length. Data bits per 4 us symbol at each conv
+/// step: QPSK 1/2, QPSK 3/4, 16QAM 1/2, 16QAM 3/4, 64QAM 2/3, 64QAM 3/4, and BPSK 1/2 for the
+/// repetition step (6).
+pub const PHY64_NDBPS: [usize; CONV_MCS_COUNT] = [48, 72, 96, 144, 192, 216, 24];
+
+/// Time on air of a `bytes`-long packet at conv step `cm` on the ofdm64 PHY, microseconds,
+/// start to start: preamble 16 + SIG 8 + 4 per data symbol (16 service + 8 (bytes + 2 CRC) + 6
+/// tail bits) + the board's 16 us gap + ~45 us the board needs between packets (measured 11/10:
+/// 3000 blocks of 2016 B at 64QAM 3/4 in 1155 ms).
+pub fn phy64_air_us(cm: usize, bytes: usize) -> f32 {
+    let nd = PHY64_NDBPS[cm.min(CONV_MCS_COUNT - 1)];
+    let nsym = (16 + 8 * (bytes + 2) + 6).div_ceil(nd);
+    // a narrower channel stretches everything counted in samples; the board's 45 us does not
+    ((16 + 8 + 4 * nsym + 16) as u64 * phy64_div() + 45) as f32
+}
+
+/// The ofdm64 channel's width as a divisor of 20 MHz (1, 2, 4, 8, 16: 20, 10, 5, 2.5, 1.25 MHz):
+/// the board's sample rate is 20 Msps over it, and every symbol as many times longer. The board
+/// says it in its `stats` (`chbw_div=`); 1 until then.
+static PHY64_DIV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn phy64_div() -> u64 {
+    PHY64_DIV.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_phy64_div(d: u64) {
+    if matches!(d, 1 | 2 | 4 | 8 | 16) {
+        PHY64_DIV.store(d, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The SNR (dB, as the feedback reports it) a conv step needs on the ofdm64 PHY: where its
+/// packet loss falls to ~10 % in AWGN (the model's waterfalls, docs/ofdm64/PLAN.md); step 0
+/// is the floor.
+pub const PHY64_SNR_THRESH: [f32; 6] = [0.0, 7.8, 10.7, 13.8, 17.7, 19.4];
+
 /// Frames a block of `block_len` bytes takes at conv step `cm` (one header byte per frame).
 pub fn conv_frames(cm: usize, block_len: usize) -> usize {
     block_len.div_ceil(conv_payload_bytes(cm) - 1).max(1)
@@ -155,6 +192,16 @@ pub const TXB_FABRIC: u8 = 2;
 pub const TXB_PAIR: u8 = 4;
 /// Full-frame interleave (conv path).
 pub const TXB_FILV: u8 = 8;
+/// v40.57: the rung in the message is the app's guess at the channel's - the board may send the
+/// block at the rung of the channel it really goes out on (per-channel rungs while hopping).
+/// Not set for a rung that is pinned (base layer), a probe, or set by hand.
+pub const TXB_RUNG_FREE: u8 = 16;
+/// The board makes the app wait for room in its queue instead of dropping the oldest block (the
+/// video's choice: a late picture is worth nothing). For traffic with its own congestion control
+/// (the IP bridge: TCP): a block dropped in the board and then repaired by the link's ARQ hides
+/// the congestion TCP must see; held back, the excess stays in the app's own queue (the TUN's),
+/// where it is dropped before it is numbered and TCP slows down.
+pub const TXB_WAIT: u8 = 32;
 
 #[cfg(test)]
 mod tests {

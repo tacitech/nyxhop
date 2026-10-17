@@ -9,6 +9,7 @@
 //! embedded Linux touch screen.
 
 use crate::boardctl::{BoardCtl, BoardState};
+use crate::i18n::t;
 use crate::theme as th;
 use egui::{Color32, Stroke};
 
@@ -25,6 +26,7 @@ pub enum Role {
 /// Bigger fonts and hit areas on top of the dark theme (touch screens).
 pub fn touch_style(ctx: &egui::Context) {
     th::apply(ctx);
+    crate::i18n::fonts(ctx);
     let mut st = (*ctx.global_style()).clone();
     use egui::{FontFamily, FontId, TextStyle};
     st.text_styles.insert(TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional));
@@ -76,7 +78,7 @@ pub fn range_of(st: &BoardState) -> Option<(f32, f32)> {
     Some((m.max(0.0), s))
 }
 
-fn plate(p: &egui::Painter, at: egui::Pos2, al: egui::Align2, lines: &[(String, f32, Color32)]) {
+fn plate(p: &egui::Painter, at: egui::Pos2, al: egui::Align2, lines: &[(String, f32, Color32)]) -> egui::Rect {
     let pad = egui::vec2(12.0, 8.0);
     let mut w: f32 = 0.0;
     let mut h = 0.0;
@@ -95,6 +97,7 @@ fn plate(p: &egui::Painter, at: egui::Pos2, al: egui::Align2, lines: &[(String, 
         p.galley(egui::pos2(r.min.x + pad.x, y), g, Color32::WHITE);
         y += gh + 2.0;
     }
+    r
 }
 
 /// Full-area video with HUD plates; returns true when the gear was tapped.
@@ -123,24 +126,32 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
     }
     let pad = 16.0;
     let (live_txt, live_col) = if d.live {
-        ("● LIVE", th::GOOD)
+        (t("● LIVE", "● TRỰC TIẾP"), th::GOOD)
     } else if d.connected {
-        ("○ NO VIDEO", th::WARN)
+        (t("○ NO VIDEO", "○ CHƯA CÓ HÌNH"), th::WARN)
     } else {
-        ("○ NO LINK", th::BAD)
+        (t("○ NO LINK", "○ KHÔNG CÓ LINK"), th::BAD)
     };
-    plate(
+    let title = plate(
         &p,
         rect.left_top() + egui::vec2(pad, pad),
         egui::Align2::LEFT_TOP,
         &[(d.title.clone(), 17.0, th::CYAN), (live_txt.into(), 13.0, live_col)],
     );
-    // pills across the top, right of the title, left of the gear
-    let mut x = rect.right() - pad - 60.0;
+    // pills across the top, right of the title, left of the gear; one that does not fit goes to
+    // the row below (a narrow window, longer Vietnamese words: they drew over the title)
+    let right = rect.right() - pad - 60.0;
+    let mut x = right;
+    let mut y = rect.top() + pad + 4.0;
     for (text, col) in d.pills.iter().rev() {
         let g = p.layout_no_wrap(text.clone(), egui::FontId::monospace(12.5), *col);
         let w = g.size().x + 18.0;
-        let r = egui::Rect::from_min_size(egui::pos2(x - w, rect.top() + pad + 4.0), egui::vec2(w, 26.0));
+        let left = if y < title.bottom() { title.right() + 8.0 } else { rect.left() + pad };
+        if x - w < left && x < right {
+            x = right;
+            y += 34.0;
+        }
+        let r = egui::Rect::from_min_size(egui::pos2(x - w, y), egui::vec2(w, 26.0));
         p.rect_filled(r, 13.0, Color32::from_black_alpha(140));
         p.rect_stroke(r, 13.0, Stroke::new(1.0, col.gamma_multiply(0.8)), egui::StrokeKind::Inside);
         p.galley(egui::pos2(r.min.x + 9.0, r.min.y + 5.0), g, Color32::WHITE);
@@ -152,7 +163,7 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
         rect.left_bottom() + egui::vec2(pad, -pad),
         egui::Align2::LEFT_BOTTOM,
         &[
-            ("SIGNAL".into(), 11.0, th::DIM),
+            (t("SIGNAL", "TÍN HIỆU").into(), 11.0, th::DIM),
             (format!("{:.1} dB", d.snr_db), 24.0, th::grade(d.snr_db, 20.0, 12.0)),
             (format!("MCS {}", d.mcs), 12.0, th::TXT),
         ],
@@ -174,7 +185,7 @@ pub fn hud(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, d: &HudData) ->
             egui::pos2(rect.center().x, rect.bottom() - pad),
             egui::Align2::CENTER_BOTTOM,
             &[
-                ("RANGE".into(), 11.0, th::DIM),
+                (t("RANGE", "KHOẢNG CÁCH").into(), 11.0, th::DIM),
                 (big, 24.0, th::CYAN),
                 (format!("±{s:.1} m"), 12.0, th::TXT),
             ],
@@ -217,7 +228,7 @@ pub fn counter_box(ui: &mut egui::Ui, text: &str, frozen: bool) -> bool {
     let resp = ui.interact(b, ui.id().with("freeze"), egui::Sense::click());
     let fill = if frozen { th::WARN.gamma_multiply(0.35) } else { Color32::from_white_alpha(if resp.hovered() { 40 } else { 22 }) };
     p.rect_filled(b, 8.0, fill);
-    p.text(b.center(), egui::Align2::CENTER_CENTER, if frozen { "Live (F)" } else { "Freeze (F)" },
+    p.text(b.center(), egui::Align2::CENTER_CENTER, if frozen { t("Live (F)", "Trực tiếp (F)") } else { t("Freeze (F)", "Dừng hình (F)") },
            egui::FontId::proportional(16.0), th::TXT);
     resp.clicked() || (resp.drag_stopped() && resp.hovered())
 }
@@ -242,11 +253,11 @@ pub fn screen(
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(drawer_title).monospace().size(18.0).strong().color(th::CYAN));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("Close").min_size(egui::vec2(110.0, 38.0))).clicked() {
+                        if ui.add(egui::Button::new(t("Close", "Đóng")).min_size(egui::vec2(110.0, 38.0))).clicked() {
                             *open = false;
                         }
-                        ui.checkbox(plates, "Readouts")
-                            .on_hover_text("The SNR and frame-rate plates over the video");
+                        ui.checkbox(plates, t("Readouts", "Chỉ số"))
+                            .on_hover_text(t("The SNR and frame-rate plates over the video", "Ô SNR và tốc độ khung hình trên video"));
                     });
                 });
                 ui.separator();
@@ -266,11 +277,11 @@ pub fn screen(
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(drawer_title).monospace().size(18.0).strong().color(th::CYAN));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("Close").min_size(egui::vec2(90.0, 38.0))).clicked() {
+                        if ui.add(egui::Button::new(t("Close", "Đóng")).min_size(egui::vec2(90.0, 38.0))).clicked() {
                             *open = false;
                         }
-                        ui.checkbox(plates, "Readouts")
-                            .on_hover_text("The SNR and frame-rate plates over the video");
+                        ui.checkbox(plates, t("Readouts", "Chỉ số"))
+                            .on_hover_text(t("The SNR and frame-rate plates over the video", "Ô SNR và tốc độ khung hình trên video"));
                     });
                 });
                 ui.separator();
@@ -360,44 +371,50 @@ pub fn link_section(ui: &mut egui::Ui, st: &BoardState, role: Role, board: &Boar
     th::section(ui, "Link", true, |ui| {
         let ls = st.kv.get("hop_link").cloned().unwrap_or_else(|| "?".into());
         let (txt, col) = if ls.starts_with("bound") {
-            (format!("Linked  ·  pair {}", ls.trim_start_matches("bound:")), th::GOOD)
+            (crate::tf!("Linked  ·  pair {}", "Đã link  ·  cặp {}", ls.trim_start_matches("bound:")), th::GOOD)
         } else if ls.starts_with("binding") {
-            (format!("Linking…  {}", ls.trim_start_matches("binding:")), th::WARN)
+            (crate::tf!("Linking…  {}", "Đang link…  {}", ls.trim_start_matches("binding:")), th::WARN)
         } else if ls.starts_with("accepting") {
-            (format!("Accepting…  {}", ls.trim_start_matches("accepting:")), th::WARN)
+            (crate::tf!("Accepting…  {}", "Đang chờ nhận…  {}", ls.trim_start_matches("accepting:")), th::WARN)
         } else {
-            ("Not linked".to_string(), th::BAD)
+            (t("Not linked", "Chưa link").to_string(), th::BAD)
         };
         ui.horizontal(|ui| {
             th::pill(ui, &txt, col);
             if st.connected {
-                th::pill(ui, "radio online", th::GOOD);
+                th::pill(ui, t("radio online", "radio đã kết nối"), th::GOOD);
             } else {
-                th::pill(ui, "radio offline", th::BAD);
+                th::pill(ui, t("radio offline", "radio chưa kết nối"), th::BAD);
             }
         });
         ui.horizontal(|ui| match role {
             Role::Ground => {
                 if ui
-                    .add(egui::Button::new("Link aircraft").min_size(egui::vec2(150.0, 40.0)))
-                    .on_hover_text("New pair key, sent on the link channel for 20 s. The aircraft takes it when unlinked, or while Accept link runs on it.")
+                    .add(egui::Button::new(t("Link aircraft", "Link máy bay")).min_size(egui::vec2(150.0, 40.0)))
+                    .on_hover_text(t(
+                        "New pair key, sent on the link channel for 20 s. The aircraft takes it when unlinked, or while Accept link runs on it.",
+                        "Khoá ghép cặp mới, phát trên kênh link trong 20 s. Máy bay nhận khi chưa link, hoặc khi đang bật Nhận link.",
+                    ))
                     .clicked()
                 {
                     board.send("link bind 20".to_string());
                 }
-                if action(ui, "Unlink") {
+                if action(ui, t("Unlink", "Bỏ link")) {
                     board.send("link unbind".to_string());
                 }
             }
             Role::Aircraft => {
                 if ui
-                    .add(egui::Button::new("Accept link (60 s)").min_size(egui::vec2(170.0, 40.0)))
-                    .on_hover_text("Take the next pair key a ground station sends.")
+                    .add(egui::Button::new(t("Accept link (60 s)", "Nhận link (60 s)")).min_size(egui::vec2(170.0, 40.0)))
+                    .on_hover_text(t(
+                        "Take the next pair key a ground station sends.",
+                        "Nhận khoá ghép cặp tiếp theo do trạm mặt đất gửi.",
+                    ))
                     .clicked()
                 {
                     board.send("link accept 60".to_string());
                 }
-                if action(ui, "Unlink") {
+                if action(ui, t("Unlink", "Bỏ link")) {
                     board.send("link unbind".to_string());
                 }
             }
@@ -414,18 +431,25 @@ pub fn link_section(ui: &mut egui::Ui, st: &BoardState, role: Role, board: &Boar
 /// does; a plain ground or aircraft app just shows the board's answer.
 pub fn role_section(ui: &mut egui::Ui, st: &BoardState, board: &BoardCtl) -> Option<String> {
     let mut chosen = None;
-    th::section(ui, "Board role", true, |ui| {
+    th::section(ui, t("Board role", "Vai trò mạch"), true, |ui| {
         let cur = st.kv.get("role").cloned().unwrap_or_default();
-        th::row(ui, "This board is", |ui| {
-            if let Some(v) = segmented(ui, &[("Aircraft (tx)", "tx"), ("Ground (rx)", "rx")], &cur) {
+        th::row(ui, t("This board is", "Mạch này là"), |ui| {
+            let opts = [(t("Aircraft (tx)", "Máy bay (tx)"), "tx"), (t("Ground (rx)", "Mặt đất (rx)"), "rx")];
+            if let Some(v) = segmented(ui, &opts, &cur) {
                 board.send(format!("role {v}"));
                 chosen = Some(v);
             }
         });
         let note = if cur.is_empty() {
-            "the board has not said yet (an older daemon does not know `role`)"
+            t(
+                "the board has not said yet (an older daemon does not know `role`)",
+                "mạch chưa trả lời (daemon cũ không có lệnh `role`)",
+            )
         } else {
-            "changing it restarts the board's radio daemon, about ten seconds; tables, pairing and licence stay"
+            t(
+                "changing it restarts the board's radio daemon, about ten seconds; tables, pairing and licence stay",
+                "đổi vai trò sẽ khởi động lại radio của mạch, khoảng mười giây; bảng kênh, ghép cặp và bản quyền vẫn giữ",
+            )
         };
         ui.label(egui::RichText::new(note).small().color(th::DIM));
     });
@@ -433,7 +457,7 @@ pub fn role_section(ui: &mut egui::Ui, st: &BoardState, board: &BoardCtl) -> Opt
 }
 
 pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, board: &BoardCtl) {
-    th::section(ui, "Channel", true, |ui| {
+    th::section(ui, t("Channel", "Kênh"), true, |ui| {
         let mode = st.kv.get("hop_mode").cloned().unwrap_or_default();
         let auto = matches!(
             mode.as_str(),
@@ -441,7 +465,7 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
         );
         let cur = if auto { "auto" } else { "manual" };
         let hz = st.kv.get("hop_cur_hz").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        if let Some(v) = segmented(ui, &[("Off", "manual"), ("Auto", "auto")], cur) {
+        if let Some(v) = segmented(ui, &[(t("Off", "Tắt"), "manual"), (t("Auto", "Tự động"), "auto")], cur) {
             if v == "auto" {
                 board.send("hop auto rx 1000".to_string());
             } else {
@@ -460,11 +484,15 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
             let hold = st.kv.get("hop_hold_hz").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             let active = st.kv.get("hop_active").cloned().unwrap_or_default();
             let txt = if hold > 0 {
-                format!("holding {} MHz", hold / 1_000_000)
+                crate::tf!("holding {} MHz", "giữ {} MHz", hold / 1_000_000)
             } else if hz > 0 {
-                format!("scanning {active} channels   ·   now {} MHz", hz / 1_000_000)
+                crate::tf!(
+                    "scanning {active} channels   ·   now {} MHz",
+                    "đang quét {active} kênh   ·   hiện {} MHz",
+                    hz / 1_000_000
+                )
             } else {
-                "scanning".to_string()
+                t("scanning", "đang quét").to_string()
             };
             ui.label(egui::RichText::new(txt).monospace().small().color(th::DIM));
         } else if !table.is_empty() {
@@ -475,8 +503,37 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
                 board.send(format!("hop manual {m}"));
             }
             if hz > 0 {
-                ui.label(egui::RichText::new(format!("now {} MHz", hz / 1_000_000)).monospace().small().color(th::DIM));
+                ui.label(egui::RichText::new(crate::tf!("now {} MHz", "hiện {} MHz", hz / 1_000_000)).monospace().small().color(th::DIM));
             }
+        }
+        // branch B, the channel's width: the ground picks it, the aircraft follows over the air
+        if let Some(d) = st.kv.get("chbw_div").and_then(|v| v.parse::<u64>().ok()) {
+            let target = st.kv.get("chbw_target").and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
+            let mhz = |d: u64| match d { 2 => "10", 4 => "5", 8 => "2.5", _ => "20" };
+            ui.add_space(6.0);
+            let auto = st.kv.get("chbw_auto").map(String::as_str) == Some("1");
+            th::row(ui, t("Bandwidth MHz", "Băng thông MHz"), |ui| {
+                if st.kv.get("role").map(String::as_str) == Some("tx") {
+                    ui.label(egui::RichText::new(mhz(d)).monospace());
+                } else {
+                    let cur = if auto { "auto" } else { mhz(target) };
+                    let opts = [(t("Auto", "Tự động"), "auto"), ("20", "20"), ("10", "10"), ("5", "5"), ("2.5", "2.5")];
+                    if let Some(v) = segmented(ui, &opts, cur) {
+                        board.send(format!("chbw {v}"));
+                    }
+                }
+            });
+            if auto {
+                ui.label(egui::RichText::new(crate::tf!("now {} MHz", "hiện {} MHz", mhz(target))).monospace().small().color(th::DIM));
+            }
+            ui.label(
+                egui::RichText::new(t(
+                    "Narrower reaches farther (each halving +3 dB) at half the speed. Auto narrows when the link runs out of margin and widens when it has plenty. The aircraft follows by itself.",
+                    "Hẹp hơn thì đi xa hơn (mỗi lần chia đôi +3 dB), tốc độ giảm một nửa. Tự động: thu hẹp khi link sắp hết dư, mở rộng khi còn dư nhiều. Máy bay tự đổi theo.",
+                ))
+                .small()
+                .color(th::DIM),
+            );
         }
         // ---- the tables (v40.37) ----
         f.seed(st);
@@ -487,7 +544,7 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
         // the labels of every row - see `screen`).
         th::row(ui, "Video MHz", |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let go = ui.button("Apply").clicked();
+                let go = ui.button(t("Apply", "Áp dụng")).clicked();
                 let r = ui.add(egui::TextEdit::singleline(&mut f.video)
                     .desired_width(ui.available_width())
                     .hint_text("5735,5755,5775 …"));
@@ -496,9 +553,9 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
                 }
             });
         });
-        th::row(ui, "Control MHz", |ui| {
+        th::row(ui, t("Control MHz", "Điều khiển MHz"), |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let go = ui.button("Apply").clicked();
+                let go = ui.button(t("Apply", "Áp dụng")).clicked();
                 let r = ui.add(egui::TextEdit::singleline(&mut f.ctl)
                     .desired_width(ui.available_width())
                     .hint_text("2412,2432 …"));
@@ -508,12 +565,13 @@ pub fn channel_section(ui: &mut egui::Ui, st: &BoardState, f: &mut ChannelForm, 
             });
         });
         if let Some(p) = st.kv.get("hop_ctl_pending").filter(|p| p.as_str() != "-") {
-            ui.label(egui::RichText::new(format!("control pool switching: {p}")).small().color(th::WARN));
+            ui.label(egui::RichText::new(crate::tf!("control pool switching: {p}", "đang đổi nhóm kênh điều khiển: {p}")).small().color(th::WARN));
         }
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(t(
                 "Off = one channel you pick, the aircraft follows · Auto = the receiver holds the best channel of the table and re-scans by hopping when it degrades or the link drops; the aircraft hops over the whole table on the shared clock while it cannot hear the receiver. Tables: any MHz from 70 to 6000, video first then control (the pool keeps 20 MHz clear of every video channel); the aircraft gets them over the air.",
-            )
+                "Tắt = một kênh do bạn chọn, máy bay đi theo · Tự động = đầu thu giữ kênh tốt nhất trong bảng, nhảy kênh dò lại khi sóng kém hoặc mất link; máy bay nhảy khắp bảng theo đồng hồ chung khi chưa nghe thấy đầu thu. Bảng kênh: MHz bất kỳ từ 70 đến 6000, video trước rồi đến điều khiển (nhóm điều khiển cách mọi kênh video 20 MHz); máy bay nhận bảng qua sóng.",
+            ))
             .small()
             .color(th::DIM),
         );
@@ -546,48 +604,74 @@ impl ChannelForm {
 
 /// Radio: video LO/gain, control LO/gain, antenna ports, sample rate, AGC, trigger.
 pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut RadioForm, board: &BoardCtl, on_rate: &mut dyn FnMut(u64)) {
-    th::section(ui, "Radio", false, |ui| {
+    th::section(ui, t("Radio", "Vô tuyến"), false, |ui| {
         f.seed(st, role);
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let (video_lbl, ctl_lbl, vcmd, vgcmd, ccmd, cgcmd, vrange, crange) = match role {
-            Role::Ground => ("Video RX", "Control TX", "rxfreq", "rxgain", "txfreq", "txgain", 0.0..=73.0, -89.0..=0.0),
-            Role::Aircraft => ("Video TX", "Control RX", "txfreq", "txgain", "rxfreq", "rxgain", -89.0..=0.0, 0.0..=73.0),
+            Role::Ground => (
+                t("Video RX", "Thu video"),
+                t("Control TX", "Phát điều khiển"),
+                "rxfreq", "rxgain", "txfreq", "txgain", 0.0..=73.0, -89.0..=0.0,
+            ),
+            Role::Aircraft => (
+                t("Video TX", "Phát video"),
+                t("Control RX", "Thu điều khiển"),
+                "txfreq", "txgain", "rxfreq", "rxgain", -89.0..=0.0, 0.0..=73.0,
+            ),
         };
         let g = |k: &str| st.kv.get(k).cloned().unwrap_or_else(|| "—".into());
-        ui.label(egui::RichText::new(format!("rms {}   peak {}   rssi {}", g("rms"), g("peak"), g("rssi"))).monospace().small().color(th::DIM));
+        ui.label(
+            egui::RichText::new(crate::tf!(
+                "rms {}   peak {}   rssi {}",
+                "rms {}   đỉnh {}   rssi {}",
+                g("rms"),
+                g("peak"),
+                g("rssi")
+            ))
+            .monospace()
+            .small()
+            .color(th::DIM),
+        );
         if !st.verdict.is_empty() {
             let c = if st.verdict.contains("PREAMBLE") { th::GOOD } else { th::WARN };
             ui.label(egui::RichText::new(&st.verdict).small().color(c));
         }
         th::row(ui, &format!("{video_lbl} MHz"), |ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut f.video_lo).desired_width(90.0));
-            if (r.lost_focus() && enter) || ui.button("Set").clicked() {
+            if (r.lost_focus() && enter) || ui.button(t("Set", "Đặt")).clicked() {
                 if let Ok(m) = f.video_lo.trim().parse::<f64>() {
                     board.send(format!("{vcmd} {}", (m * 1e6).round() as u64));
                 }
             }
         });
-        th::row(ui, "gain dB", |ui| {
+        th::row(ui, t("gain dB", "độ lợi dB"), |ui| {
             let r = ui.add(egui::Slider::new(&mut f.video_gain, vrange));
             if r.drag_stopped() {
                 board.send(format!("{vgcmd} {}", f.video_gain.round() as i32));
             }
             if role == Role::Ground {
                 let mut agc = st.kv.get("softagc").map(|v| v == "1").unwrap_or(false);
-                if ui.checkbox(&mut agc, "AGC").on_hover_text("Daemon auto-gain loop (overrides the slider)").changed() {
+                if ui
+                    .checkbox(&mut agc, "AGC")
+                    .on_hover_text(t(
+                        "Daemon auto-gain loop (overrides the slider)",
+                        "Mạch tự chỉnh độ lợi (bỏ qua thanh trượt)",
+                    ))
+                    .changed()
+                {
                     board.send(format!("softagc {}", u8::from(agc)));
                 }
             }
         });
         th::row(ui, &format!("{ctl_lbl} MHz"), |ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut f.ctl_lo).desired_width(90.0));
-            if (r.lost_focus() && enter) || ui.button("Set").clicked() {
+            if (r.lost_focus() && enter) || ui.button(t("Set", "Đặt")).clicked() {
                 if let Ok(m) = f.ctl_lo.trim().parse::<f64>() {
                     board.send(format!("{ccmd} {}", (m * 1e6).round() as u64));
                 }
             }
         });
-        th::row(ui, "gain dB", |ui| {
+        th::row(ui, t("gain dB", "độ lợi dB"), |ui| {
             let r = ui.add(egui::Slider::new(&mut f.ctl_gain, crange));
             if r.drag_stopped() {
                 board.send(format!("{cgcmd} {}", f.ctl_gain.round() as i32));
@@ -603,17 +687,18 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
         if st.kv.contains_key("txsel") || st.kv.contains_key("rxsel") {
             let txs = st.kv.get("txsel").cloned().unwrap_or_default();
             let rxs = st.kv.get("rxsel").cloned().unwrap_or_default();
-            let ant = |v: &str| match v { "1" => "SMA", "2" => "U.FL", "both" => "both", _ => "?" };
-            th::row(ui, "TX port", |ui| {
-                if let Some(v) = segmented(ui, &[("SMA", "1"), ("U.FL", "2"), ("both", "both"), ("auto", "auto")], &txs) {
+            let ant = |v: &str| match v { "1" => "SMA", "2" => "U.FL", "both" => t("both", "cả hai"), _ => "?" };
+            th::row(ui, t("TX port", "Cổng TX"), |ui| {
+                let opts = [("SMA", "1"), ("U.FL", "2"), (t("both", "cả hai"), "both"), (t("auto", "tự động"), "auto")];
+                if let Some(v) = segmented(ui, &opts, &txs) {
                     board.send(format!("txsel {v}"));
                 }
                 if txs == "auto" {
                     ui.weak(format!("({})", ant(&st.kv.get("txant").cloned().unwrap_or_default())));
                 }
             });
-            th::row(ui, "RX port", |ui| {
-                if let Some(v) = segmented(ui, &[("SMA", "1"), ("U.FL", "2"), ("auto", "auto")], &rxs) {
+            th::row(ui, t("RX port", "Cổng RX"), |ui| {
+                if let Some(v) = segmented(ui, &[("SMA", "1"), ("U.FL", "2"), (t("auto", "tự động"), "auto")], &rxs) {
                     board.send(format!("rxsel {v}"));
                 }
                 if rxs == "auto" {
@@ -621,7 +706,7 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
                 }
             });
         }
-        th::row(ui, "Sample rate", |ui| {
+        th::row(ui, t("Sample rate", "Tốc độ lấy mẫu"), |ui| {
             let fs_now = st.kv.get("fs").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             let cur = fs_now.to_string();
             if let Some(v) = segmented(ui, &[("15.36M", "15360000"), ("30.72M", "30720000")], &cur) {
@@ -632,30 +717,49 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
                 on_rate(hz);
             }
             let mut fir = st.kv.get("fir").map(|v| v == "1").unwrap_or(false);
-            if ui.checkbox(&mut fir, "FIR").on_hover_text("AD9361 programmable FIR (30.72M needs fir20MHz.ftr loaded first).").changed() {
+            if ui
+                .checkbox(&mut fir, "FIR")
+                .on_hover_text(t(
+                    "AD9361 programmable FIR (30.72M needs fir20MHz.ftr loaded first).",
+                    "Bộ lọc FIR lập trình của AD9361 (30.72M cần nạp fir20MHz.ftr trước).",
+                ))
+                .changed()
+            {
                 board.send(format!("firen {}", u8::from(fir)));
             }
         });
-        th::row(ui, "AGC mode", |ui| {
+        th::row(ui, t("AGC mode", "Chế độ AGC"), |ui| {
             let cur = st.kv.get("agc").cloned().unwrap_or_default();
             let cur = ["manual", "slow", "fast"].iter().find(|m| cur.starts_with(*m)).copied().unwrap_or("manual");
-            if let Some(v) = segmented(ui, &[("manual", "manual"), ("slow", "slow"), ("fast", "fast")], cur) {
+            let opts = [(t("manual", "thủ công"), "manual"), (t("slow", "chậm"), "slow"), (t("fast", "nhanh"), "fast")];
+            if let Some(v) = segmented(ui, &opts, cur) {
                 board.send(format!("agc {v}"));
             }
         });
-        th::row(ui, "Trigger rmin", |ui| {
+        th::row(ui, t("Trigger rmin", "Ngưỡng rmin"), |ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut f.rmin).desired_width(70.0));
-            if (r.lost_focus() && enter) || ui.button("Set").clicked() {
+            if (r.lost_focus() && enter) || ui.button(t("Set", "Đặt")).clicked() {
                 if !f.rmin.trim().is_empty() {
                     board.send(format!("trig rmin {}", f.rmin.trim()));
                 }
             }
-            ui.label(egui::RichText::new(format!("caps {}  suppr {}", g("captures"), g("suppressed"))).monospace().small().color(th::DIM));
+            ui.label(
+                egui::RichText::new(crate::tf!("caps {}  suppr {}", "bắt {}  loại {}", g("captures"), g("suppressed")))
+                    .monospace()
+                    .small()
+                    .color(th::DIM),
+            );
         });
         ui.label(
             egui::RichText::new(match role {
-                Role::Ground => "Both ends must use the same sample rate. RX = video down, TX = control up (FDD).",
-                Role::Aircraft => "Both ends must use the same sample rate. TX = video down, RX = control up (FDD).",
+                Role::Ground => t(
+                    "Both ends must use the same sample rate. RX = video down, TX = control up (FDD).",
+                    "Hai đầu phải cùng tốc độ lấy mẫu. RX = video xuống, TX = điều khiển lên (FDD).",
+                ),
+                Role::Aircraft => t(
+                    "Both ends must use the same sample rate. TX = video down, RX = control up (FDD).",
+                    "Hai đầu phải cùng tốc độ lấy mẫu. TX = video xuống, RX = điều khiển lên (FDD).",
+                ),
             })
             .small()
             .color(th::DIM),
@@ -665,7 +769,7 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
 
 /// Licence: this board (and the aircraft when its lines arrive in-band).
 pub fn licence_section(ui: &mut egui::Ui, st: &BoardState, far: Option<&str>, buf: &mut String, status: &mut String, board: &BoardCtl) {
-    th::section(ui, "Licence", true, |ui| {
+    th::section(ui, t("Licence", "Bản quyền"), true, |ui| {
         crate::licpanel::lic_rows(ui, &st.kv, far, buf, status, &mut |cmd| board.send(cmd));
     });
 }
@@ -674,24 +778,26 @@ pub fn licence_section(ui: &mut egui::Ui, st: &BoardState, far: Option<&str>, bu
 /// Connect was pressed (the app then applies `addr`).
 pub fn connection_section(ui: &mut egui::Ui, addr: &mut String, hint: &str, connected: bool, udp: Option<&mut bool>) -> bool {
     let mut connect = false;
-    th::section(ui, "Connection", false, |ui| {
-        th::row(ui, "Board", |ui| {
+    th::section(ui, t("Connection", "Kết nối"), false, |ui| {
+        th::row(ui, t("Board", "Mạch"), |ui| {
             let r = ui.add(egui::TextEdit::singleline(addr).desired_width(170.0).hint_text(hint));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if action(ui, "Connect") || enter {
+            if action(ui, t("Connect", "Kết nối")) || enter {
                 connect = true;
             }
         });
         ui.horizontal(|ui| {
             if connected {
-                th::pill(ui, "connected", th::GOOD);
+                th::pill(ui, t("connected", "đã kết nối"), th::GOOD);
             } else {
-                th::pill(ui, "connecting…", th::WARN);
+                th::pill(ui, t("connecting…", "đang kết nối…"), th::WARN);
             }
         });
         if let Some(udp) = udp {
-            ui.checkbox(udp, "UDP transport")
-                .on_hover_text("Connectionless, survives a daemon restart. Off = TCP with backpressure.");
+            ui.checkbox(udp, t("UDP transport", "Truyền qua UDP")).on_hover_text(t(
+                "Connectionless, survives a daemon restart. Off = TCP with backpressure.",
+                "Không cần giữ kết nối, chịu được khi daemon khởi động lại. Tắt = TCP có điều tiết.",
+            ));
         }
     });
     connect
@@ -702,16 +808,16 @@ pub fn connection_section(ui: &mut egui::Ui, addr: &mut String, hint: &str, conn
 /// Returns the line to send, if any.
 pub fn messages_section(ui: &mut egui::Ui, msgs: &[String], buf: &mut String, peer: &str) -> Option<String> {
     let mut out = None;
-    th::section(ui, "Messages", false, |ui| {
+    th::section(ui, t("Messages", "Tin nhắn"), false, |ui| {
         // min_scrolled_height: near the bottom of the drawer the list only got the room left on
         // screen (two lines and a half)
         let list = egui::ScrollArea::vertical().id_salt("nyx_msgs").max_height(170.0).min_scrolled_height(150.0);
         list.stick_to_bottom(true).show(ui, |ui| {
             for m in msgs {
-                let (who, col, text) = if let Some(t) = m.strip_prefix("→ ") {
-                    ("You", th::CYAN, t)
-                } else if let Some(t) = m.strip_prefix("← ") {
-                    (peer, th::GOOD, t)
+                let (who, col, text) = if let Some(body) = m.strip_prefix("→ ") {
+                    (t("You", "Bạn"), th::CYAN, body)
+                } else if let Some(body) = m.strip_prefix("← ") {
+                    (peer, th::GOOD, body)
                 } else {
                     ("", th::DIM, m.as_str())
                 };
@@ -735,8 +841,12 @@ pub fn messages_section(ui: &mut egui::Ui, msgs: &[String], buf: &mut String, pe
         // the row wider than the drawer, and a wide drawer grew over the video every frame
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let send = action(ui, "Send");
-                let r = ui.add(egui::TextEdit::singleline(buf).desired_width(f32::INFINITY).hint_text("type a message…"));
+                let send = action(ui, t("Send", "Gửi"));
+                let r = ui.add(
+                    egui::TextEdit::singleline(buf)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(t("type a message…", "nhập tin nhắn…")),
+                );
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (send || enter) && !buf.trim().is_empty() {
                     out = Some(buf.trim().to_string());
@@ -755,15 +865,15 @@ pub fn messages_section(ui: &mut egui::Ui, msgs: &[String], buf: &mut String, pe
 pub fn licence_pill(st: &BoardState) -> (String, Color32) {
     let s = st.kv.get("lic_state").cloned().unwrap_or_else(|| "?".into());
     match s.as_str() {
-        "licensed" => ("licensed".into(), th::GOOD),
+        "licensed" => (t("licensed", "đã kích hoạt").into(), th::GOOD),
         "trial" => {
             let used: i64 = st.kv.get("lic_min").and_then(|v| v.parse().ok()).unwrap_or(0);
             let total: i64 = st.kv.get("lic_trial").and_then(|v| v.parse().ok()).unwrap_or(0);
             let left = (total - used).max(0);
             let txt = if left >= 120 {
-                format!("trial · {} h left", left / 60)
+                crate::tf!("trial · {} h left", "dùng thử · còn {} giờ", left / 60)
             } else {
-                format!("trial · {left} min left")
+                crate::tf!("trial · {left} min left", "dùng thử · còn {left} phút")
             };
             // quiet while there is plenty, loud only near the end
             let col = if left <= 30 {
@@ -775,9 +885,9 @@ pub fn licence_pill(st: &BoardState) -> (String, Color32) {
             };
             (txt, col)
         }
-        "locked" => ("LOCKED · no licence".into(), th::BAD),
-        "nogate" => ("no licence gate".into(), th::DIM),
-        _ => ("licence ?".into(), th::DIM),
+        "locked" => (t("LOCKED · no licence", "ĐÃ KHOÁ · chưa có bản quyền").into(), th::BAD),
+        "nogate" => (t("no licence gate", "không cần bản quyền").into(), th::DIM),
+        _ => (t("licence ?", "bản quyền ?").into(), th::DIM),
     }
 }
 
@@ -785,13 +895,13 @@ pub fn licence_pill(st: &BoardState) -> (String, Color32) {
 pub fn link_pill(st: &BoardState) -> (String, Color32) {
     let ls = st.kv.get("hop_link").cloned().unwrap_or_default();
     if ls.starts_with("bound") {
-        ("linked".into(), th::GOOD)
+        (t("linked", "đã link").into(), th::GOOD)
     } else if ls.starts_with("binding") || ls.starts_with("accepting") {
-        ("linking…".into(), th::WARN)
+        (t("linking…", "đang link…").into(), th::WARN)
     } else if !st.connected {
-        ("radio offline".into(), th::BAD)
+        (t("radio offline", "radio chưa kết nối").into(), th::BAD)
     } else {
-        ("not linked".into(), th::BAD)
+        (t("not linked", "chưa link").into(), th::BAD)
     }
 }
 
@@ -806,16 +916,16 @@ pub fn mode_pill(st: &BoardState) -> (String, Color32) {
     );
     let txt = if auto {
         if hold > 0 {
-            format!("Auto · {} MHz", hold / 1_000_000)
+            crate::tf!("Auto · {} MHz", "Tự động · {} MHz", hold / 1_000_000)
         } else if hz > 0 {
-            format!("Auto · scan {} MHz", hz / 1_000_000)
+            crate::tf!("Auto · scan {} MHz", "Tự động · quét {} MHz", hz / 1_000_000)
         } else {
-            "Auto".to_string()
+            t("Auto", "Tự động").to_string()
         }
     } else if hz > 0 {
-        format!("Fixed · {} MHz", hz / 1_000_000)
+        crate::tf!("Fixed · {} MHz", "Cố định · {} MHz", hz / 1_000_000)
     } else {
-        "Fixed".to_string()
+        t("Fixed", "Cố định").to_string()
     };
     (txt, th::CYAN)
 }

@@ -136,14 +136,18 @@ pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
         });
 }
 
-/// One collapsible section of a side panel: card + uppercase title.
+/// One collapsible section of a side panel: card + uppercase title. Open or closed is kept per
+/// call site, not per title: a title can change with the app's state, and a section keyed by
+/// its title would spring back to its default every time the title changes.
+#[track_caller]
 pub fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
+    let site = std::panic::Location::caller();
     card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::CollapsingHeader::new(
             egui::RichText::new(title.to_uppercase()).monospace().size(11.0).color(DIM),
         )
-        .id_salt(title)
+        .id_salt(site)
         .default_open(open)
         .show_unindented(ui, |ui| {
             ui.add_space(4.0);

@@ -4,15 +4,19 @@
 Run by systemd (nyxhop.service). It:
   1. waits for eth0 to have an address; reads the role from /home/root/nyx-role
      (written by the installer), falling back to the address (.10 = A, .11 = B)
-  2. cho phy AD9361 (iio device co in_voltage_rf_bandwidth); dat gain manual +
+  2. waits for the AD9361 phy (the iio device with in_voltage_rf_bandwidth), then
      sets manual gain and the LOs through sysfs BEFORE the daemon starts, so nothing
      competes for the SPI bus and the receiver does not sit at maximum gain
-  3. tim uio "dma" (--uio) va buffer capture: /dev/udmabuf0 (module u-dma-buf)
+  3. finds the uio "dma" (--uio) and the capture buffer: /dev/udmabuf0 (module u-dma-buf)
      or the uio "capbuf" device (reserved memory, no module needed)
   4. starts the daemon, logging to /home/root/radio.out; extra daemon flags (one line,
      e.g. `--tx-ring 32768` for a bench sweep) are read from /home/root/nyx-args
   5. applies /home/root/nyx-radio.cfg through the console on port 7202, retrying each line
-  6. o lai giu daemon (systemd Restart=on-failure keo ca cum len khi chet)
+  6. stays with the daemon (systemd Restart=on-failure brings the lot back if it dies)
+
+Branch B (the ofdm64 PHY, bitstream B in BOOT.BIN): /home/root/nyx-phy64 present -> the phy64
+daemon /home/root/nyx-radio-node-o64 with its state dir /home/root/o64 (role, cfg, tables, pairing
+there; `role tx|rx` from an app rewrites that dir's nyx-radio.cfg), logging to /home/root/o64.out.
 """
 import glob
 import os
@@ -27,6 +31,10 @@ ARGS_FILE = f"{HOME}/nyx-args"
 ROLE_FILE = f"{HOME}/nyx-role"
 DAEMON = f"{HOME}/nyx-radio-node"
 LOG = f"{HOME}/radio.out"
+PHY64_FLAG = f"{HOME}/nyx-phy64"
+O64_DIR = f"{HOME}/o64"
+O64_DAEMON = f"{HOME}/nyx-radio-node-o64"
+O64_LOG = f"{HOME}/o64.out"
 ROLES = {
     "A": dict(ip="192.168.0.10", rxlo=5835000000, txlo=5745000000, gain=62),
     "B": dict(ip="192.168.0.11", rxlo=5745000000, txlo=5835000000, gain=60),
@@ -108,9 +116,11 @@ def cfg(line):
 
 def main():
     ip = eth_ip()
+    phy64 = os.path.exists(PHY64_FLAG)
+    role_file = f"{O64_DIR}/nyx-role" if phy64 and os.path.exists(f"{O64_DIR}/nyx-role") else ROLE_FILE
     role = ""
-    if os.path.exists(ROLE_FILE):
-        role = open(ROLE_FILE).read().strip().lower()
+    if os.path.exists(role_file):
+        role = open(role_file).read().strip().lower()
         role = {"tx": "A", "rx": "B", "a": "A", "b": "B"}.get(role, "")
     if role not in ROLES:
         role = next((r for r, v in ROLES.items() if v["ip"] == ip), "")
@@ -118,7 +128,7 @@ def main():
         log(f"address '{ip}' is not A/B and there is no {ROLE_FILE} - stopping")
         sys.exit(1)
     r = ROLES[role]
-    log(f"role={role} ip={ip} - starting")
+    log(f"role={role} ip={ip} phy={'ofdm64' if phy64 else 'ofdm1024'} - starting")
 
     phy = find_phy()
     if not phy:
@@ -133,7 +143,7 @@ def main():
         except OSError as e:
             log(f"sysfs {attr}: {e}")
 
-    # v40.26: module u-dma-buf build rieng cho kernel Kuiper (board/kuiper-2023_r2/
+    # v40.26: the u-dma-buf module built for the Kuiper kernel (board/kuiper-2023_r2/
     # If the module is present, load it for a CACHED capture buffer (about three times
     # faster per sample than the uncached uio one); otherwise fall back to uio capbuf.
     ko = f"{HOME}/u-dma-buf.ko"
@@ -152,26 +162,31 @@ def main():
     else:
         log("neither /dev/udmabuf0 nor uio 'capbuf' - no capture buffer")
         sys.exit(1)
-    args = f"--uio {uio['dma']} --udmabuf {capbuf} " + BASE_ARGS.format(home=HOME)
-    if os.path.exists(ARGS_FILE):
-        extra = " ".join(l.split("#")[0].strip() for l in open(ARGS_FILE, encoding="utf-8", errors="replace"))
+    if phy64:
+        daemon, log_p, cfg_p, args_p = O64_DAEMON, O64_LOG, f"{O64_DIR}/nyx-radio.cfg", f"{O64_DIR}/nyx-args"
+        args = f"--phy64 --uio {uio['dma']} --udmabuf {capbuf} --agc-base 0x43C60000 --state-dir {O64_DIR} --mode both"
+    else:
+        daemon, log_p, cfg_p, args_p = DAEMON, LOG, CFG, ARGS_FILE
+        args = f"--uio {uio['dma']} --udmabuf {capbuf} " + BASE_ARGS.format(home=HOME)
+    if os.path.exists(args_p):
+        extra = " ".join(l.split("#")[0].strip() for l in open(args_p, encoding="utf-8", errors="replace"))
         if extra.strip():
             args += " " + extra.strip()
-    log(f"daemon: {DAEMON} {args}")
+    log(f"daemon: {daemon} {args}")
 
-    subprocess.run(["killall", "nyx-radio-node"], capture_output=True)
+    subprocess.run(["killall", "nyx-radio-node", "nyx-radio-node-o64"], capture_output=True)
     time.sleep(1)
-    out = open(LOG, "ab")
-    proc = subprocess.Popen([DAEMON] + args.split() + ["--restart-cmd", RESTART_CMD],
+    out = open(log_p, "ab")
+    proc = subprocess.Popen([daemon] + args.split() + ["--restart-cmd", RESTART_CMD],
                             cwd=HOME, stdout=out, stderr=subprocess.STDOUT)
 
-    if os.path.exists(CFG):
-        for line in open(CFG, encoding="utf-8", errors="replace"):
+    if os.path.exists(cfg_p):
+        for line in open(cfg_p, encoding="utf-8", errors="replace"):
             line = line.split("#")[0].strip()
             if line:
                 cfg(line)
     else:
-        log(f"no {CFG} - falling back to minimal LO/gain")
+        log(f"no {cfg_p} - falling back to minimal LO/gain")
         for line in (f"rxfreq {r['rxlo']}", f"txfreq {r['txlo']}", "txgain 0", "agc manual", f"rxgain {r['gain']}"):
             cfg(line)
     log(f"{role} READY")

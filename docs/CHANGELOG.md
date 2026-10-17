@@ -1,9 +1,25 @@
 # Changelog
 
+## 2.0
+
+* A new radio on the ADRV9364-Z7020 and the PlutoSDR: up to 48 Mbit/s between two ADRV9364s in a
+  20 MHz channel; channel widths of 20, 10, 5 and 2.5 MHz, and the link narrows by itself in a
+  fade and widens again after.
+* The link leaves a jammed channel by itself, and the ground screen says where it went
+  ("CHANNEL a -> b MHz", "BANDWIDTH a -> b MHz").
+* IP network over the link between two ADRV9364s: `link/scripts/nyx_ip.py on` joins a network on
+  each side, next to the video.
+* Video from a file: *Video file* in the aircraft app's sources (or drop a video on the window).
+* `nyx-bitrate`, the link meter: the rate, the loss and the SNR as they come, and a sweep over
+  every rate and width.
+* One app, `nyxhop`, for either end.
+* Licence: an ADRV9364 runs 100 hours before it needs a licence (counted only while it runs);
+  the PlutoSDR stays free.
+* The ADRV9364 and the PlutoSDR pair in any mix. The ANTSDR E200 stays on the previous radio:
+  an E200 pairs with another E200.
+
 ## 1.0 (first public release, planned)
 
-* ADRV9364: 100 hours of operation before a licence is needed (was 20); flash the new
-  `deploy/adrv9364/BOOT.BIN`. The ANTSDR E200 keeps 20 hours.
 * Video link: H.264, adaptive bitrate and modulation, retransmission of lost frames, two-layer
   simulcast for the low end (off by default: it adds ~30 ms of latency; switch it on in the
   aircraft app for reach through fades). After a loss the aircraft repairs the picture with a

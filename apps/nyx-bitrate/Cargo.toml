@@ -1,0 +1,17 @@
+[package]
+name = "nyx-bitrate"
+version = "0.1.0"
+edition = "2024"
+description = "NyxHop link bitrate meter: test packets from the aircraft board, counted at the ground board"
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.35.0"
+nyx-common = { path = "../../link/nyx-common", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }

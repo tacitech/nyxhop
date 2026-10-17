@@ -230,8 +230,12 @@ def need(payload, board, files):
 
 
 # ---------------------------------------------------------------- ADRV9364 (Kuiper) ----
-ADRV_HOME = [("nyx-radio-node", "0755"), ("fir10MHz.ftr", None),
-             ("nyxhop-start.py", "0755"), ("nyxctl.py", "0755")]
+ADRV_HOME = [("fir10MHz.ftr", None), ("nyxhop-start.py", "0755"), ("nyxctl.py", "0755")]
+# The radio (bitstream B in BOOT.BIN): the start script runs the daemon below with its state in
+# O64 (cfgs, role, tables, pairing) when the flag file is there (nyxhop-start.py)
+ADRV_DAEMON = "/home/root/nyx-radio-node-o64"
+ADRV_FLAG = "/home/root/nyx-phy64"
+ADRV_STATE = "/home/root/o64"
 
 
 def flash_adrv(a, host, role):
@@ -241,7 +245,9 @@ def flash_adrv(a, host, role):
     if a.dry_run:
         print(f"[dry-run] ADRV9364 {host} role {role}")
         print(f"  /boot/BOOT.BIN, /boot/devicetree.dtb   (from {d})")
-        print(f"  /home/root/: {', '.join(n for n, _ in ADRV_HOME)}, u-dma-buf.ko?, nyx-radio.cfg, nyx-role")
+        print(f"  /home/root/: {', '.join(n for n, _ in ADRV_HOME)}, u-dma-buf.ko?, {os.path.basename(ADRV_DAEMON)}, "
+              f"{os.path.basename(ADRV_FLAG)}")
+        print(f"  {ADRV_STATE}/: nyx-radio.cfg, nyx-radio-A.cfg, nyx-radio-B.cfg, nyx-role")
         print(f"  /etc/systemd/system/nyxhop.service; enable; reboot if boot changed")
         return
     b = Board(host)
@@ -263,17 +269,20 @@ def flash_adrv(a, host, role):
         print(f"  /boot/{f}: written (original kept as {f}.nyx-orig)")
         changed = True
     # daemon + glue
-    b.sh("systemctl stop nyxhop 2>/dev/null; killall nyx-radio-node 2>/dev/null; sleep 1; true")
+    b.sh("systemctl stop nyxhop 2>/dev/null; killall nyx-radio-node nyx-radio-node-o64 2>/dev/null; sleep 1; true")
     for name, mode in ADRV_HOME:
         b.put_file(os.path.join(d, name), f"/home/root/{name}", mode)
     if os.path.exists(os.path.join(d, "u-dma-buf.ko")):
         b.put_file(os.path.join(d, "u-dma-buf.ko"), "/home/root/u-dma-buf.ko")
-    b.put_file(os.path.join(d, f"nyx-radio-{role}.cfg"), "/home/root/nyx-radio.cfg")
+    b.put_file(os.path.join(d, "nyx-radio-node"), ADRV_DAEMON, "0755")
+    b.sh(f"mkdir -p {ADRV_STATE}")
+    b.put_file(os.path.join(d, f"nyx-radio-{role}.cfg"), f"{ADRV_STATE}/nyx-radio.cfg")
     # both roles' cfgs stay on the board: `role tx|rx` from an app switches between them
     for r in ("A", "B"):
-        b.put_file(os.path.join(d, f"nyx-radio-{r}.cfg"), f"/home/root/nyx-radio-{r}.cfg")
-    drop_old_role_mode(b, "/home/root", role)
-    b.put_text(role + "\n", "/home/root/nyx-role")
+        b.put_file(os.path.join(d, f"nyx-radio-{r}.cfg"), f"{ADRV_STATE}/nyx-radio-{r}.cfg")
+    drop_old_role_mode(b, ADRV_STATE, role)
+    b.put_text(role + "\n", f"{ADRV_STATE}/nyx-role")
+    b.put_text("", ADRV_FLAG)
     b.put_file(os.path.join(d, "nyxhop.service"), "/etc/systemd/system/nyxhop.service")
     b.put_text("options uio_pdrv_genirq of_id=generic-uio\n", "/etc/modprobe.d/nyxhop-uio.conf")
     # bootargs: the generic-uio driver must bind our PL nodes
@@ -317,11 +326,11 @@ def verify_adrv(host):
         print("  ssh not up"); return
     ver = ""
     for _ in range(12):
-        ver = b.sh("python3 /home/root/nyxctl.py demod 2>&1 | grep -o 'ver=0x[0-9a-f]*' | head -1")
+        ver = " ".join(l for l in console(host, "o64", timeout=4).splitlines() if l.startswith(("rx ver", "tx ver", "rx run", "tx run")))
         if ver:
             break
         time.sleep(5)
-    print("  fpga design:", ver or "no version (see /home/root/radio.out)")
+    print("  radio      :", ver[:200] or f"no answer (see {ADRV_STATE}.out)")
     print("  service    :", b.sh("systemctl is-active nyxhop"))
     print("  uio        :", b.sh("for u in /sys/class/uio/uio*; do printf '%s=%s ' $(basename $u) $(cat $u/name); done"))
     print("  control    :", b.sh("python3 /home/root/nyxctl.py get 2>&1 | tr '\\n' ' ' | cut -c1-200"))

@@ -15,6 +15,10 @@ use num_complex::Complex32;
 
 pub const DEFAULT_TX_PORT: u16 = 7010;
 pub const DEFAULT_RX_PORT: u16 = 7011;
+/// Branch B: the board's IP port, beside the video app's two (the IP bridge's, nyx-bridge
+/// `--side`): `TxBlock` in on the aircraft, `DecFrame` out on the ground, `Tlm` both ways - its own
+/// packets on the air, never the video app's.
+pub const DEFAULT_IP_PORT: u16 = 7013;
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
@@ -67,8 +71,13 @@ pub mod mcs;
 
 pub use mcs::{
     CONV_MCS_COUNT, FRAME_PAYLOAD_BYTES, Mcs, RV_SEQUENCE, TXB_CONV, TXB_FABRIC, TXB_FILV,
-    TXB_PAIR, conv_frames, conv_frames_block, conv_payload_bytes, conv_seg_one_frame,
+    TXB_PAIR, TXB_RUNG_FREE, TXB_WAIT, conv_frames, conv_frames_block, conv_payload_bytes, conv_seg_one_frame,
+    PHY64_NDBPS, PHY64_SNR_THRESH, phy64_air_us, phy64_div, set_phy64_div,
 };
+
+/// The largest `Msg::Tlm`: a full-size IP packet (1500 B) with room. It was 512 when only MAVLink
+/// rode it; the IP bridge's packets past 512 B arrived cut short and the kernel dropped them.
+pub const TLM_MAX: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -78,8 +87,8 @@ pub enum Msg {
     IqFrame { seq: u64, mcs: u8, rv: u8, samples: Vec<Iq16> },
     /// RX -> TX link telemetry (relayed transparently by the channel node).
     /// `need_idr` asks the video encoder for a keyframe after loss.
-    /// v32 minstrel: ok_mcs = dem BLOCK giai ok RIENG TUNG MCS (wrap u16)
-    /// — thong ke per-rate kieu minstrel, TX tinh prob_i = dok_i/dsent_i.
+    /// v32 minstrel: ok_mcs = BLOCKS decoded per MCS, each MCS its own count (wrapping u16)
+    /// - minstrel-style per-rate statistics, the TX works out prob_i = dok_i / dsent_i.
     Feedback { snr_db: f32, bler: f32, segs_ok: u64, segs_lost: u64, need_idr: bool, ok_mcs: [u16; 6], ok_base: u16 },
     /// RX -> TX: PHY frame `seq` failed to decode, please retransmit.
     Nack { seq: u64 },
@@ -133,8 +142,9 @@ pub enum Msg {
     /// v12: text / parameters RX -> TX over the OTA control channel (inside the ctrl frame like
     /// Feedback). Limited to 400 B to fit beside the feedback.
     UserText { text: String },
-    /// v40.22: telemetry (MAVLink...) RX->TX qua kenh control hep — 1 datagram
-    /// UDP = 1 Msg (<= 210 B = 15 manh x 14 B tren song).
+    /// v40.22: telemetry (MAVLink...) RX->TX over the narrow control channel - 1 UDP
+    /// datagram = 1 Msg (<= 210 B = 15 pieces x 14 B on air). Branch B carries a datagram whole
+    /// (the daemon's uplink): the IP bridge's packets, up to TLM_MAX.
     Tlm { bytes: Vec<u8> },
     /// v40.29 time-mode AFH: "from epoch (epoch_hi<<8 | eff_e8) the video schedule
     /// runs on this channel mask". Relayed by the control receiver (A) from the
@@ -176,6 +186,18 @@ pub enum Msg {
     /// `idr_pic_id` is the encoder's IDR period as the decoder read it - feedback from an
     /// older period is ignored, which is why it travels along.
     Ltr { kind: u8, idr_pic_id: u16, marked: u16, current: u16 },
+    /// v40.56: the rung for each video channel while hopping, as the receiving end measures
+    /// them (the daemon's rates frame), on its way to the transmitting app: (channel Hz, rung
+    /// 0..6, or the daemon's "unknown"). The ground daemon queues it for the air in table order.
+    ChanRates { rates: Vec<(u64, u8)> },
+    /// Control-channel AFH, relayed by the control receiver from a CMASK frame: from epoch
+    /// (epoch_hi<<8 | eff_e8) the control slots skip the pool entries set in `mask`, for the pool
+    /// whose tag is `tag` (the daemon's CMASK frame).
+    HopCtlMask { epoch_hi: u8, eff_e8: u8, mask: u16, tag: u16 },
+    /// Control-channel AFH, the control receiver's report inside the video stream: control frames
+    /// it decoded on each pool entry (by position, wrapping counters since it started) for the pool
+    /// whose tag is `tag`. The control transmitter compares them with what it sent on each.
+    CtlRxCount { tag: u16, counts: Vec<u16> },
 }
 
 impl Msg {
@@ -206,6 +228,9 @@ impl Msg {
             Msg::HopTable { .. } => "HopTable",
             Msg::RangeRep { .. } => "RangeRep",
             Msg::Ltr { .. } => "Ltr",
+            Msg::ChanRates { .. } => "ChanRates",
+            Msg::HopCtlMask { .. } => "HopCtlMask",
+            Msg::CtlRxCount { .. } => "CtlRxCount",
         }
     }
 
@@ -233,6 +258,9 @@ impl Msg {
             Msg::TxBlock { .. } => 20,
             Msg::RangeRep { .. } => 21,
             Msg::Ltr { .. } => 22,
+            Msg::ChanRates { .. } => 23,
+            Msg::HopCtlMask { .. } => 24,
+            Msg::CtlRxCount { .. } => 25,
         }
     }
 }
@@ -240,7 +268,16 @@ impl Msg {
 /// Encode one Msg as a frame [u32 len][u8 type][body], shared by the TCP stream and the UDP
 /// payload.
 pub fn encode_msg(msg: &Msg) -> Vec<u8> {
-    let mut body = Vec::new();
+    let mut out = Vec::new();
+    encode_msg_into(&mut out, msg);
+    out
+}
+
+/// `encode_msg` appended to `body` (a writer's batch: several frames, one write, no copy each).
+pub fn encode_msg_into(body: &mut Vec<u8>, msg: &Msg) {
+    let at = body.len();
+    body.extend_from_slice(&[0u8; 4]);
+    body.push(msg.type_byte());
     match msg {
         Msg::IqFrame { seq, mcs, rv, samples } => {
             body.reserve(14 + samples.len() * 4);
@@ -320,6 +357,26 @@ pub fn encode_msg(msg: &Msg) -> Vec<u8> {
                 body.extend_from_slice(&t.to_le_bytes()[..6]);
             }
         }
+        Msg::ChanRates { rates } => {
+            body.push(rates.len().min(255) as u8);
+            for (hz, r) in rates.iter().take(255) {
+                body.extend_from_slice(&hz.to_le_bytes());
+                body.push(*r);
+            }
+        }
+        Msg::HopCtlMask { epoch_hi, eff_e8, mask, tag } => {
+            body.push(*epoch_hi);
+            body.push(*eff_e8);
+            body.extend_from_slice(&mask.to_le_bytes());
+            body.extend_from_slice(&tag.to_le_bytes());
+        }
+        Msg::CtlRxCount { tag, counts } => {
+            body.extend_from_slice(&tag.to_le_bytes());
+            body.push(counts.len().min(255) as u8);
+            for c in counts.iter().take(255) {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+        }
         Msg::Ltr { kind, idr_pic_id, marked, current } => {
             body.push(*kind);
             body.extend_from_slice(&idr_pic_id.to_le_bytes());
@@ -334,7 +391,7 @@ pub fn encode_msg(msg: &Msg) -> Vec<u8> {
             body.extend_from_slice(&b[..n]);
         }
         Msg::Tlm { bytes } => {
-            let n = bytes.len().min(512);
+            let n = bytes.len().min(TLM_MAX);
             body.extend_from_slice(&(n as u16).to_le_bytes());
             body.extend_from_slice(&bytes[..n]);
         }
@@ -394,11 +451,8 @@ pub fn encode_msg(msg: &Msg) -> Vec<u8> {
             }
         }
     }
-    let mut head = Vec::with_capacity(5 + body.len());
-    head.extend_from_slice(&(body.len() as u32 + 1).to_le_bytes());
-    head.push(msg.type_byte());
-    head.extend_from_slice(&body);
-    head
+    let n = (body.len() - at - 4) as u32;
+    body[at..at + 4].copy_from_slice(&n.to_le_bytes());
 }
 
 /// v7: over-the-air CONTROL frame: Feedback/Nack packed into the 2016 B payload of an ordinary PHY
@@ -630,6 +684,37 @@ pub fn decode_msg(buf: &[u8]) -> io::Result<Msg> {
             let ctl = (0..nc).map(|i| (body[c0 + 7 * i], t48(&body[c0 + 7 * i + 1..]))).collect();
             Ok(Msg::RangeRep { samp_hz: u32::from_le_bytes(body[0..4].try_into().unwrap()), tx, ctl })
         }
+        23 => {
+            let n = usize::from(*body.first().ok_or_else(err)?);
+            if body.len() < 1 + 9 * n {
+                return Err(err());
+            }
+            let rates = (0..n)
+                .map(|i| {
+                    let o = 1 + 9 * i;
+                    (u64::from_le_bytes(body[o..o + 8].try_into().unwrap()), body[o + 8])
+                })
+                .collect();
+            Ok(Msg::ChanRates { rates })
+        }
+        24 => {
+            if body.len() < 6 {
+                return Err(err());
+            }
+            let w = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+            Ok(Msg::HopCtlMask { epoch_hi: body[0], eff_e8: body[1], mask: w(2), tag: w(4) })
+        }
+        25 => {
+            if body.len() < 3 {
+                return Err(err());
+            }
+            let n = usize::from(body[2]);
+            if body.len() < 3 + 2 * n {
+                return Err(err());
+            }
+            let counts = (0..n).map(|i| u16::from_le_bytes([body[3 + 2 * i], body[4 + 2 * i]])).collect();
+            Ok(Msg::CtlRxCount { tag: u16::from_le_bytes([body[0], body[1]]), counts })
+        }
         22 => {
             if body.len() < 7 {
                 return Err(err());
@@ -676,7 +761,7 @@ pub fn decode_msg(buf: &[u8]) -> io::Result<Msg> {
                 return Err(err());
             }
             let n = u16::from_le_bytes(body[0..2].try_into().unwrap()) as usize;
-            if n > 512 || body.len() != 2 + n {
+            if n > TLM_MAX || body.len() != 2 + n {
                 return Err(err());
             }
             Ok(Msg::Tlm { bytes: body[2..2 + n].to_vec() })
@@ -1003,6 +1088,11 @@ mod lic_msgs {
             Msg::RangeRep { samp_hz: 15_360_000, tx: vec![1, 0xFFFF_FFFF_FFFF, 123_456_789_012], ctl: vec![(7, 99), (255, 0x8000_0000_0001)] },
             Msg::Ltr { kind: 1, idr_pic_id: 65535, marked: 4095, current: 4096 },
             Msg::Ltr { kind: 0, idr_pic_id: 0, marked: 0, current: 0 },
+            Msg::ChanRates { rates: vec![(2_406_500_000, 5), (2_424_500_000, 0), (5_800_000_000, 15)] },
+            Msg::ChanRates { rates: vec![] },
+            Msg::HopCtlMask { epoch_hi: 7, eff_e8: 255, mask: 0b1010, tag: 0xBEEF },
+            Msg::CtlRxCount { tag: 0x1234, counts: vec![0, 65535, 17, 4] },
+            Msg::CtlRxCount { tag: 0, counts: vec![] },
         ] {
             let b = encode_msg(&m);
             let back = decode_msg(&b[4..]).expect("decodes");

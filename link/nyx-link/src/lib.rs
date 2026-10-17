@@ -156,6 +156,149 @@ pub fn packetize_fec_seg(
     out
 }
 
+/// v40.53: GF(2^8) (polynomial 0x11d) for the Reed-Solomon parity rows.
+mod gf {
+    const fn tables() -> ([u8; 512], [u8; 256]) {
+        let mut exp = [0u8; 512];
+        let mut log = [0u8; 256];
+        let mut x: u16 = 1;
+        let mut i = 0;
+        while i < 255 {
+            exp[i] = x as u8;
+            log[x as usize] = i as u8;
+            x <<= 1;
+            if x & 0x100 != 0 {
+                x ^= 0x11d;
+            }
+            i += 1;
+        }
+        while i < 512 {
+            exp[i] = exp[i - 255];
+            i += 1;
+        }
+        (exp, log)
+    }
+    static T: ([u8; 512], [u8; 256]) = tables();
+
+    pub fn mul(a: u8, b: u8) -> u8 {
+        if a == 0 || b == 0 { 0 } else { T.0[T.1[a as usize] as usize + T.1[b as usize] as usize] }
+    }
+
+    /// a != 0
+    pub fn inv(a: u8) -> u8 {
+        T.0[255 - T.1[a as usize] as usize]
+    }
+
+    /// dst ^= c * src
+    pub fn mul_acc(dst: &mut [u8], src: &[u8], c: u8) {
+        match c {
+            0 => {}
+            1 => dst.iter_mut().zip(src).for_each(|(d, s)| *d ^= *s),
+            _ => {
+                let lc = T.1[c as usize] as usize;
+                for (d, &s) in dst.iter_mut().zip(src) {
+                    if s != 0 {
+                        *d ^= T.0[T.1[s as usize] as usize + lc];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// v40.53: the parity rows. Row j, data block i: the Cauchy matrix 1/(x_j + y_i), x_j = j,
+/// y_i = RS_Y0 + i, with each column scaled by (x_0 + y_i) so that row 0 is all ones - the XOR
+/// parity every receiver already knows. Scaling a column keeps every square submatrix of a
+/// Cauchy matrix invertible, so ANY m lost data blocks come back from ANY m parity rows.
+const RS_Y0: usize = 64;
+/// The most parity blocks a frame can carry, and the most data blocks the rows past the first
+/// can cover (x and y must not meet: 64 + 192 = 256).
+pub const RS_MAX_PARITY: usize = RS_Y0;
+pub const RS_MAX_DATA: usize = 256 - RS_Y0;
+
+fn rs_coef(j: usize, i: usize) -> u8 {
+    if j == 0 {
+        return 1;
+    }
+    let y = (RS_Y0 + i) as u8;
+    gf::mul(y, gf::inv(j as u8 ^ y))
+}
+
+/// v40.53: `packetize_fec_seg` with `k` parity blocks. The first is the XOR as ever (version 1/2:
+/// a receiver from before keeps using it); the others are Reed-Solomon rows, version 3 (full
+/// segments) or 4 (the segment size in the last two payload bytes, as version 2 does), which such
+/// a receiver refuses - never a wrong frame. k = 1 is byte for byte `packetize_fec_seg`; no rows
+/// past the first for a frame of more than RS_MAX_DATA blocks.
+pub fn packetize_rs(
+    frame_id: u32,
+    src: SourceType,
+    data: &[u8],
+    seg: usize,
+    k: usize,
+) -> Vec<[u8; BLOCK_BYTES]> {
+    let mut out = packetize_fec_seg(frame_id, src, data, k >= 1, seg);
+    if k <= 1 {
+        return out;
+    }
+    let seg = if seg >= SEG_PAYLOAD - 2 { SEG_PAYLOAD } else { seg.max(1) };
+    let n = out.len() - 1; // the XOR parity is the last block
+    if n == 0 || n > RS_MAX_DATA {
+        return out;
+    }
+    let last_len = [out[n][12], out[n][13]];
+    for j in 1..k.min(RS_MAX_PARITY) {
+        let mut par = [0u8; BLOCK_BYTES];
+        par[0..2].copy_from_slice(&MAGIC.to_be_bytes());
+        par[2] = if seg < SEG_PAYLOAD { 4 } else { 3 };
+        par[3] = src as u8;
+        par[4..8].copy_from_slice(&frame_id.to_be_bytes());
+        par[8..10].copy_from_slice(&((n + j) as u16).to_be_bytes());
+        par[10..12].copy_from_slice(&(n as u16).to_be_bytes());
+        par[12..14].copy_from_slice(&last_len);
+        let (head, _) = par.split_at_mut(HEADER_BYTES + SEG_PAYLOAD);
+        let acc = &mut head[HEADER_BYTES..];
+        for (i, b) in out[..n].iter().enumerate() {
+            gf::mul_acc(acc, &b[HEADER_BYTES..HEADER_BYTES + SEG_PAYLOAD], rs_coef(j, i));
+        }
+        if seg < SEG_PAYLOAD {
+            par[PAR_SEG_AT..PAR_SEG_AT + 2].copy_from_slice(&(seg as u16).to_be_bytes());
+        }
+        let crc = crc32fast::hash(&par[..BLOCK_BYTES - CRC_BYTES]);
+        par[BLOCK_BYTES - CRC_BYTES..].copy_from_slice(&crc.to_be_bytes());
+        out.push(par);
+    }
+    out
+}
+
+/// v40.53: how many parity blocks a frame of `n` data blocks gets so that losing more of its
+/// blocks than that - each lost with probability `p_loss`, independently - happens at most with
+/// probability `target`. At least 1 (the XOR), at most `kmax`.
+pub fn parity_for(n: usize, p_loss: f32, target: f32, kmax: usize) -> usize {
+    let p = f64::from(p_loss.clamp(0.0, 0.9));
+    let kmax = kmax.clamp(1, RS_MAX_PARITY);
+    for k in 1..=kmax {
+        let total = n + k;
+        // P(X <= k), X ~ Bin(total, p)
+        let mut term = (1.0 - p).powi(total as i32);
+        let mut cdf = term;
+        for x in 1..=k {
+            term *= (total - x + 1) as f64 / x as f64 * p / (1.0 - p);
+            cdf += term;
+        }
+        if 1.0 - cdf <= f64::from(target) {
+            return k;
+        }
+    }
+    kmax
+}
+
+/// v40.53: a Reed-Solomon parity row (version 3/4) - by its header alone, no CRC check. The
+/// transmitter does not retransmit these; it does the XOR (for a picture of one or two blocks
+/// that is a second copy of the data).
+pub fn is_rs_parity(blk: &[u8]) -> bool {
+    blk.len() >= HEADER_BYTES && u16::from_be_bytes([blk[0], blk[1]]) == MAGIC && (blk[2] == 3 || blk[2] == 4)
+}
+
 /// Parsed, CRC-verified segment.
 pub struct Segment {
     pub frame_id: u32,
@@ -167,6 +310,8 @@ pub struct Segment {
     pub par_last_len: Option<usize>,
     /// v40.48: a version-2 parity block's segment size (the length of every block but the last).
     pub par_seg: Option<usize>,
+    /// v40.53: which parity row (0 = the XOR; 1.. Reed-Solomon, versions 3/4).
+    pub par_idx: u16,
 }
 
 /// Validate CRC and parse one received block. None => block corrupt.
@@ -178,7 +323,7 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
     if crc32fast::hash(&blk[..BLOCK_BYTES - CRC_BYTES]) != crc_rx {
         return None;
     }
-    if u16::from_be_bytes([blk[0], blk[1]]) != MAGIC || !(blk[2] == 1 || blk[2] == 2) {
+    if u16::from_be_bytes([blk[0], blk[1]]) != MAGIC || !(1..=4).contains(&blk[2]) {
         return None;
     }
     let src = SourceType::from_u8(blk[3])?;
@@ -188,13 +333,21 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
     let len = u16::from_be_bytes([blk[12], blk[13]]) as usize;
     // seg_idx == seg_cnt = the PARITY block (v-fec); the payload takes the FULL SEG_PAYLOAD because
     // the XOR is computed over the zero-padded area.
-    let is_par = seg_idx == seg_cnt;
-    if seg_cnt == 0 || seg_idx > seg_cnt || len > SEG_PAYLOAD {
+    let is_par = seg_idx >= seg_cnt;
+    if seg_cnt == 0 || len > SEG_PAYLOAD {
+        return None;
+    }
+    // v40.53: versions 1/2 carry data or the XOR (row 0), 3/4 only a Reed-Solomon row (1..)
+    let par_idx = seg_idx.saturating_sub(seg_cnt);
+    let rs = blk[2] >= 3;
+    if (!rs && seg_idx > seg_cnt)
+        || (rs && (!is_par || par_idx == 0 || par_idx as usize >= RS_MAX_PARITY || seg_cnt as usize > RS_MAX_DATA))
+    {
         return None;
     }
     let take = if is_par { SEG_PAYLOAD } else { len };
-    // version 2 is only ever a parity block carrying its segment size
-    let par_seg = if blk[2] == 2 {
+    // version 2 (4) is only ever a parity block carrying its segment size
+    let par_seg = if blk[2] == 2 || blk[2] == 4 {
         let s = u16::from_be_bytes([blk[PAR_SEG_AT], blk[PAR_SEG_AT + 1]]) as usize;
         if !is_par || s == 0 || s >= SEG_PAYLOAD - 1 {
             return None;
@@ -211,6 +364,7 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
         payload: blk[HEADER_BYTES..HEADER_BYTES + take].to_vec(),
         par_last_len: if is_par { Some(len) } else { None },
         par_seg,
+        par_idx,
     })
 }
 
@@ -218,23 +372,105 @@ pub fn parse_block(blk: &[u8]) -> Option<Segment> {
 struct Pending {
     src: SourceType,
     parts: Vec<Option<Vec<u8>>>,
-    /// payload of the PARITY block (XOR, zero-padded to SEG_PAYLOAD) if received.
-    parity: Option<Vec<u8>>,
+    /// payloads of the parity blocks received (row -> SEG_PAYLOAD bytes; row 0 = the XOR).
+    parities: std::collections::BTreeMap<u16, Vec<u8>>,
     /// length of the LAST data block (from the parity header).
     last_len: usize,
     /// v40.48: length of every other block (a version-2 parity says it; full otherwise).
     seg: usize,
+    /// v40.53: when its first block came, and its latest (a retransmission counts)
+    born: std::time::Instant,
+    last: std::time::Instant,
 }
 
 #[derive(Default)]
 pub struct Reassembler {
     pending: HashMap<u32, Pending>,
-    /// frames rebuilt thanks to parity (exactly 1 block lost).
+    /// frames rebuilt thanks to parity.
     pub fec_recovered: u64,
+    /// v40.53: ... of which with more than one block lost (the Reed-Solomon rows).
+    pub fec_recovered_multi: u64,
     /// v40.35: recently completed frame ids (late blocks are ignored)
     done: std::collections::VecDeque<u32>,
     /// INCOMPLETE frames delivered (slicing: one band broken, not the whole frame lost).
     pub partial_delivered: u64,
+}
+
+/// v40.53: the lost data blocks `missing` (each SEG_PAYLOAD long, zero-padded) from the data blocks
+/// there and as many parity rows. None if the rows cannot cover them.
+fn rs_solve(
+    parts: &[Option<Vec<u8>>],
+    parities: &std::collections::BTreeMap<u16, Vec<u8>>,
+    missing: &[usize],
+) -> Option<Vec<Vec<u8>>> {
+    let m = missing.len();
+    // the rows past the XOR only exist for frames of up to RS_MAX_DATA blocks
+    let rows: Vec<u16> = parities
+        .keys()
+        .copied()
+        .filter(|&j| j == 0 || parts.len() <= RS_MAX_DATA)
+        .take(m)
+        .collect();
+    if rows.len() < m {
+        return None;
+    }
+    // right-hand sides: each row minus what the blocks that are here put into it
+    let mut rhs: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|&j| {
+            let mut v = parities[&j].clone();
+            v.resize(SEG_PAYLOAD, 0);
+            for (i, p) in parts.iter().enumerate() {
+                if let Some(p) = p {
+                    gf::mul_acc(&mut v, p, rs_coef(j as usize, i));
+                }
+            }
+            v
+        })
+        .collect();
+    // m x m system over GF(256), Gauss-Jordan
+    let mut a: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|&j| missing.iter().map(|&i| rs_coef(j as usize, i)).collect())
+        .collect();
+    for c in 0..m {
+        let piv = (c..m).find(|&r| a[r][c] != 0)?;
+        a.swap(c, piv);
+        rhs.swap(c, piv);
+        let inv = gf::inv(a[c][c]);
+        if inv != 1 {
+            for x in a[c].iter_mut() {
+                *x = gf::mul(*x, inv);
+            }
+            for x in rhs[c].iter_mut() {
+                *x = gf::mul(*x, inv);
+            }
+        }
+        for r in 0..m {
+            if r != c && a[r][c] != 0 {
+                let f = a[r][c];
+                let (pr, pc) = if r < c {
+                    let (lo, hi) = a.split_at_mut(c);
+                    (&mut lo[r], &hi[0])
+                } else {
+                    let (lo, hi) = a.split_at_mut(r);
+                    (&mut hi[0], &lo[c])
+                };
+                for (x, &y) in pr.iter_mut().zip(pc.iter()) {
+                    *x ^= gf::mul(f, y);
+                }
+                let (vr, vc) = if r < c {
+                    let (lo, hi) = rhs.split_at_mut(c);
+                    (&mut lo[r], &hi[0])
+                } else {
+                    let (lo, hi) = rhs.split_at_mut(r);
+                    (&mut hi[0], &lo[c])
+                };
+                gf::mul_acc(vr, vc, f);
+            }
+        }
+    }
+    Some(rhs)
 }
 
 impl Reassembler {
@@ -253,20 +489,24 @@ impl Reassembler {
             return None;
         }
         let cnt = seg.seg_cnt as usize;
+        let now = std::time::Instant::now();
         let entry = self.pending.entry(seg.frame_id).or_insert_with(|| Pending {
             src: seg.src,
             parts: vec![None; cnt],
-            parity: None,
+            parities: Default::default(),
             last_len: 0,
             seg: SEG_PAYLOAD,
+            born: now,
+            last: now,
         });
         if entry.parts.len() != cnt {
             return None; // inconsistent header, drop
         }
+        entry.last = now;
         match seg.par_last_len {
             // block PARITY (v-fec)
             Some(ll) => {
-                entry.parity = Some(seg.payload);
+                entry.parities.insert(seg.par_idx, seg.payload);
                 entry.last_len = ll;
                 entry.seg = seg.par_seg.unwrap_or(SEG_PAYLOAD);
             }
@@ -282,24 +522,22 @@ impl Reassembler {
             .filter(|(_, p)| p.is_none())
             .map(|(i, _)| i)
             .collect();
-        if missing.len() == 1 && entry.parity.is_some() {
-            let idx = missing[0];
-            let mut rec = entry.parity.clone().unwrap();
-            rec.resize(SEG_PAYLOAD, 0);
-            for (i, p) in entry.parts.iter().enumerate() {
-                if i == idx {
-                    continue;
+        // v40.53: m blocks missing and at least m parity rows here -> solve for them (one missing
+        // with the XOR is the old case: the row of ones). A picture whose blocks a burst of WiFi
+        // took two or three of comes out now, not a NACK round trip later.
+        if !missing.is_empty() && missing.len() <= entry.parities.len() {
+            if let Some(rec) = rs_solve(&entry.parts, &entry.parities, &missing) {
+                let cnt = entry.parts.len();
+                for (&idx, mut r) in missing.iter().zip(rec) {
+                    let want = if idx + 1 == cnt { entry.last_len } else { entry.seg };
+                    r.truncate(want.min(SEG_PAYLOAD));
+                    entry.parts[idx] = Some(r);
                 }
-                if let Some(p) = p {
-                    for (r, b) in rec.iter_mut().zip(p.iter()) {
-                        *r ^= *b;
-                    }
+                self.fec_recovered += 1;
+                if missing.len() > 1 {
+                    self.fec_recovered_multi += 1;
                 }
             }
-            let want = if idx + 1 == cnt { entry.last_len } else { entry.seg };
-            rec.truncate(want.min(SEG_PAYLOAD));
-            entry.parts[idx] = Some(rec);
-            self.fec_recovered += 1;
         }
         let entry = self.pending.get(&seg.frame_id)?;
         if entry.parts.iter().all(|s| s.is_some()) {
@@ -334,17 +572,24 @@ impl Reassembler {
     ///
     /// Only deliver while >= `min_frac` of the blocks remain (past half lost there is more garbage
     /// than signal; better keep the old picture). Returns (id, src, data) per frame.
+    ///
+    /// v40.53: and only once no block has come for it in `quiet` - while retransmissions are still
+    /// filling it in it is not given up. `lag` alone took a keyframe of 43 blocks (the repeat step,
+    /// 8.5 KB) to the decoder 140 ms after it was sent, 5.4 KB of it, before its retransmissions
+    /// came; it did not decode, nor did anything after it, and every keyframe asked for after it
+    /// went the same way - ten minutes without a picture on the bench (7/10).
     pub fn take_stale(
         &mut self,
         newest_id: u32,
         lag: u32,
         min_frac: f32,
+        quiet: std::time::Duration,
     ) -> Vec<(u32, SourceType, Vec<u8>)> {
         let ids: Vec<u32> = self
             .pending
-            .keys()
-            .copied()
-            .filter(|&id| id + lag <= newest_id)
+            .iter()
+            .filter(|(id, e)| **id + lag <= newest_id && e.last.elapsed() >= quiet)
+            .map(|(id, _)| *id)
             .collect();
         let mut out = Vec::new();
         for id in ids {
@@ -369,6 +614,12 @@ impl Reassembler {
         self.pending.retain(|&id, _| id + keep >= newest_id);
     }
 
+    /// v40.53: frame `id` is incomplete and still being filled in: a block came for it within
+    /// `quiet`, and its first one within `max`.
+    pub fn progressing(&self, id: u32, quiet: std::time::Duration, max: std::time::Duration) -> bool {
+        self.pending.get(&id).is_some_and(|e| e.last.elapsed() < quiet && e.born.elapsed() < max)
+    }
+
     /// v37.1: whether frame `id` has a partial fragment in the funnel. The RX uses it to tell a
     /// "never sent" hole (the TX advances the id on a tick with no frame / a frame dropped by
     /// budget) from a "lost on the way" hole (a fragment trace exists): only the second kind is
@@ -388,7 +639,7 @@ mod tests {
         let data: Vec<u8> = (0..5000u32).map(|i| (i * 13 + 7) as u8).collect();
         let blocks = packetize_fec(7, SourceType::H264, &data, true);
         let n_data = 5000usize.div_ceil(SEG_PAYLOAD);
-        assert_eq!(blocks.len(), n_data + 1, "phai co 1 block parity");
+        assert_eq!(blocks.len(), n_data + 1, "there must be 1 parity block");
         // try DROPPING each data block in turn
         for drop_i in 0..n_data {
             let mut re = Reassembler::new();
@@ -404,7 +655,7 @@ mod tests {
                 }
             }
             let (_, _, got) = out.unwrap_or_else(|| panic!("lost block {drop_i} -> could NOT be recovered"));
-            assert_eq!(got, data, "du lieu dung lai SAI khi mat block {drop_i}");
+            assert_eq!(got, data, "the data rebuilt WRONG with block {drop_i} lost");
         }
     }
 
@@ -440,7 +691,7 @@ mod tests {
         // normal path: the data block arrives first -> the frame comes out at once
         let mut r = Reassembler::default();
         let dat = parse_block(&out[0]).expect("data parse");
-        let done = r.push(dat).expect("du lieu du -> ra frame");
+        let done = r.push(dat).expect("the data whole -> a frame out");
         assert_eq!(&done.2[..100], &data[..]);
     }
 
@@ -452,7 +703,7 @@ mod tests {
         let mut r = Reassembler::default();
         let par = parse_block(&out[1]).expect("parity parse");
         let done = r.push(par);
-        assert!(done.is_some(), "n=1: chi parity la du de dung lai");
+        assert!(done.is_some(), "n=1: the parity alone is enough to rebuild");
         assert_eq!(&done.unwrap().2[..300], &data[..]);
     }
 
@@ -490,6 +741,70 @@ mod tests {
         let b = packetize_fec_seg(3, SourceType::H264, &data, true, SEG_PAYLOAD);
         assert_eq!(a, b);
         assert!(a.iter().all(|blk| blk[2] == 1));
+    }
+
+    #[test]
+    fn rs_dung_lai_moi_kieu_mat_toi_k_khoi() {
+        // v40.53: any pattern of up to k lost blocks among the n + k (data and parity alike)
+        // gives the frame back byte for byte; one more, nothing (and no panic)
+        let mut rng = 12345u64;
+        let mut rnd = |m: usize| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % m as u64) as usize
+        };
+        for (len, seg, k) in [(5000usize, SEG_PAYLOAD, 3usize), (9000, 424, 5), (424, 424, 2), (10, 199, 3),
+                              (40_000, 424, 12), (1300, 649, 4), (60_000, 199, 8)] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 % 253) as u8 + 1).collect();
+            let blocks = packetize_rs(77, SourceType::H264, &data, seg, k);
+            let n = len.div_ceil(seg).max(1);
+            let k_eff = if n > RS_MAX_DATA { 1 } else { k };
+            assert_eq!(blocks.len(), n + k_eff, "len {len} seg {seg}");
+            for trial in 0..40 {
+                let lose = if trial % 5 == 4 { k_eff + 1 } else { 1 + rnd(k_eff) };
+                let mut lost = std::collections::BTreeSet::new();
+                while lost.len() < lose.min(blocks.len()) {
+                    lost.insert(rnd(blocks.len()));
+                }
+                let mut r = Reassembler::new();
+                let mut got = None;
+                for (i, b) in blocks.iter().enumerate() {
+                    if lost.contains(&i) {
+                        continue;
+                    }
+                    if let Some(f) = r.push(parse_block(b).expect("parses")) {
+                        got = Some(f);
+                    }
+                }
+                let data_lost = lost.iter().filter(|&&i| i < n).count();
+                if lose <= k_eff || data_lost == 0 {
+                    let (_, _, out) = got.unwrap_or_else(|| panic!("len {len} seg {seg} k {k}: lost {lost:?} not rebuilt"));
+                    assert_eq!(out, data, "len {len} seg {seg} lost {lost:?}");
+                } else {
+                    assert!(got.is_none(), "len {len}: {lose} lost > k {k_eff}, yet a frame came out");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rs_k1_la_xor_cu_va_hang_dau_van_la_xor() {
+        // k = 1: exactly the old packetizer; k > 1: its first parity block is still the XOR one
+        // (version 1/2, an old receiver uses it) and the rest are versions 3/4
+        for seg in [SEG_PAYLOAD, 424] {
+            let data: Vec<u8> = (0..3000).map(|i| (i % 11) as u8).collect();
+            let old = packetize_fec_seg(5, SourceType::H264, &data, true, seg);
+            assert_eq!(packetize_rs(5, SourceType::H264, &data, seg, 1), old);
+            let new = packetize_rs(5, SourceType::H264, &data, seg, 4);
+            assert_eq!(&new[..old.len()], &old[..]);
+            let v = if seg < SEG_PAYLOAD { 4 } else { 3 };
+            assert!(new[old.len()..].iter().all(|b| b[2] == v));
+        }
+        assert_eq!(parity_for(5, 0.0, 0.02, 8), 1);
+        assert_eq!(parity_for(5, 0.05, 0.02, 8), 2);
+        assert!(parity_for(40, 0.10, 0.005, 30) >= 9);
+        assert_eq!(parity_for(3, 0.5, 0.001, 2), 2, "capped");
     }
 
     #[test]

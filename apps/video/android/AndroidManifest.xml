@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- NyxHop mobile (ground or aircraft end). App KHÔNG có code Java: NativeActivity nằm sẵn
-     trong framework, mọi thứ chạy trong libnyx_mobile.so (Rust).
-     hasCode="false" -> khỏi cần classes.dex. -->
+<!-- NyxHop mobile (ground or aircraft end). No Java code: NativeActivity is part of the
+     framework, everything runs in libnyx_mobile.so (Rust).
+     hasCode="false" -> no classes.dex needed. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.nyxhop.mobile"
     android:versionCode="1"
     android:versionName="0.1">
 
-    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="34" />
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="34" />
 
-    <!-- nối daemon board qua WiFi hoặc USB-C→Ethernet -->
+    <!-- to the board's daemon over WiFi or USB-C to Ethernet -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- màn không tắt khi đang xem video -->
+    <!-- the screen stays on while the video plays -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- the phone's own camera as the aircraft video source (asked for at run time) -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -32,7 +32,7 @@
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
             android:screenOrientation="sensorLandscape"
             android:launchMode="singleTask">
-            <!-- tên .so (bỏ tiền tố lib và đuôi .so) -->
+            <!-- the .so's name (without the lib prefix and the .so suffix) -->
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="nyx_mobile" />

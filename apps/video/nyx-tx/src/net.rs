@@ -127,7 +127,7 @@ fn feedback_loop(shared: Arc<Shared>, addr: String, nack_tx: Sender<u64>) {
         match TcpStream::connect(&addr) {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
-                // v21.1: watchdog half-open (xem connect_loop)
+                // v21.1: watchdog half-open (see connect_loop)
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
                 log(&format!("feedback link connected to {addr}"));
                 logged_fail = false;
@@ -243,10 +243,18 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                 fb.ltr.push((kind, idr_pic_id, marked, current));
             }
             Ok(Msg::Nack { seq }) => {
+                // pairs with "nack-out" in nyx-rx's log (see there)
+                nyx_common::logging::log(&format!("nack-in seq={seq} lsb={}", seq & 0xFF));
                 let _ = nack_tx.send(seq);
                 // the pass-through worker sleeps on this; a retransmission must not wait for
                 // the next camera frame
                 shared.rtsp.aus_cv.notify_all();
+            }
+            Ok(Msg::UserText { text }) if text.starts_with("!cap ") => {
+                // the ground's decoding ceiling (nyx-radio-node GND_CAP_KBPS): a command, not a message
+                if let Ok(k) = text[5..].trim().parse::<u32>() {
+                    crate::worker::far_cap_set(k);
+                }
             }
             Ok(Msg::UserText { text }) => {
                 nyx_common::logging::log(&format!("MSG received: {text}"));
@@ -268,6 +276,9 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                 let name = match state { 0 => "locked", 1 => "trial", 2 => "licensed", _ => "nogate" };
                 *shared.lic_info.lock().unwrap() = format!(
                     "lic_dna={dna:015x}\nlic_state={name}\nlic_min={minutes}\nlic_trial={trial_min}\nlic_ver={ver}\n");
+            }
+            Ok(Msg::ChanRates { rates }) => {
+                *shared.chan_rates.lock().unwrap() = Some((std::time::Instant::now(), rates));
             }
             Ok(Msg::TxChan { hz }) => {
                 if shared.chan_hz.swap(hz, Ordering::Relaxed) != hz {

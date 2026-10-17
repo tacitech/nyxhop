@@ -6,6 +6,7 @@
 //! it over the control channel (`license far`). Laid out for a narrow, touch
 //! screen: nothing wider than the panel, buttons finger-sized.
 
+use crate::i18n::t;
 use egui::Color32;
 use std::collections::HashMap;
 
@@ -30,15 +31,24 @@ fn state_block(ui: &mut egui::Ui, label: &str, kv: &HashMap<String, String>) {
     let g = |k: &str| kv.get(k).cloned().unwrap_or_else(|| "?".into());
     let ls = g("lic_state");
     let usage = match ls.as_str() {
-        "licensed" => format!("{} min used", g("lic_min")),
-        "trial" => format!("trial {} of {} min used", g("lic_min"), g("lic_trial")),
-        "locked" => "trial over - video off".to_string(),
-        "nogate" => "no licence gate in this bitstream".to_string(),
+        "licensed" => crate::tf!("{} min used", "đã dùng {} phút", g("lic_min")),
+        "trial" => crate::tf!("trial {} of {} min used", "dùng thử: đã dùng {} / {} phút", g("lic_min"), g("lic_trial")),
+        "locked" => t("trial over - video off", "hết hạn dùng thử - đã tắt video").to_string(),
+        "nogate" => t("no licence gate in this bitstream", "mạch này không cần bản quyền").to_string(),
         _ => String::new(),
+    };
+    // the state word as the board says it, in the language on screen (the colour keys on the
+    // board's word)
+    let shown = match ls.as_str() {
+        "licensed" => t("licensed", "đã kích hoạt").to_string(),
+        "trial" => t("trial", "dùng thử").to_string(),
+        "locked" => t("locked", "đã khoá").to_string(),
+        "nogate" => t("nogate", "không khoá").to_string(),
+        _ => ls.clone(),
     };
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(label).strong());
-        ui.colored_label(state_color(&ls), ls.clone());
+        ui.colored_label(state_color(&ls), shown);
         if !usage.is_empty() {
             ui.label(egui::RichText::new(usage).small().color(Color32::GRAY));
         }
@@ -46,17 +56,23 @@ fn state_block(ui: &mut egui::Ui, label: &str, kv: &HashMap<String, String>) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("DNA {}", g("lic_dna"))).monospace());
         if ui
-            .add(egui::Button::new("Copy").min_size(egui::vec2(70.0, 32.0)))
-            .on_hover_text("The board's device DNA. Send it with a licence request; the licence fits this board only.")
+            .add(egui::Button::new(t("Copy", "Sao chép")).min_size(egui::vec2(70.0, 32.0)))
+            .on_hover_text(t(
+                "The board's device DNA. Send it with a licence request; the licence fits this board only.",
+                "Mã DNA của mạch. Gửi kèm khi xin bản quyền; bản quyền chỉ dùng được cho mạch này.",
+            ))
             .clicked()
         {
             ui.ctx().copy_text(g("lic_dna"));
         }
     });
     ui.label(
-        egui::RichText::new("The DNA is the chip's factory serial number, not personal data; a licence works offline and only on this chip.")
-            .small()
-            .color(crate::theme::DIM),
+        egui::RichText::new(t(
+            "The DNA is the chip's factory serial number, not personal data; a licence works offline and only on this chip.",
+            "DNA là số sê-ri gốc của chip, không phải dữ liệu cá nhân; bản quyền dùng được khi không có mạng và chỉ trên chip này.",
+        ))
+        .small()
+        .color(crate::theme::DIM),
     );
     if let Some(e) = kv.get("lic_err") {
         if e != "-" && !e.is_empty() {
@@ -75,48 +91,57 @@ pub fn lic_rows(
     status: &mut String,
     send: &mut dyn FnMut(String),
 ) {
-    state_block(ui, "This board", kv);
+    state_block(ui, t("This board", "Mạch này"), kv);
     let far_kv = far.map(parse_kv).filter(|m| m.contains_key("lic_dna"));
     if let Some(fk) = &far_kv {
         ui.add_space(4.0);
-        state_block(ui, "Aircraft", fk);
+        state_block(ui, t("Aircraft", "Máy bay"), fk);
     }
     ui.add_space(4.0);
     ui.add(
         egui::TextEdit::multiline(buf)
-            .hint_text("paste a licence file here (nyxhop-license 1 ...)")
+            .hint_text(t(
+                "paste a licence file here (nyxhop-license 1 ...)",
+                "dán tệp bản quyền vào đây (nyxhop-license 1 ...)",
+            ))
             .desired_rows(2)
             .desired_width(ui.available_width()),
     );
     let parsed = nyx_proto::lic::License::parse(buf);
     ui.horizontal_wrapped(|ui| {
         if ui
-            .add(egui::Button::new("Apply here").min_size(egui::vec2(120.0, 38.0)))
-            .on_hover_text("Load the pasted licence on this board (its gate checks it against its DNA).")
+            .add(egui::Button::new(t("Apply here", "Áp dụng ở đây")).min_size(egui::vec2(120.0, 38.0)))
+            .on_hover_text(t(
+                "Load the pasted licence on this board (its gate checks it against its DNA).",
+                "Nạp bản quyền vừa dán vào mạch này (mạch tự kiểm tra theo DNA của nó).",
+            ))
             .clicked()
         {
             match &parsed {
                 Ok(l) => {
                     send(format!("license put {}", l.to_hex()));
-                    *status = format!("sent {}", l.summary());
+                    *status = crate::tf!("sent {}", "đã gửi {}", l.summary());
                     buf.clear();
                 }
-                Err(e) => *status = format!("not a licence: {e}"),
+                Err(e) => *status = crate::tf!("not a licence: {e}", "không phải bản quyền: {e}"),
             }
         }
         if far_kv.is_some()
             && ui
-                .add(egui::Button::new("Send to aircraft").min_size(egui::vec2(150.0, 38.0)))
-                .on_hover_text("Push the pasted licence to the linked aircraft over the control channel (20 s).")
+                .add(egui::Button::new(t("Send to aircraft", "Gửi lên máy bay")).min_size(egui::vec2(150.0, 38.0)))
+                .on_hover_text(t(
+                    "Push the pasted licence to the linked aircraft over the control channel (20 s).",
+                    "Gửi bản quyền vừa dán lên máy bay đã link qua kênh điều khiển (20 s).",
+                ))
                 .clicked()
         {
             match &parsed {
                 Ok(l) => {
                     send(format!("license far {}", l.to_hex()));
-                    *status = format!("pushing {} to the aircraft", l.summary());
+                    *status = crate::tf!("pushing {} to the aircraft", "đang gửi {} lên máy bay", l.summary());
                     buf.clear();
                 }
-                Err(e) => *status = format!("not a licence: {e}"),
+                Err(e) => *status = crate::tf!("not a licence: {e}", "không phải bản quyền: {e}"),
             }
         }
     });

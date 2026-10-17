@@ -99,7 +99,7 @@ def main():
     #    reads "-p 31" as a package name and panics.
     if "--skip-cargo" not in sys.argv:
         env = dict(os.environ, ANDROID_NDK_HOME=NDK, ANDROID_HOME=SDK)
-        run(["cargo", "ndk", "-t", "arm64-v8a", "--platform", "31",
+        run(["cargo", "ndk", "-t", "arm64-v8a", "--platform", "28",
              "build", "--release", "-p", "nyx-mobile", "--lib"],
             cwd=ROOT, env=env)
     if not os.path.exists(SO):

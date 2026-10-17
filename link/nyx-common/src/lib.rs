@@ -8,6 +8,8 @@ pub mod codec;
 #[path = "codec_none.rs"]
 pub mod codec;
 pub mod control;
+/// English or Vietnamese on screen (`t`, `tf!`), and a font that draws Vietnamese.
+pub mod i18n;
 /// v40.33 licence rows shared by the apps.
 pub mod licpanel;
 /// v40.34 shared touch-first user interface (HUD, drawer, sections).
@@ -22,6 +24,8 @@ pub mod source;
 pub mod stamp;
 /// The start screen of the combined apps (which end, which board, put it into the role).
 pub mod start;
+/// Telling Windows the app is foreground work (EcoQoS off, above normal priority).
+pub mod sys;
 pub mod theme;
 
 /// v40.49: the SNR a receiver reports back is measured on frames that arrive (on a board: blocks

@@ -8,6 +8,7 @@
 //!
 //!   nyxhop                       the start screen (remembers the last choice in nyxhop.cfg)
 //!   nyxhop --mode rx|tx --board 192.168.0.12 [--no-role]   straight in
+//!   ... --samp 30720000           the 20 MHz mode (both ends, and the boards' `fs`)
 
 use std::sync::Arc;
 
@@ -25,6 +26,8 @@ struct App {
     mode: Mode,
     chooser: Chooser,
     cfg_path: std::path::PathBuf,
+    /// `--samp <Hz>` handed to the hosted app (empty = its default, 15.36 Msps)
+    samp: String,
 }
 
 impl App {
@@ -44,7 +47,9 @@ impl App {
         if board.is_empty() {
             board = "192.168.0.12".into();
         }
-        let app = App { mode: Mode::Choose, chooser: Chooser::new(board, set_role, "this computer"), cfg_path };
+        let samp = opts.arg("--samp", "");
+        let device = nyx_common::i18n::t("this computer", "máy tính này");
+        let app = App { mode: Mode::Choose, chooser: Chooser::new(board, set_role, device), cfg_path, samp };
         if let Some(role) = Role::from_word(&opts.arg("--mode", "")) {
             app.chooser.start(role);
         }
@@ -67,13 +72,25 @@ impl App {
     fn take_over(&mut self, role: Role) {
         let channel = format!("{}:{}", self.chooser.board.trim(), role.port());
         log(&format!("{}: channel {channel}", role.label()));
+        let mut args = vec!["--channel".to_string(), channel];
+        if !self.samp.is_empty() {
+            args.extend(["--samp".to_string(), self.samp.clone()]);
+        }
+        // the screens' own ports, from this app's command line (the UDP pipe and the console)
+        let own = Opts::from_env();
+        for k in ["--tlm-in", "--tlm-out", "--ctl"] {
+            let v = own.arg(k, "");
+            if !v.is_empty() {
+                args.extend([k.to_string(), v]);
+            }
+        }
         self.mode = match role {
             Role::Ground => {
-                let shared = nyx_rx::setup(&Opts::from_list(["--channel", channel.as_str()]));
+                let shared = nyx_rx::setup(&Opts::from_list(args));
                 Mode::Rx(nyx_rx::RxApp::new(shared.clone()), shared)
             }
             Role::Aircraft => {
-                let shared = nyx_tx::setup(&Opts::from_list(["--channel", channel.as_str()]));
+                let shared = nyx_tx::setup(&Opts::from_list(args));
                 Mode::Tx(nyx_tx::TxApp::new(shared.clone()), shared)
             }
         };
@@ -91,7 +108,12 @@ impl eframe::App for App {
             log(&format!("board {board} is now the {} end: starting over as {}", other.board_role(), other.label()));
             self.save_choice(other);
             if let Ok(exe) = std::env::current_exe() {
-                let r = std::process::Command::new(exe).args(["--mode", other.board_role(), "--board", &board]).spawn();
+                let mut cmd = std::process::Command::new(exe);
+                cmd.args(["--mode", other.board_role(), "--board", &board]);
+                if !self.samp.is_empty() {
+                    cmd.args(["--samp", &self.samp]);
+                }
+                let r = cmd.spawn();
                 if let Err(e) = r {
                     log(&format!("could not start over: {e}"));
                 }
@@ -112,14 +134,29 @@ impl eframe::App for App {
     }
 }
 
+// Not the Windows heap: its lock, with the network thread, the demodulators, the video decoder and
+// the GUI all allocating, has a pipeline waiting on it with the CPU idle (on feature/dvbs2 a
+// receiver kept up at 0.5x on 15.6 cores "busy", and on 7.5 with this).
+#[cfg(windows)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> eframe::Result {
     logging::init("nyxhop");
+    // foreground work whatever window is in front (nyx_common::sys)
+    nyx_common::sys::keep_up();
     let opts = Opts::from_env();
     // the choice file sits next to the exe, or in the cwd when the exe dir is not writable
     let cfg_path = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("nyxhop.cfg")))
         .unwrap_or_else(|| "nyxhop.cfg".into());
+    // the language (start screen, drawers) is kept beside nyxhop.cfg
+    let lang_dir = cfg_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    nyx_common::i18n::init(lang_dir);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([560.0, 900.0]).with_title("NyxHop"),
         ..Default::default()

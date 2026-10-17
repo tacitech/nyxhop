@@ -21,6 +21,11 @@ use crate::{Codec, Rolling, Shared, TxConfig};
 /// log-MAP demap and phase-slope fix (AWGN waterfalls now 4/4/6/9/14/16 dB
 /// channel SNR; the RX estimate reads ~2 dB above channel SNR).
 const MCS_SNR_THRESH: [f32; 6] = [0.0, 4.0, 7.0, 10.5, 15.5, 17.5];
+
+/// The threshold of rung `i` for the PHY the board runs (branch B: the ofdm64 PHY's own).
+fn snr_thresh(i: usize) -> f32 {
+    if crate::phy64() { nyx_proto::PHY64_SNR_THRESH[i.min(5)] } else { MCS_SNR_THRESH[i.min(5)] }
+}
 /// v40.45 interference regime: the receiver reports an SNR this far above the
 /// current rung's threshold and still loses blocks. That loss is not the fading
 /// channel (a lower rung would not fix it) but something else on the air - a
@@ -30,12 +35,44 @@ const MCS_SNR_THRESH: [f32; 6] = [0.0, 4.0, 7.0, 10.5, 15.5, 17.5];
 /// video frames lost, minstrel walked MCS 5 -> 1, fps 30 -> 15, 1.9 Mbps ->
 /// 0.18 Mbps, and the loss did not move. General rule, any band.
 const INTERF_MARGIN_DB: f32 = 6.0;
+/// v40.53: the repeat step below MCS0 - in when MCS0's blocks fall under this (two windows;
+/// the stream itself is at MCS0 then, a hundred blocks a second, the number is a good one).
+/// Not 0.75: a picture is several blocks, and MCS0 at 0.8-0.9 kept tearing them (bench 5/10,
+/// A -44 dB: 16 % CRC failures, 70 pictures lost in 40 s, never under 0.75 for two windows),
+/// where the step - about 3 dB more robust - carries nearly all of them...
+const REP2_IN_PROB: f32 = 0.85;
+/// ...out when MCS0's probes are back at this, counted over the last REP2_OUT_WIN windows and at
+/// least REP2_OUT_N of them. MCS0 gets 4-8 probe blocks a window there: "three windows at 0.85"
+/// was met by luck at -44 dB on the bench (5/10), out and back in every 10-20 s, the pictures
+/// lost at each return to MCS0. 38 of 40 at a true 0.8 happens 1 time in 120.
+const REP2_OUT_PROB: f32 = 0.95;
+const REP2_OUT_N: u64 = 40;
+const REP2_OUT_WIN: usize = 8;
 /// ...and the current rung's block success below this counts as "losing".
 const INTERF_LOSS_PROB: f32 = 0.9;
+/// A report this long after the last block the far end got, still with none since: the link is
+/// QUIET. Its SNR is then no measure of the air the blocks die in - the receiving app's is the last
+/// good frame's (held 300 ms, then falling), the ground board's own only while our packets still
+/// come in - so the loss is not taken for interference, and an SNR well under the rung is believed
+/// whatever the rung's own numbers say. 14/10 and 13/10, the aircraft 20 dB down: "interference
+/// regime ON" at 34.5 dB a second after the fade (MCS5 held 1 s, MCS4 6 s more), and MCS2 held 8 s
+/// at a reported 0 dB on its numbers from before. Interference never silences a link this long:
+/// WiFi's bursts are milliseconds, and between them the blocks get through.
+const QUIET: Duration = Duration::from_millis(600);
 /// v40.50: a climb lost again within this many seconds failed (see `climb_at` in the worker)...
 const CLIMB_FAIL_S: u64 = 10;
 /// ...and a rung held this long clears its back-off.
 const CLIMB_OK_S: u64 = 20;
+/// v40.53: our encoder's bitrate ceiling when `maxkbps` is 0, bits per pixel and frame: 640x480@30
+/// 1.84 Mbit/s, 1280x720@30 5.5. The budget used to fill whatever the air carried: the phone
+/// (XCover 5, 640x480@30) at 5-7.6 Mbit/s on MCS4-5 two rooms apart, a picture of up to 31
+/// blocks, each a chance to lose it, for no sharpness the eye can tell from 2 Mbit/s at that size.
+/// The resolution ladder reads the bitrate from before the cap (`uncapped_bitrate`), so a small
+/// tier's cap does not keep it from climbing.
+const AUTO_BPP: f32 = 0.2;
+/// v40.53: a rung's block success counted as clean by the reliability floor (the same 0.95 the
+/// probes call a rung certain at).
+const REL_OK: f32 = 0.95;
 /// How many recent PHY frames stay cached for ARQ.
 const ARQ_CACHE: usize = 256;
 /// Max retransmissions per PHY frame (each combine at RX is worth ~+3 dB).
@@ -92,6 +129,37 @@ const TX_PACE_MS: f32 = 3.0;
 /// `txenc_us`). 0 = not heard yet, and then TX_PACE_MS stands in (the daemon's default). The
 /// constant used to be the only source, so a board paced faster was never used faster.
 pub static BOARD_FRAME_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Branch B: the share of the air (per mille, the board's last second) the board's IP port took -
+/// the IP bridge beside the video (`ip_air_pm` in its stats). The board sends the IP's packets
+/// only when no video block waits, so the video's ceiling (conv_air_ceiling_bps) stays the whole
+/// air and the rate control decides nothing on it: the air the IP takes is air the video left,
+/// never a sign the link has less for the video. In `stats` (ip_air_pm) beside the budget.
+pub static BOARD_IP_AIR_PM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Branch B: the board's channel width changed (lib.rs, from its `stats`): a count, then the
+/// divisors of 20 MHz before and after, {seq, old << 8, new}.
+static BW_EVENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// ... and how long after it the rate control reads nothing as loss (the change's outage: ~0.3 s
+/// since 13/10, then the board's queue of the old width's pace)
+const BW_HOLD: Duration = Duration::from_secs(3);
+/// ... the rung it jumps to has this much SNR over its threshold: held there for BW_HOLD, it must
+/// not be one that loses (13/10: 5 -> 20 MHz at 22 dB, MCS5 with 1.5 dB - where the rate control
+/// keeps MCS4 at that SNR - and frames lost in the hold)
+const BW_JUMP_MARGIN_DB: f32 = 3.0;
+/// ... when the board made it: the stats come every 2 s, the board says how long ago (chbw_ms)
+static BW_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+pub fn note_width_change(old: u64, new: u64, age_ms: Option<u64>) {
+    // (an age past one read of `stats` is not this change's: a board from before 13/10 dated its
+    // width after the change, a read in between gave the change before)
+    let at = age_ms
+        .filter(|ms| *ms <= 3000)
+        .and_then(|ms| Instant::now().checked_sub(Duration::from_millis(ms)))
+        .unwrap_or_else(Instant::now);
+    *BW_AT.lock().unwrap() = Some(at);
+    let seq = (BW_EVENT.load(Ordering::Relaxed) >> 16) + 1;
+    BW_EVENT.store(seq << 16 | (old & 0xFF) << 8 | (new & 0xFF), Ordering::Relaxed);
+}
 
 /// v40.48: the board sends small conv blocks in compact form (`txcompact=1` in its stats, read
 /// by the GUI's board poll), so a block cut to `conv_seg_one_frame` bytes is ONE frame at its
@@ -101,7 +169,10 @@ static COMPACT_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Application bytes a block carries at conv step `i`, and the frames it takes on air.
 fn block_shape(i: usize) -> (f32, f32) {
-    if COMPACT_ON.load(Ordering::Relaxed) {
+    if crate::phy64() {
+        // branch B: a whole segment in one packet at every rung
+        (nyx_link::SEG_PAYLOAD as f32, 1.0)
+    } else if COMPACT_ON.load(Ordering::Relaxed) {
         (nyx_proto::conv_seg_one_frame(i) as f32, 1.0)
     } else {
         (FRAME_PAYLOAD_BYTES as f32, conv_frames(i, FRAME_PAYLOAD_BYTES) as f32)
@@ -117,17 +188,92 @@ fn board_frame_ms(air_gap_ms: f32) -> f32 {
     }
 }
 
+/// v40.53: the block loss at the rung in use while the rate control is in the interference
+/// regime (q16; 0 otherwise = the XOR alone), for the parity a frame gets, and the
+/// parity blocks past the first one a video frame has been getting lately (q8), for the budget.
+static FEC_LOSS_Q16: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Branch B: the block loss at the rung in use, every window whatever the regime (q16) - on the
+/// ofdm64 PHY every picture's parity is sized from it (the air has room for it there).
+static PHY64_LOSS_Q16: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The ground's own ceiling on the video, kbps ("!cap N" from a ground that decodes on its ARM, the
+/// Pluto's - its decoding falls behind long before the air does, and this end's rate control only
+/// sees the air), and when it came: older than FAR_CAP_TTL it is gone.
+static FAR_CAP: std::sync::Mutex<Option<(u32, Instant)>> = std::sync::Mutex::new(None);
+const FAR_CAP_TTL: Duration = Duration::from_secs(15);
+
+pub fn far_cap_set(kbps: u32) {
+    let mut c = FAR_CAP.lock().unwrap();
+    if c.is_none_or(|(k, _)| k != kbps) {
+        log(&format!("far cap: the ground keeps up with {kbps} kbps of video"));
+    }
+    *c = Some((kbps, Instant::now()));
+}
+
+fn far_cap_kbps() -> Option<u32> {
+    FAR_CAP.lock().unwrap().filter(|(_, t)| t.elapsed() < FAR_CAP_TTL).map(|(k, _)| k)
+}
+static FEC_EXTRA_Q8: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// ... the rung that loss was measured at: a picture going out at another (the rate control just
+/// stepped, or the repeat step) gets the XOR alone - after a fade the loss of the rung it fled
+/// was handed to the keyframe asked for at MCS0 (sim drop: 40-66 pictures lost against 0-1)
+static FEC_RUNG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+/// ... losses come in bursts (WiFi takes neighbouring frames), the independent-loss count is
+/// stretched by this
+const FEC_BURST: f32 = 1.5;
+/// ... and the chance a picture loses more blocks than its parity can give back: a keyframe
+/// (everything after it needs it), any other picture (at most two parity blocks, and above MCS0)
+const FEC_TARGET_KEY: f32 = 0.005;
+const FEC_TARGET: f32 = 0.02;
+
+/// v40.53: an H.264 access unit that starts a picture sequence (SPS or an IDR slice first)
+fn h264_is_key(d: &[u8]) -> bool {
+    let lim = d.len().min(256);
+    let mut i = 0;
+    while i + 3 < lim {
+        if d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1 {
+            match d[i + 3] & 0x1F {
+                5 | 7 => return true,
+                1 => return false,
+                _ => i += 3,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Extra parity blocks per video frame lately (beyond the one XOR the budget always counts).
+fn fec_extra() -> f32 {
+    FEC_EXTRA_Q8.load(Ordering::Relaxed) as f32 / 256.0
+}
+
 fn conv_air_ceiling_bps(
     air_gap_ms: f32,
     simulcast: bool,
-    mcs: Mcs,
+    rung: usize,
     payload_bits: f32,
     fps: f32,
     fec: bool,
 ) -> f32 {
+    if crate::phy64() {
+        // branch B: blocks back to back at this rung's packet time, 90 % of it; the base layer's
+        // blocks (15 fps x 2 at MCS 0) take theirs at MCS 0
+        let per = nyx_proto::phy64_air_us(rung.min(6), FRAME_PAYLOAD_BYTES);
+        let mut blocks_ps = 1e6 / per * 0.9;
+        if simulcast {
+            blocks_ps = (blocks_ps - 30.0 * nyx_proto::phy64_air_us(0, FRAME_PAYLOAD_BYTES) / per).max(30.0);
+        }
+        if fec {
+            blocks_ps = (blocks_ps - fps.max(1.0) * (1.0 + fec_extra())).max(blocks_ps * 0.5);
+        }
+        let _ = (air_gap_ms, payload_bits);
+        return blocks_ps * nyx_link::SEG_PAYLOAD as f32 * 8.0 * 0.85;
+    }
     let period_ms = board_frame_ms(air_gap_ms);
     // v40.48: with compact blocks a block is one frame and carries a rung-sized segment
-    let (seg_bytes, nfrag) = block_shape(mcs.index().min(5));
+    let (seg_bytes, nfrag) = block_shape(rung.min(6));
     let payload_bits = if COMPACT_ON.load(Ordering::Relaxed) { seg_bytes * 8.0 } else { payload_bits };
     // Measured: right at the ceiling (328 frames/s) the receiving board loses ~1.4 % of frames;
     // with 1 frame/block (MCS5, 308 frames/s) that is still a clean 30 fps, but with 4 frames/block
@@ -144,8 +290,8 @@ fn conv_air_ceiling_bps(
     }
     let mut blocks_ps = air_fps / nfrag.max(1.0);
     if fec {
-        // parity = +1 block per video frame
-        blocks_ps = (blocks_ps - fps.max(1.0)).max(blocks_ps * 0.5);
+        // parity = +1 block per video frame, and the Reed-Solomon rows past it (v40.53)
+        blocks_ps = (blocks_ps - fps.max(1.0) * (1.0 + fec_extra())).max(blocks_ps * 0.5);
     }
     blocks_ps * payload_bits * 0.85
 }
@@ -282,6 +428,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // (flooding inflates the budget -> ARQ storm, measured on air).
     let mut deliv: Option<(u64, Instant)> = None;
     let mut deliv_rate = 0.0f32;
+    // ... and when the far end last reported one more delivered (see QUIET)
+    let mut segs_seen: Option<u64> = None;
+    let mut segs_adv_at = Instant::now();
     // v7: quality ladder: (w, h, fps, minimum kbps to CLIMB to that rung). width/height/fps in the
     // config are a CEILING: the ladder only steps down.
     const LADDER: &[(usize, usize, f32, f32)] = &[
@@ -292,6 +441,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         (854, 480, 30.0, 750.0),
         (1280, 720, 30.0, 1400.0),
         (1280, 720, 60.0, 2600.0),
+        // branch B: 1080p30 between the two (the ofdm64 PHY carries it at every rung from 16QAM)
+        (1920, 1080, 30.0, 4000.0),
         (1920, 1080, 60.0, 6000.0),
         (2560, 1440, 60.0, 12000.0),
     ];
@@ -300,6 +451,25 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     const TIER_BACKOFF_MAX: Duration = Duration::from_secs(160);
     /// A rung that holds this long is considered good again: its back-off resets.
     const TIER_SETTLED: Duration = Duration::from_secs(45);
+    /// v40.62 SMOOTHNESS (`smoothres`): SMOOTH_IDR_N lost pictures (keyframe requests and LTR
+    /// repairs) within SMOOTH_WIN is a picture breaking up whatever the capacity reads: a rung
+    /// down, to SMOOTH_FLOOR_TIER (640x480@30) at the lowest, the rung's back-off as for any
+    /// fall; the rung above only with at most SMOOTH_UP_MAX in the window. Bench 11/10, 2.4 GHz
+    /// WiFi, Auto on one channel: 720p stalled >= 300 ms 20.8 times a minute (25 lost pictures a
+    /// minute) against 2.8 at 640x480 (6.4), on 3.3 Mbps of a link good for 6.6 - the capacity
+    /// ladder kept 720p.
+    const SMOOTH_WIN: Duration = Duration::from_secs(60);
+    const SMOOTH_IDR_N: usize = 10;
+    const SMOOTH_UP_MAX: usize = 3;
+    const SMOOTH_FLOOR_TIER: usize = 3;
+    /// A link that lost pictures within SMOOTH_WIN climbs only from a rung held SMOOTH_UP_HOLD,
+    /// its last loss SMOOTH_UP_QUIET ago (a clean one climbs at the usual pace). WiFi comes in
+    /// bursts 20-40 s apart: bench 12/10, 854x480 -> 720p30 -> 720p60 -> 1080p in 12 s, each
+    /// rung judged for its 6 s dwell, 44 pictures lost at 1080p in the next 20 s; per rung over
+    /// 8 min, 640x480 lost 2.2 a minute and 1080p 31.
+    const SMOOTH_UP_HOLD: Duration = Duration::from_secs(30);
+    const SMOOTH_UP_QUIET: Duration = Duration::from_secs(20);
+    let mut lost_pics: std::collections::VecDeque<Instant> = std::collections::VecDeque::new();
     let mut cur_tier = LADDER.len() - 1; // seed high, step down with the channel
     let mut tier_since = Instant::now();
     let mut tier_up_since: Option<Instant> = None;
@@ -310,8 +480,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut tier_retry_at: Vec<Option<Instant>> = vec![None; LADDER.len()];
     let mut tier_backoff: Vec<Duration> = vec![TIER_BACKOFF; LADDER.len()];
     let mut link_cap_kbps = 0.0f32; // capacity measured in the PREVIOUS loop
-    // OLLA v32 minstrel-lite: bang thong ke per-rate
-    let mut mn_prob: [f32; 6] = [-1.0; 6]; // <0 = chua co mau
+    // OLLA v32 minstrel-lite: the per-rate statistics
+    let mut mn_prob: [f32; 6] = [-1.0; 6]; // <0 = no sample yet
     // v40.34: smoothed per-rate counts (ok, sent) - the probability is their ratio
     let mut mn_acc: [(f32, f32); 6] = [(0.0, 0.0); 6];
     let mut mn_age: [Instant; 6] = [Instant::now(); 6];
@@ -337,6 +507,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut climb_at: Option<(usize, Instant)> = None;
     let mut retry_at: [Option<Instant>; 6] = [None; 6];
     let mut retry_gap_s = [0u64; 6];
+    // v40.53: the last "back from an outage" return (rung, when). One lost again within
+    // CLIMB_FAIL_S backs that rung off like a failed climb, whatever the SNR then: a marginal link
+    // starves the SNR to 0 every second (no frames for 300 ms), the next frame brings the RSSI air
+    // SNR back (25-47 dB with WiFi on the channel), and it was a return to MCS4 every 2-5 s, each
+    // one dead within a second (two rooms apart, EDUP, 6/10: 18 fps -> 0 -> 18, 355 lost in 40 s)
+    let mut restore_at: Option<(usize, Instant)> = None;
+    let mut rel_low = 0u32; // v40.53: windows in a row the current rung read under REL_OK
     let mut retry_hz = 0u64;
     let mut snr_dip = f32::MAX;
     // ...and the delivered/needed ceiling (air_scale) the video had then
@@ -344,8 +521,21 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // ...and the resolution tier; `back from an outage` hands it to the ladder
     let mut stable_tier = LADDER.len() - 1;
     let mut ladder_restore: Option<usize> = None;
+    // v40.53: the repeat step (conv rung 6, QPSK 1/2 x2, 222 B a frame) below MCS0, for the edge
+    // of coverage. minstrel's table stays 0..5 (the receiver reports no per-rung count for it):
+    // the stream goes out at rung 6 while MCS0 is the chosen rung and its own blocks fail, and
+    // MCS0 keeps being measured by the probe blocks to decide when to come back.
+    let mut rep2_on = false;
+    let mut rep2_in = 0u32;
+    // MCS0's probe blocks (sent, delivered) of the last windows while on the step
+    let mut rep2_probes: VecDeque<(u64, u64)> = VecDeque::new();
+    // windows to leave out after going on the step: the receiver's counts still hold the
+    // stream's own MCS0 blocks (sim: "21/22 ok" two seconds after going on at 0.64)
+    let mut rep2_settle = 0u32;
     let mut surv_cnt = 0u32;   // v40.45: consecutive dead windows while in it
     let mut clean_cnt = 0u32;  // v40.45: consecutive clean windows before leaving it
+    let mut interf_win = 0u32; // v40.53: windows in a row in it (the parity waits for 3)...
+    let mut interf_win_rung = usize::MAX; // ... at one rung
     // v40.45c: delayed second copies (parity blocks, retransmissions) while under interference
     let mut dup_q: std::collections::VecDeque<(Instant, u64, [u8; nyx_link::BLOCK_BYTES])> =
         std::collections::VecDeque::new();
@@ -358,7 +548,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut sent_win_t = Instant::now(); // v30.5: sent measurement window
     let mut sent_ps = 0.0f32;
     let mut segs_last: u64 = 0; // v31: segs_ok on the same window as CQ_IN
-    let mut r_ema = -1.0f32;    // <0 = chua co mau nao
+    let mut r_ema = -1.0f32;    // <0 = no sample yet
     struct CacheEntry {
         seq: u64,
         block: [u8; nyx_link::BLOCK_BYTES],
@@ -377,10 +567,16 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // climb (stuck at MCS0 for minutes). Starting at MCS3 (1-2 frames/block) does not saturate; on
     // a bad channel minstrel steps down on its own (it has statistics).
     let mut auto_mcs = Mcs::ALL[3];
+    // branch B: the last width change seen (BW_EVENT), and the end of its hold
+    let mut bw_seen = 0u64;
+    let mut bw_hold_until = Instant::now();
+    let mut snr_hist: std::collections::VecDeque<(Instant, f32)> = std::collections::VecDeque::new();
+    let mut bw_prev_at: Option<Instant> = None;
     // v40.31: per-channel memory for minstrel. The daemon reports every hop
     // (Msg::TxChan); on a channel we have seen in the last two minutes the MCS and
     // the per-rate statistics it had are restored at once instead of being
     // rediscovered over the next 1-3 s on every hop.
+    let mut last_chan_rung: Option<u8> = None;
     let mut mem_hz: u64 = 0;
     let mut chan_mem: std::collections::HashMap<u64, (usize, [f32; 6], Instant)> =
         std::collections::HashMap::new();
@@ -411,13 +607,6 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     /// the fabric path's budget ceiling counts CAPTURES, not video frames (one video frame of
     /// several blocks = SEVERAL captures).
     const FAB_CAPTURES_PS: f32 = 60.0;
-    /// v22 conv: a conv frame is FIXED at 10 symbols = 713 µs on air; the RX in the PL decodes 135
-    /// frames/s (measured: tap_ovf=0, ~1 % errors). The real ceiling is at the TRANSMIT end: the
-    /// board spends 4.10 ms conv-encoding + 4.42 ms pushing DMA = 8.5 ms/frame -> 117/s. Take 90/s
-    /// for margin; raise it once the conv encoder moves into the fabric (drops the 4.1 ms). Nothing
-    /// to do with cfg.fps: a video frame may be several blocks, and the ceiling is AIRTIME, not
-    /// picture rate.
-    const CONV_FRAMES_PS: f32 = 90.0;
     /// v6.14: the minimum gap between SENDS on the fabric path = the RX's processing period for one
     /// capture. Sending faster than that, the extra blocks NEVER get a capture slot -> a permanent
     /// NACK/ARQ storm (measured: MJPEG q92 at gap 8 ms collapsed). v15 (fabric-rx-multiframe step
@@ -452,9 +641,41 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // v40.48: the gate exists because a retry at MCS0/1 cost five/three frames of a fragmented
     // block; a compact block is one frame at any rung, so there is nothing left to gate
     let low_rung = || {
-        crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) < ARQ_MIN_MCS
-            && !COMPACT_ON.load(Ordering::Relaxed)
+        let r = crate::conv_tx::CUR_MCS.load(Ordering::Relaxed);
+        // (branch B: never - a block is one packet at every rung, a retry costs one block of air)
+        (r < ARQ_MIN_MCS || r == 6) && !COMPACT_ON.load(Ordering::Relaxed) && !crate::phy64()
     };
+    // The conv path's NACKs, answered from the cache AHEAD of the queue (`push_retx`). Between
+    // camera frames as well as after one: see the frame sleep below.
+    macro_rules! answer_conv_nacks {
+        ($cfg:expr, $pass:expr) => {{
+            let nack_rx = net.nacks.lock().unwrap();
+            let max_retx = if interf_on || $pass { MAX_RETX_INTERF } else { MAX_RETX };
+            while let Ok(nseq) = nack_rx.try_recv() {
+                nacks_handled += 1;
+                if !$cfg.arq || low_rung() {
+                    nacks_low += u64::from(low_rung());
+                    continue;
+                }
+                if let Some(entry) = cache
+                    .iter_mut()
+                    .rev()
+                    .find(|e| e.seq & 0xFF == nseq & 0xFF)
+                    // v40.53: the newest block with that sequence, and no Reed-Solomon row: lost
+                    // as the link fades, its retry goes at the rung the rate control fled to (five
+                    // frames a block at MCS0) for a row the data blocks' own retries make useless
+                    .filter(|e| e.retx < max_retx && !nyx_link::is_rs_parity(&e.block))
+                {
+                    entry.retx += 1;
+                    convtx.push_retx(entry.seq, &entry.block);
+                    retransmits += 1;
+                    if $cfg.dup && interf_on {
+                        dup_q.push_back((Instant::now() + DUP_GAP, entry.seq, entry.block));
+                    }
+                }
+            }
+        }};
+    }
     // v20.11 rate diagnostic: time slept in the gap vs net.send per status window
     let mut tp_gap: u64 = 0;
     let mut tp_send: u64 = 0;
@@ -463,6 +684,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut encoder: Option<VideoEncoder> = None;
     // v36 simulcast
     let mut enc_base: Option<VideoEncoder> = None;
+    // v40.62: the size the base encoder was made for (made again when the main layer's changes)
+    let mut enc_base_dims = (0usize, 0usize);
     let mut base_flip = false;
     let mut base_id: u32 = 0;
 
@@ -470,6 +693,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // Time of the most recent IDR (Option: do NOT use Instant::now() - Duration, a Windows Instant
     // counts from boot; lesson learned).
     let mut last_idr: Option<Instant> = None;
+    let mut blind_idrs: u64 = 0; // v40.53: keyframes sent because the feedback was stale
     // v40.24 SELF-RECOVERY AFTER LINK LOSS: an IDR that does not resolve the request (the RX keeps
     // asking) must not be served every 700 ms for ever: at low MCS each IDR spans dozens of PHY
     // frames, 700 ms apart is ~85 % of the airtime in IDRs, P-frames starve, holes keep coming ->
@@ -487,6 +711,11 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     // even at 29 fps video (streak 5, survival 0.25 for no reason).
     let mut idr_segs_at: u64 = 0;
     let mut video_bitrate: u32 = 0;
+    // v40.53: the encoder's bitrate before the picture cap - what the ladder reads as capacity
+    let mut uncapped_bitrate: u32 = 0;
+    // v40.53: air the picture cap leaves unused, as a fraction of the video bitrate: the parity
+    // a picture that is not a keyframe gets past the XOR has to fit in it
+    let mut fec_room: f32 = 0.0;
     // v-lat CONTROL BY DELIVERED/SENT RATIO (the missing piece: the encoder throttling itself to
     // the link). Signal: blocks SENT vs blocks the RX REPORTS DECODED (segs_ok in feedback) over a
     // 1 s window.
@@ -550,6 +779,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         if shared.standby.load(Ordering::Relaxed) {
             shared.webcam.wanted.store(false, Ordering::Relaxed);
             shared.rtsp.wanted.store(false, Ordering::Relaxed);
+            shared.vfile.wanted.store(false, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(200));
             next_frame = Instant::now();
             continue;
@@ -559,6 +789,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             .wanted
             .store(cfg.source == SourceKind::Webcam, Ordering::Relaxed);
         shared.rtsp.wanted.store(cfg.source == SourceKind::Rtsp, Ordering::Relaxed);
+        shared.vfile.wanted.store(cfg.source == SourceKind::File, Ordering::Relaxed);
+        if cfg.source == SourceKind::File {
+            let mut p = shared.vfile.path.lock().unwrap();
+            if *p != cfg.video_file {
+                *p = cfg.video_file.clone();
+            }
+        }
         let pass = cfg.source == SourceKind::Rtsp && cfg.rtsp_pass;
         shared.rtsp.pass.store(pass, Ordering::Relaxed);
         if pass != pass_was {
@@ -638,8 +875,26 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 .get(cur_tier + 1)
                 .and_then(|o| *o)
                 .is_none_or(|t| Instant::now() >= t);
+            // v40.62: pictures lost lately (see SMOOTH_IDR_N)
+            while lost_pics.front().is_some_and(|t| t.elapsed() > SMOOTH_WIN) {
+                lost_pics.pop_front();
+            }
+            let recent_loss = cfg.smooth_res && lost_pics.len() > SMOOTH_UP_MAX;
+            // a rung is judged on its own pictures: the ones lost on the rung above made the step
+            // down, and counted again they made the next ones too - bench 12/10, one burst of
+            // 10-11 lost at 1080p took the ladder 1080p -> 720p60 -> 720p30 -> 854x480 -> 640x480,
+            // a rung every 6 s, on a link carrying 3x what 720p needs. (The climb still waits for
+            // the whole window to be quiet: recent_loss.)
+            let lost_here = lost_pics.iter().filter(|t| **t >= tier_since).count();
+            let rough = cfg.smooth_res && lost_here >= SMOOTH_IDR_N && cur_tier > SMOOTH_FLOOR_TIER;
+            let paced = !cfg.smooth_res
+                || lost_pics.back().is_none_or(|t| {
+                    t.elapsed() >= SMOOTH_UP_QUIET && tier_since.elapsed() >= SMOOTH_UP_HOLD
+                });
             let up_now = cur_tier < max_tier
                 && up_free
+                && !recent_loss
+                && paced
                 && link_cap_kbps >= LADDER[cur_tier + 1].3 * 1.45;
             let need = LADDER[cur_tier].3;
             let down_now = cur_tier > 0 && link_cap_kbps < need * 0.80;
@@ -666,7 +921,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 && link_cap_kbps < need * 0.50
                 && tier_down_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(500));
             let dwell = tier_since.elapsed() >= Duration::from_millis(6000);
-            if crash || (down && dwell) {
+            if crash || (down && dwell) || (rough && dwell) {
+                if rough && !crash && !down {
+                    log(&format!(
+                        "ladder: {} pictures lost in {} s on this rung -> {}x{}@{} (the capacity reads {link_cap_kbps:.0} kbps)",
+                        lost_here,
+                        tier_since.elapsed().as_secs().min(SMOOTH_WIN.as_secs()),
+                        LADDER[cur_tier - 1].0,
+                        LADDER[cur_tier - 1].1,
+                        LADDER[cur_tier - 1].2
+                    ));
+                }
                 // the rung we are leaving did not hold: keep out of it, longer each time
                 let held = tier_since.elapsed();
                 let b = &mut tier_backoff[cur_tier];
@@ -708,9 +973,20 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         if pass {
             next_frame = Instant::now();
         } else {
-            let now = Instant::now();
-            if now < next_frame {
-                std::thread::sleep(next_frame - now);
+            // A NACK wakes this sleep (net.rs notifies the condvar the pass-through waits on):
+            // answered here, a retransmission no longer waits for the next camera frame AND its
+            // encode - up to 33 ms + the encode at 30 fps, of the 300 ms the receiver gives a hole
+            // (retx round trip p50 127 ms, p90 231 ms measured at MCS0, 4/10).
+            loop {
+                if cfg.txconv {
+                    answer_conv_nacks!(cfg, pass);
+                }
+                let now = Instant::now();
+                if now >= next_frame {
+                    break;
+                }
+                let g = shared.rtsp.aus.lock().unwrap();
+                let _ = shared.rtsp.aus_cv.wait_timeout(g, next_frame - now).unwrap();
             }
             let period = Duration::from_secs_f32(1.0 / afps.clamp(1.0, 60.0));
             next_frame = Instant::now().max(next_frame + period);
@@ -719,6 +995,132 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         // ------------------------------------------------- MCS adaptation
         let fb = shared.feedback.lock().unwrap().clone();
         let fb_fresh = fb.updated.is_some_and(|t| t.elapsed().as_secs_f32() < 3.0);
+        // the SNR reports of the last seconds, for a width change (the SNR at the old width)
+        if let Some(t) = fb.updated.filter(|t| snr_hist.back().is_none_or(|(b, _)| t > b)) {
+            snr_hist.push_back((t, fb.snr_db));
+            while snr_hist.front().is_some_and(|(b, _)| b.elapsed() > Duration::from_secs(10)) {
+                snr_hist.pop_front();
+            }
+        }
+        // branch B: the board's channel width moved (its autobw, or the user's `chbw`), and the
+        // SNR with it, 3 dB a step (up when narrower). The rung goes straight to what the new SNR
+        // carries, what was learnt at the old width goes, and the change's outage is nobody's loss
+        // for BW_HOLD from the change: no step down, no back-off, no interference regime, no
+        // parity sized from it, no cut of the video's ceiling, no picture counted lost by the
+        // resolution ladder. The SNR it starts from is the old width's: the reports from before
+        // the change (read up to 2 s after it, the reports since are the new width's already).
+        // Until 13/10 the step had its sign the wrong way round: 20 -> 5 MHz at 30 dB read
+        // "24 dB" (34 measured), 5 -> 20 MHz at 34 dB "40 dB" (30) - a rung 12 dB too high when
+        // the width widened, held there for BW_HOLD.
+        let bw_ev = BW_EVENT.load(Ordering::Relaxed);
+        if bw_ev != bw_seen {
+            bw_seen = bw_ev;
+            let (old, new) = ((bw_ev >> 8) & 0xFF, bw_ev & 0xFF);
+            if old > 0 && new > 0 {
+                let d_db = 10.0 * (new as f32 / old as f32).log10();
+                let at = BW_AT.lock().unwrap().unwrap_or_else(Instant::now);
+                bw_hold_until = at + BW_HOLD;
+                lost_pics.retain(|t| *t < at);
+                // (the old width's last reports - since the change before this one had settled. The
+                // last few, not the window's: the automatic width narrows BECAUSE the SNR just fell -
+                // 14/10, 40 dB less power: the median of 10 s read 24 dB at 20 MHz with 7 left, MCS5
+                // held at 10 MHz for BW_HOLD, the video at 4 fps)
+                let since = bw_prev_at.map(|p: Instant| p + Duration::from_secs(1));
+                bw_prev_at = Some(at);
+                let mut before: Vec<f32> = snr_hist
+                    .iter()
+                    .filter(|(t, _)| *t < at && since.is_none_or(|p| *t > p))
+                    .map(|(_, s)| *s)
+                    .collect();
+                before.drain(..before.len().saturating_sub(3));
+                before.sort_unstable_by(f32::total_cmp);
+                // ... the lowest of them when narrower: a fade narrows the width ~1.2 s after it
+                // (autobw), and the middle one of three could still be from before (14/10: 5 MHz
+                // entered at MCS5 on "30.8 dB", reports 24.8, 24.8, 4.5 - 10 dB there). A rung too
+                // low costs a climb; one too high, the picture until the new width's own reports.
+                let pick = if new > old { 0 } else { before.len() / 2 };
+                let snr = match before.get(pick) {
+                    Some(s) => Some(s + d_db),
+                    None if fb_fresh && fb.updated.is_some_and(|t| t >= at) => Some(fb.snr_db),
+                    None => stable.map(|s| s.1 + d_db),
+                };
+                mn_prob = [-1.0; 6];
+                mn_acc = [(0.0, 0.0); 6];
+                retry_at = [None; 6];
+                retry_gap_s = [0; 6];
+                climb_at = None;
+                restore_at = None;
+                interf_on = false;
+                interf_down = 0;
+                interf_win = 0;
+                clean_cnt = 0;
+                surv_cnt = 0;
+                rel_low = 0;
+                snr_dip = f32::MAX;
+                chan_mem.clear();
+                FEC_LOSS_Q16.store(0, Ordering::Relaxed);
+                PHY64_LOSS_Q16.store(0, Ordering::Relaxed);
+                stable = None;
+                match (cfg.auto_mcs, snr) {
+                    (true, Some(snr)) => {
+                        let target = (0..6).rev().find(|&r| snr_thresh(r) + BW_JUMP_MARGIN_DB <= snr).unwrap_or(0);
+                        log(&format!(
+                            "olla: channel {:.2} -> {:.2} MHz, SNR now ~{snr:.1} dB -> {} (was {})",
+                            20.0 / old as f32, 20.0 / new as f32, Mcs::ALL[target].label(), auto_mcs.label()
+                        ));
+                        auto_mcs = Mcs::ALL[target];
+                        last_step = Instant::now();
+                        up_want = None;
+                        up_confirm = 0;
+                        if target > 0 && rep2_on {
+                            rep2_on = false;
+                            rep2_probes.clear();
+                        }
+                        mn_prob[target] = 1.0;
+                        mn_acc[target] = (2.0, 2.0);
+                        mn_age[target] = Instant::now();
+                    }
+                    _ => log(&format!("olla: channel {:.2} -> {:.2} MHz", 20.0 / old as f32, 20.0 / new as f32)),
+                }
+            }
+        }
+        let bw_hold = Instant::now() < bw_hold_until;
+        // ... and once the far end reports from the new width (a second on: its SNR is a median of
+        // packets), a rung its SNR does not carry steps down to one it does - the hold is for the
+        // outage's loss, not for a guess that turned out wrong
+        if bw_hold
+            && cfg.auto_mcs
+            && fb_fresh
+            && fb.updated.is_some_and(|t| bw_prev_at.is_some_and(|a| t > a + Duration::from_secs(1)))
+        {
+            let cur = auto_mcs.index();
+            if cur > 0 && fb.snr_db < snr_thresh(cur) + 1.5 {
+                let target = (0..cur).rev().find(|&r| snr_thresh(r) + BW_JUMP_MARGIN_DB <= fb.snr_db).unwrap_or(0);
+                log(&format!(
+                    "olla: the new width's SNR is {:.1} dB - {} -> {}",
+                    fb.snr_db, Mcs::ALL[cur].label(), Mcs::ALL[target].label()
+                ));
+                auto_mcs = Mcs::ALL[target];
+                last_step = Instant::now();
+                mn_prob[target] = 1.0;
+                mn_acc[target] = (2.0, 2.0);
+                mn_age[target] = Instant::now();
+            }
+        }
+        if bw_hold {
+            // the windows of the outage are not counted: the counters move on without them
+            for i in 0..6 {
+                mn_sent_last[i] = crate::conv_tx::SENT_MCS[i].load(Ordering::Relaxed);
+                if fb.ok_mcs != [0xFFFF; 6] {
+                    mn_ok_last[i] = fb.ok_mcs[i];
+                }
+            }
+            base_in_last = crate::conv_tx::BASE_IN.load(Ordering::Relaxed);
+            if fb.ok_base != 0xFFFF {
+                ok_base_last = fb.ok_base;
+            }
+            sent_win_t = Instant::now();
+        }
         let hz_now = shared.chan_hz.load(std::sync::atomic::Ordering::Relaxed);
         if cfg.chan_mem && cfg.auto_mcs && hz_now != 0 && hz_now != mem_hz {
             if mem_hz != 0 {
@@ -761,6 +1163,16 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 _ => {}
             }
         }
+        // (see QUIET; measured between reports, so a lost report is not a quiet link)
+        let mut quiet_ms = 0u64;
+        if let Some(tu) = fb.updated {
+            if segs_seen != Some(fb.segs_ok) {
+                segs_seen = Some(fb.segs_ok);
+                segs_adv_at = tu;
+            }
+            quiet_ms = tu.saturating_duration_since(segs_adv_at).as_millis() as u64;
+        }
+        let quiet = quiet_ms >= QUIET.as_millis() as u64;
         // PL mode (txpl/txbits): the frame must fit the fabric modulator: ceiling cfg.pl_syms (16
         // with the old bitstream -> floor MCS3; 37 with the v7 streaming modulator -> floor MCS0,
         // the PL covers everything). MCS below the floor = the PC IQ path, for test measurements
@@ -785,7 +1197,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 //
                 // prob_i = d(ok_mcs[i]) / d(SENT_MCS[i]) on the SAME 1 s window (the phase-mismatch
                 // lesson was paid for twice), EMA 0.6/0.4, aged 10 s.
-                if sent_win_t.elapsed().as_secs_f32() >= 1.0
+                if !bw_hold
+                    && sent_win_t.elapsed().as_secs_f32() >= 1.0
                     && fb.ok_mcs != [0xFFFF; 6]
                 {
                     // v37 separate streams: rung 0 minus the BASE layer's share (pinned at MCS0,
@@ -845,6 +1258,26 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             fb.updated.map_or(-1, |t| t.elapsed().as_millis() as i64),
                         ));
                     }
+                    {
+                        // v40.53: the loss the parity is sized for - only loss that is not the
+                        // SNR's (the interference regime: frames hit at an SNR the rung is fine
+                        // at). A rung dying in a fade is the rate control's to leave, and parity
+                        // there only burns the air it is short of (sim fade: 22 % more frames on
+                        // air, 121 pictures lost against 66 with the XOR alone). Three windows in
+                        // a row: a sudden drop puts the regime on for a window (the SNR reported
+                        // is still the old one) and its 44-96 % "loss" bought a keyframe 4 parity
+                        // blocks just as the link went (sim drop: 62-66 pictures lost against 0).
+                        // At most 30 %.
+                        let c = auto_mcs.index();
+                        interf_win = if interf_on && c == interf_win_rung { interf_win + 1 } else { u32::from(interf_on) };
+                        interf_win_rung = c;
+                        FEC_RUNG.store(c as u64, Ordering::Relaxed);
+                        let loss = if interf_win >= 3 && mn_prob[c] >= 0.0 { (1.0 - mn_prob[c]).clamp(0.0, 0.3) } else { 0.0 };
+                        FEC_LOSS_Q16.store((loss * 65535.0) as u32, Ordering::Relaxed);
+                        if mn_prob[c] >= 0.0 {
+                            PHY64_LOSS_Q16.store(((1.0 - mn_prob[c]).clamp(0.0, 0.3) * 65535.0) as u32, Ordering::Relaxed);
+                        }
+                    }
                     mn_dbg = mn_dbg.wrapping_add(1);
                     if mn_dbg % 5 == 0 {
                         log(&format!(
@@ -861,23 +1294,35 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // v40.45: interference regime - SNR says this rung is fine, the
                     // counters say blocks die anyway. Hold the rung: no prior-driven
                     // step down, survival only after several dead windows in a row.
-                    let snr_margin = fb.snr_db - MCS_SNR_THRESH[cur];
+                    let snr_margin = fb.snr_db - snr_thresh(cur);
                     // Hysteresis: WiFi is bursty second to second (block ok swung 0.7..1.0
                     // every window on 2437 MHz, 42 on/off flips in 3 min without it). Enter on
                     // one losing window with the margin; leave only after 3 clean windows in a
                     // row, or when the margin is gone (then it IS an SNR problem).
+                    // (nor while the link is QUIET: that SNR is no measure of the air)
                     let enter = mn_prob[cur] >= 0.0
                         && mn_prob[cur] < INTERF_LOSS_PROB
-                        && snr_margin >= INTERF_MARGIN_DB;
+                        && snr_margin >= INTERF_MARGIN_DB
+                        && !quiet;
                     let clean = mn_prob[cur] >= 0.97;
-                    let margin_gone = snr_margin < INTERF_MARGIN_DB - 3.0;
+                    // (gone when every report of the last 0.5 s says so: a WiFi burst that keeps
+                    // every packet from decoding for 250 ms is reported at its packets' own SNR -
+                    // the ground board's, see nyx-radio-node FB_SNR_STALE_MS - one report under
+                    // the others: 2437 MHz, 14/10, 13-17 dB at 25, the regime left, MCS5 -> 4. A
+                    // fade's fall is in all of them, and QUIET is sooner still.)
+                    let snr_hold = snr_hist
+                        .iter()
+                        .rev()
+                        .take_while(|(t, _)| t.elapsed() < Duration::from_millis(500))
+                        .fold(fb.snr_db, |m, (_, s)| m.max(*s));
+                    let margin_gone = snr_hold - snr_thresh(cur) < INTERF_MARGIN_DB - 3.0;
                     let was = interf_on;
                     if !interf_on {
                         if enter {
                             interf_on = true;
                             clean_cnt = 0;
                         }
-                    } else if margin_gone {
+                    } else if margin_gone || quiet {
                         interf_on = false;
                     } else if clean {
                         clean_cnt += 1;
@@ -891,9 +1336,10 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     if interf != was {
                         surv_cnt = 0;
                         log(&format!(
-                            "olla: interference regime {} at {} (snr {:.1} dB, rung needs {:.1}, block ok {:.2})",
+                            "olla: interference regime {} at {} (snr {:.1} dB, rung needs {:.1}, block ok {:.2}{})",
                             if interf { "ON - holding the rung, loss is not SNR" } else { "off" },
-                            Mcs::ALL[cur].label(), fb.snr_db, MCS_SNR_THRESH[cur], mn_prob[cur]
+                            Mcs::ALL[cur].label(), fb.snr_db, snr_thresh(cur), mn_prob[cur],
+                            if quiet { format!(", nothing delivered for {quiet_ms} ms") } else { String::new() }
                         ));
                     }
                     // expected throughput: frame airtime is FIXED, so thr ~ prob x
@@ -912,6 +1358,10 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         // v40.48: useful bytes per frame of air - a rung-sized segment in one
                         // frame with compact blocks, 2016/fragments without
                         let (bytes, nf) = block_shape(i);
+                        if crate::phy64() {
+                            // branch B: every rung is one packet a block - what differs is its air
+                            return pb.max(0.0).powi(kbpf) * bytes / nyx_proto::phy64_air_us(i, FRAME_PAYLOAD_BYTES);
+                        }
                         pb.max(0.0).powi(kbpf) * bytes / nf
                     };
                     // candidates: ALL 6 rungs (minstrel considers them all, not just the
@@ -941,7 +1391,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                                 1.0
                             }
                         } else {
-                            continue; // bac tren mu -> cho probe
+                            continue; // the rung above unknown -> wait for a probe
                         };
                         // v40.49: no climb into a rung the SNR says cannot hold. The rungs a
                         // fast step down jumps over keep their numbers from before the fade and
@@ -949,7 +1399,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         // frames lost). Clearing those numbers instead cost the climb after an
                         // OUTAGE, where they are right again the moment the signal is back
                         // (bench, 5 s outages: MCS3-4 instead of 5 twelve seconds after).
-                        if i > cur && MCS_SNR_THRESH[i] > fb.snr_db {
+                        if i > cur && snr_thresh(i) > fb.snr_db {
                             continue;
                         }
                         // v40.50: a rung that just failed waits out its back-off
@@ -989,6 +1439,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         best = cur + 1;
                     } else if best + 1 < cur {
                         best = cur - 1;
+                    }
+                    // v40.53: ...and the clamp must not land on a rung that is backing off. The
+                    // loop skips it, a rung above it wins, and the clamp walked into it anyway:
+                    // bench 6/10, MCS0 -> 1 every 4 s, each lost within a second, "not tried again
+                    // for 30 s" logged each time.
+                    if best > cur && retry_at[best].is_some_and(|t| Instant::now() < t) {
+                        best = cur;
                     }
                     // v40.50: under interference the rung below is measured by a few probe blocks
                     // a window (see `below`): one window's luck is not a loss that depends on the
@@ -1032,17 +1489,61 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // three-rung limit (24 -> 5 dB took 5 -> 4 -> 1 -> 0 over 2 s, 3.6 s frozen).
                     let snr_rung = (0..6)
                         .rev()
-                        .find(|&r| MCS_SNR_THRESH[r] + 1.5 <= fb.snr_db)
+                        .find(|&r| snr_thresh(r) + 1.5 <= fb.snr_db)
                         .unwrap_or(0);
-                    let under = MCS_SNR_THRESH[cur] - fb.snr_db;
-                    let failing = mn_prob[cur] >= 0.0
-                        && (mn_prob[cur] < 0.5 || (under > 3.0 && mn_prob[cur] < 0.8));
+                    let under = snr_thresh(cur) - fb.snr_db;
+                    // (a QUIET link delivers nothing at this rung whatever its numbers say: they
+                    // can be from before, the window's blocks still in flight)
+                    let failing = (mn_prob[cur] >= 0.0
+                        && (mn_prob[cur] < 0.5 || (under > 3.0 && mn_prob[cur] < 0.8)))
+                        || (quiet && under > 3.0);
                     if !interf && failing && snr_rung < cur {
                         let floor = if under > 6.0 { 0 } else { cur.saturating_sub(3) };
                         let target = snr_rung.max(floor);
                         if target < best {
                             best = target;
                         }
+                    }
+                    // v40.53 RELIABILITY FIRST. Where some rung measures clean (>= REL_OK), a
+                    // picture is worth more than the bitrate a losing rung adds: each lost block is
+                    // a frozen frame. A rung under REL_OK for two windows (none of the first 1.5 s
+                    // on it: that window counts blocks sent at the new rung against acknowledgements
+                    // still 100-300 ms behind) goes straight to the highest clean rung below - past
+                    // the one-rung clamp and the interference regime's three windows and 5 s dwell,
+                    // which are for loss that hits every rung alike. And while a clean rung exists
+                    // at or below this one, no climb into a rung not measured clean. Two rooms
+                    // apart, EDUP, 2474.5 MHz: 64QAM dies under the WiFi bursts, 16QAM lives; the
+                    // stream sat on MCS4-5 at 0.3-1.0, 63-78 frames lost a minute, 26 with MCS3 held
+                    // by hand; the simulator's edge (22 dB, 30 % of 20 ms bursts 8 dB down, control
+                    // 35 % lost): 113-314 lost against 1. Loss that hits every rung (WiFi kills
+                    // every frame) leaves no rung clean, and the rules above keep deciding.
+                    let clean = |i: usize| fresh(i) && mn_prob[i] >= REL_OK;
+                    let mut rel_jump = false;
+                    let low_now = fresh(cur)
+                        && mn_prob[cur] >= 0.0
+                        && mn_prob[cur] < REL_OK
+                        && last_step.elapsed() >= Duration::from_millis(1500);
+                    rel_low = if low_now { rel_low + 1 } else { 0 };
+                    let clean_below = (0..cur).rev().find(|&i| clean(i));
+                    if let (true, Some(r)) = (rel_low >= 2, clean_below) {
+                        if r < best || best >= cur {
+                            log(&format!(
+                                "olla: {} loses blocks ({:.2}), {} measured clean ({:.2}) -> straight there",
+                                Mcs::ALL[cur].label(), mn_prob[cur], Mcs::ALL[r].label(), mn_prob[r]
+                            ));
+                            best = r;
+                            rel_jump = true;
+                            rel_low = 0;
+                        }
+                    } else if best > cur && !clean(best) && (clean(cur) || clean_below.is_some()) {
+                        best = cur;
+                    }
+                    // v40.53: on the repeat step the way up is MCS0 first (its probes, below): the
+                    // step is a rung under MCS0, and one rung at a time holds for it too. MCS1's
+                    // numbers from before the fade outweighed a dying MCS0 and took the stream
+                    // from the step straight to MCS1 (sim, 2 dB: on/off every 2-4 s).
+                    if rep2_on && best > cur {
+                        best = cur;
                     }
                     // climbing needs 2 CONSECUTIVE windows in agreement (probes at the fade edge
                     // are noisy; a single good window often lies; stepping down stays immediate).
@@ -1062,8 +1563,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     if best != cur
                         && allow
                         && last_step.elapsed() > Duration::from_millis(
-                            // v40.45b: a step down under interference dwells 5 s
-                            if best < cur { if interf { 5000 } else { 1000 } } else { 3000 },
+                            // v40.45b: a step down under interference dwells 5 s (not one onto a
+                            // rung measured clean - v40.53)
+                            if best < cur { if interf && !rel_jump { 5000 } else { 1000 } } else { 3000 },
                         )
                     {
                         auto_mcs = Mcs::ALL[best];
@@ -1090,9 +1592,10 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         if let Some((r, s0, at)) = stable {
                             if now_cur < r
                                 && at.elapsed() < Duration::from_secs(60)
-                                && snr_dip < MCS_SNR_THRESH[r] - 6.0
+                                && !retry_at[r].is_some_and(|t| Instant::now() < t)
+                                && snr_dip < snr_thresh(r) - 6.0
                                 && snr >= s0 - 3.0
-                                && snr >= MCS_SNR_THRESH[r] + 3.0
+                                && snr >= snr_thresh(r) + 3.0
                             {
                                 log(&format!(
                                     "olla: back from an outage (snr fell to {snr_dip:.1}, now {snr:.1} dB) -> {} as before",
@@ -1100,6 +1603,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                                 ));
                                 auto_mcs = Mcs::ALL[r];
                                 last_step = Instant::now();
+                                restore_at = Some((r, Instant::now()));
                                 up_want = None;
                                 up_confirm = 0;
                                 snr_dip = snr;
@@ -1122,13 +1626,13 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         // not moved down while a deep dip is under way: the first window after
                         // the signal returns, the SNR still climbing, would overwrite it
                         let dipping = stable.is_some_and(|(r, _, at)| {
-                            c < r && snr_dip < MCS_SNR_THRESH[r] - 6.0 && at.elapsed() < Duration::from_secs(60)
+                            c < r && snr_dip < snr_thresh(r) - 6.0 && at.elapsed() < Duration::from_secs(60)
                         });
                         // v40.50: kept fresh in the interference regime too - a rung at
                         // >= 0.9 carried the stream whatever the regime says. On the bench the
                         // regime is on most of the time, the record went stale (> 60 s) and a
                         // 12 s outage was climbed back from MCS0 over 17 s.
-                        if c == now_cur && !dipping && fresh(c) && mn_prob[c] >= 0.9 && snr >= MCS_SNR_THRESH[c] {
+                        if c == now_cur && !dipping && fresh(c) && mn_prob[c] >= 0.9 && snr >= snr_thresh(c) {
                             stable = Some((c, snr, Instant::now()));
                             snr_dip = snr;
                             stable_air = air_scale;
@@ -1143,6 +1647,26 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             retry_at = [None; 6];
                             retry_gap_s = [0; 6];
                             climb_at = None;
+                            restore_at = None;
+                        }
+                        // v40.53: an outage return lost again (see `restore_at`); before the climb
+                        // check below, which sees the same return as a climb and needs the SNR
+                        // high at the loss - it is 0 then, starved
+                        if let Some((r, t)) = restore_at {
+                            if now_idx < r {
+                                if t.elapsed() < Duration::from_secs(CLIMB_FAIL_S) {
+                                    retry_gap_s[r] = (retry_gap_s[r] * 2).clamp(6, 30);
+                                    retry_at[r] = Some(Instant::now() + Duration::from_secs(retry_gap_s[r]));
+                                    climb_at = None;
+                                    log(&format!(
+                                        "olla: {} lost again {:.1} s after the outage return -> no return for {} s",
+                                        Mcs::ALL[r].label(), t.elapsed().as_secs_f32(), retry_gap_s[r]
+                                    ));
+                                }
+                                restore_at = None;
+                            } else if t.elapsed() >= Duration::from_secs(CLIMB_OK_S) {
+                                restore_at = None;
+                            }
                         }
                         if now_idx > cur {
                             climb_at = Some((now_idx, Instant::now()));
@@ -1153,7 +1677,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                                 // at 10 dB locked out 6-12 s with a 1.5 dB margin)
                                 if r == cur
                                     && t.elapsed() < Duration::from_secs(CLIMB_FAIL_S)
-                                    && fb.snr_db >= MCS_SNR_THRESH[r] + INTERF_MARGIN_DB
+                                    && fb.snr_db >= snr_thresh(r) + INTERF_MARGIN_DB
                                 {
                                     retry_gap_s[r] = (retry_gap_s[r] * 2).clamp(6, 30);
                                     retry_at[r] = Some(Instant::now() + Duration::from_secs(retry_gap_s[r]));
@@ -1199,8 +1723,72 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // rung alike, but nothing measured it: on 2500 MHz on the bench (MCS5 13 %
                     // CRC-failed at 30 dB, MCS4 4 %) the regime held MCS5 for 150 s, 139 frames lost.
                     let losing = interf_on || (fresh(cur) && mn_prob[cur] < 0.95);
-                    let below = (cur > 0 && losing).then(|| cur - 1);
-                    let slots: Vec<usize> = [near, below, far].into_iter().flatten().take(2).collect();
+                    // v40.53: past the rungs below already measured losing, to the first one not
+                    // known to lose - MCS4 losing like MCS5 left MCS3 unmeasured, and the
+                    // reliability floor above had nothing to go to
+                    let below = (cur > 0 && losing).then(|| {
+                        (0..cur).rev().find(|&i| !(fresh(i) && mn_prob[i] < REL_OK)).unwrap_or(cur - 1)
+                    });
+                    // v40.53: the repeat step. In while MCS0 loses REP2_IN_PROB of its blocks two
+                    // windows in a row, out when the probes find MCS0 at REP2_OUT_PROB three in a
+                    // row. Where the two cross: per picture of K blocks the step carries half as
+                    // much at a higher block rate, p6^K x 222 against p0^K x 447 - with the bench's
+                    // edge (A -48 dB: MCS0 0.51 of the synced frames, the step 0.73) the step
+                    // wins below p0 ~0.8. The band between keeps it from flapping.
+                    // v40.59: not in the interference regime (see Config::rep2_interf)
+                    if cur != 0 || !cfg.rep2 || (interf_on && !cfg.rep2_interf) {
+                        if rep2_on {
+                            log(&format!(
+                                "olla: repeat step off (now {}{})",
+                                Mcs::ALL[cur].label(),
+                                if interf_on { ", interference: a frame hit is lost at any rung" } else { "" }
+                            ));
+                        }
+                        rep2_on = false;
+                        rep2_in = 0;
+                        rep2_probes.clear();
+                    } else if !rep2_on {
+                        rep2_in = if fresh(0) && mn_prob[0] >= 0.0 && mn_prob[0] < REP2_IN_PROB {
+                            rep2_in + 1
+                        } else {
+                            0
+                        };
+                        if rep2_in >= 2 {
+                            rep2_on = true;
+                            rep2_in = 0;
+                            rep2_probes.clear();
+                            rep2_settle = 2;
+                            log(&format!(
+                                "olla: MCS0 block ok {:.2} -> repeat step on (QPSK 1/2 x2, snr {:.1} dB)",
+                                mn_prob[0], fb.snr_db
+                            ));
+                        }
+                    } else if rep2_settle > 0 {
+                        rep2_settle -= 1;
+                    } else {
+                        rep2_probes.push_back((mn_dbg_ds[0], u64::from(mn_dbg_dok[0])));
+                        if rep2_probes.len() > REP2_OUT_WIN {
+                            rep2_probes.pop_front();
+                        }
+                        // (summed, then capped: the receiver's counts run a window ahead or behind)
+                        let (n, ok) = rep2_probes.iter().fold((0u64, 0u64), |a, &(s, o)| (a.0 + s, a.1 + o));
+                        let ok = ok.min(n);
+                        if n >= REP2_OUT_N && ok as f32 >= REP2_OUT_PROB * n as f32 {
+                            rep2_on = false;
+                            rep2_probes.clear();
+                            log(&format!(
+                                "olla: MCS0 probes {ok}/{n} ok -> repeat step off (snr {:.1} dB)",
+                                fb.snr_db
+                            ));
+                        }
+                    }
+                    // ...and while on, only MCS0 is probed (the stream itself is not at a rung of the
+                    // table, and the way up is MCS0 first: a probe at MCS1 there is a block lost)
+                    let slots: Vec<usize> = if rep2_on {
+                        vec![0]
+                    } else {
+                        [near, below, far].into_iter().flatten().take(2).collect()
+                    };
                     let pm = match slots.as_slice() {
                         [a, b] => *a as u64 | (*b as u64) << 8,
                         [a] => *a as u64 | 0xFF00,
@@ -1224,6 +1812,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 } else {
                     mcs_floor
                 };
+                // v40.54: blind, the floor is `blindfloor`: the repeat step only when it says 6 (it
+                // doubles a frame's air - under WiFi more of it is hit - and nothing can tell here
+                // whether the loss it was taken on for was the SNR's). With `blindhold` (a fade
+                // that took the way back, not a cold start) the rung stays where the feedback
+                // left it, repeat step and all.
+                let hold = (cfg.blind_hold && fb.updated.is_some()) || bw_hold;
+                if rep2_on && cfg.blind_floor < 6 && !hold {
+                    rep2_on = false;
+                    rep2_probes.clear();
+                    log(&format!("auto: feedback blind -> repeat step off (blind floor MCS{})", cfg.blind_floor));
+                }
                 match blind_since {
                     None => {
                         blind_since = Some(Instant::now());
@@ -1233,17 +1832,27 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         }
                     }
                     Some(t) => {
-                        if t.elapsed() >= Duration::from_secs(4) {
+                        if !hold && t.elapsed() >= Duration::from_secs(4) {
                             let cur = auto_mcs.index();
                             // v30.3: through the floor: at the fade edge feedback often goes stale,
                             // so this blind branch takes over, and if it stops at floor 3 then MCS1
                             // (the only thing that survives 13 dB SNR) is never reached.
-                            if cur > 0 {
+                            // v40.54: down to the blind floor (`blindfloor`; 6 = on through MCS0
+                            // to the repeat step, as before). A rung below it is kept.
+                            let floor = usize::from(cfg.blind_floor).min(6);
+                            let stop = if floor >= 6 { 0 } else { floor };
+                            if cur > stop {
                                 auto_mcs = Mcs::ALL[cur - 1];
                                 log(&format!(
                                     "auto: feedback blind for {}s -> stepping down to {}",
                                     4, auto_mcs.label()
                                 ));
+                            } else if floor >= 6 && !rep2_on && cfg.rep2 && fb.updated.is_some() {
+                                // v40.53: a fade (the feedback was there before), not a cold start
+                                rep2_on = true;
+                                rep2_probes.clear();
+                                rep2_settle = 2;
+                                log("auto: feedback blind at MCS0 -> repeat step on");
                             }
                             blind_since = Some(Instant::now());
                         }
@@ -1252,15 +1861,58 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             }
         }
         let mcs = if cfg.auto_mcs { auto_mcs } else { cfg.mcs };
+        // v40.53: the rung the conv path sends the stream at - 6 = the repeat step below MCS0
+        let rep2 = cfg.auto_mcs && cfg.rep2 && rep2_on && mcs.index() == 0;
+        let rung = if rep2 { 6 } else { mcs.index() };
+        // v40.56: while the link hops, the rung of the channel this end is on (the receiving end
+        // measures each one, Msg::ChanRates; fresh = under 5 s); the rung above still sets the
+        // budget. Not with the rung set by hand.
+        let chan_rung = if cfg.auto_mcs && cfg.chan_rate && fb_fresh {
+            shared.chan_rates.lock().unwrap().as_ref().and_then(|(at, v)| {
+                (at.elapsed() < Duration::from_secs(5))
+                    .then(|| v.iter().find(|(hz, _)| *hz == hz_now).map(|&(_, r)| r))
+                    .flatten()
+                    .filter(|&r| r <= 6)
+            })
+        } else {
+            None
+        };
+        crate::conv_tx::CHAN_RUNG_ON.store(chan_rung.is_some(), Ordering::Relaxed);
+        // v40.57: with per-channel rungs the budget comes from the lowest rung of the channels in
+        // use (excluded ones carry none): the rate control's own rung saw the losses of every
+        // channel mixed and sat on the repeat step (bench 8/10: 0.23 Mbps while hopping). The
+        // lowest, not the average: a 1 s dwell on a slow channel would otherwise queue more than
+        // the 300 ms the queue holds.
+        let budget_rung = if chan_rung.is_some() {
+            shared.chan_rates.lock().unwrap().as_ref().and_then(|(_, v)| {
+                v.iter().map(|&(_, r)| r).filter(|&r| r <= 6).reduce(|a, b| {
+                    let k = |r: u8| if r == 6 { -1i8 } else { r as i8 };
+                    if k(a) <= k(b) { a } else { b }
+                })
+            })
+        } else {
+            None
+        }
+        .map_or(rung, usize::from);
+        if chan_rung != last_chan_rung {
+            if let Some(r) = chan_rung {
+                log(&format!("olla: per-channel rung {:.1} MHz -> {}", hz_now as f64 / 1e6,
+                             if r == 6 { "the repeat step".to_string() } else { Mcs::ALL[usize::from(r)].label().to_string() }));
+            } else if last_chan_rung.is_some() {
+                log("olla: per-channel rungs off - one rung again");
+            }
+            last_chan_rung = chan_rung;
+        }
         // v40.49: no probes with the rung set by hand, nor while blind (nobody counts them); the
-        // last probe rung used to stay set and every 12th block kept going out at it
-        if !cfg.auto_mcs || !fb_fresh {
+        // last probe rung used to stay set and every 12th block kept going out at it. v40.56: nor
+        // with per-channel rungs (the channel's own rung is the measurement)
+        if !cfg.auto_mcs || !fb_fresh || chan_rung.is_some() {
             crate::conv_tx::PROBE_MCS.store(0xFFFF, Ordering::Relaxed);
         }
         // Publish for the conv transmit path (it runs on its own thread and cannot see this local).
         // This lets OLLA drive conv too; before, conv was pinned at MCS5 because only that rate
         // carried a block.
-        crate::conv_tx::CUR_MCS.store(mcs.index() as u64, Ordering::Relaxed);
+        crate::conv_tx::CUR_MCS.store(chan_rung.map_or(rung, usize::from) as u64, Ordering::Relaxed);
 
         // ------------------------------------------------------- source
         if first_frame && !said_acquiring {
@@ -1278,27 +1930,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // gives up on costs the picture until the camera's next key frame).
                     // Only the conv path exists on the board; the full handling is below.
                     if cfg.txconv {
-                        let nack_rx = net.nacks.lock().unwrap();
-                        let max_retx = if interf_on || pass { MAX_RETX_INTERF } else { MAX_RETX };
-                        while let Ok(nseq) = nack_rx.try_recv() {
-                            nacks_handled += 1;
-                            if !cfg.arq || low_rung() {
-                                nacks_low += u64::from(low_rung());
-                                continue;
-                            }
-                            if let Some(entry) = cache
-                                .iter_mut()
-                                .rev()
-                                .find(|e| e.seq & 0xFF == nseq & 0xFF && e.retx < max_retx)
-                            {
-                                entry.retx += 1;
-                                convtx.push(entry.seq, &entry.block);
-                                retransmits += 1;
-                                if cfg.dup && interf_on {
-                                    dup_q.push_back((Instant::now() + DUP_GAP, entry.seq, entry.block));
-                                }
-                            }
-                        }
+                        answer_conv_nacks!(cfg, pass);
                     }
                     continue;
                 }
@@ -1342,6 +1974,17 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     }
                 }
             }
+            SourceKind::File => {
+                // the decoder runs at the file's pace (ffmpeg -re); this tick takes the latest
+                let raw = shared.vfile.frame.lock().unwrap().clone();
+                match raw {
+                    Some(raw) => Some(resize_rgb(&raw, aw, ah)),
+                    None => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                }
+            }
             SourceKind::RandomData => None,
         } };
         // v40.46 latency test: the millisecond counter into the picture before encoding (the
@@ -1369,7 +2012,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             }
             let payload_bits = (FRAME_PAYLOAD_BYTES * 8) as f32;
             let cam_fps = pass_fps_roll.count_per_sec().max(1.0);
-            let cap = conv_air_ceiling_bps(cfg.air_gap_ms, false, mcs, payload_bits, cam_fps, cfg.fec);
+            let cap = conv_air_ceiling_bps(cfg.air_gap_ms, false, budget_rung, payload_bits, cam_fps, cfg.fec);
             video_bitrate = (pass_byte_roll.per_sec() * 8.0) as u32;
             // ONVIF: once a second, the bitrate the camera should be at. What the air carries at
             // this rung, cut to the spacing the daemon really keeps up with (the board app's
@@ -1386,8 +2029,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     let mut air = cap;
                     let floor_us = shared.pace_floor_us.load(Ordering::Relaxed) as f32;
                     if floor_us > 3000.0 {
-                        let nfrag = conv_frames(mcs.index().min(5), FRAME_PAYLOAD_BYTES) as f32;
-                        let blocks = (1e6 / floor_us / nfrag - if cfg.fec { cam_fps } else { 0.0 }).max(1.0);
+                        let nfrag = conv_frames(rung.min(6), FRAME_PAYLOAD_BYTES) as f32;
+                        let blocks = (1e6 / floor_us / nfrag - if cfg.fec { cam_fps * (1.0 + fec_extra()) } else { 0.0 }).max(1.0);
                         air = air.min(blocks * payload_bits * 0.85);
                     }
                     let target = ((air * air_scale * CAM_HEADROOM / 1000.0) as u32).max(CAM_MIN_KBPS);
@@ -1469,32 +2112,42 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     };
                     let fabric_path =
                         cfg.txbits && mcs.data_syms_per_frame() <= pl;
-                    // v6.14: fabric: measured in DELIVERED blocks (feedback), ceiling in
-                    // captures/s. The IQ path keeps the old formula.
-                    let budget = if fabric_path && fb_fresh && deliv_rate > 1.0
-                    {
-                        // 0.78 x climb factor 1.35 = probe ~5 % above delivered (at 15 % MJPEG
-                        // oscillates: one lost segment kills the frame)
-                        deliv_rate * payload_bits * 0.78
-                    } else if cfg.txconv {
-                        // follow AIRTIME, not the measured rate: phy_fps comes from the very stream
-                        // being sent, so the budget would lock at its current level and never climb
-                        // (the disease seen at 720p).
-                        CONV_FRAMES_PS * usable * payload_bits * 0.85
-                    } else {
-                        phy_fps * usable * payload_bits * 0.85
-                    };
                     let one_burst = if cfg.txconv {
                         conv_air_ceiling_bps(
-                            cfg.air_gap_ms, cfg.simulcast && mcs.index() >= 2,
-                            mcs, payload_bits, afps, cfg.fec,
+                            cfg.air_gap_ms, (cfg.simulcast || (cfg.blind_base && !fb_fresh)) && mcs.index() >= 2,
+                            budget_rung, payload_bits, afps, cfg.fec,
                         )
                     } else if fabric_path {
                         FAB_CAPTURES_PS * per_capture * payload_bits * 0.85
                     } else {
                         cfg.fps.max(1.0) * payload_bits * 0.85 * per_capture
                     };
-                    let ceiling = 0.55 * mcs.phy_bitrate(crate::samp_hz()) as f32;
+                    // v6.14: fabric: measured in DELIVERED blocks (feedback), ceiling in
+                    // captures/s. The IQ path keeps the old formula.
+                    let budget = if cfg.txconv {
+                        // The conv path budgets from the air this board really has: one_burst
+                        // comes from the frame time the board reports (its pace, encoder and
+                        // tx-air). It replaces CONV_FRAMES_PS (90 frames/s, sized when the board
+                        // took 8.5 ms a frame), which held MCS0-2 at 1666 kbps whatever the board
+                        // could send, and the delivered-rate branch, which only crept 5 % above
+                        // what the encoder had just made and left MCS5 at its 50 % floor (3.4 of
+                        // 6.8 Mbps). Losses still pull it down: usable (BLER) here, air_scale
+                        // (delivered/needed) below.
+                        one_burst * usable / 1.35
+                    } else if fabric_path && fb_fresh && deliv_rate > 1.0
+                    {
+                        // 0.78 x climb factor 1.35 = probe ~5 % above delivered (at 15 % MJPEG
+                        // oscillates: one lost segment kills the frame)
+                        deliv_rate * payload_bits * 0.78
+                    } else {
+                        phy_fps * usable * payload_bits * 0.85
+                    };
+                    // branch B: the air ceiling above is the ofdm64 PHY's own, nothing to add
+                    let ceiling = if crate::phy64() {
+                        one_burst
+                    } else {
+                        0.55 * mcs.phy_bitrate(crate::samp_hz()) as f32
+                    };
                     // A budget that follows the measured rate locks itself: the encoder can only
                     // produce what the budget allows, so the measurement never exceeds the current
                     // level (stuck at 616 k on a channel good for 1.2 M, seen at 720p30/20 MHz).
@@ -1515,8 +2168,21 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         .min(one_burst)
                         .min(ceiling)
                         .min(one_burst * air_scale) // ceiling by delivered/sent ratio
-                        .clamp(60_000.0, 8_000_000.0)
+                        .clamp(60_000.0, if crate::phy64() { 30_000_000.0 } else { 8_000_000.0 })
                         as u32;
+                    uncapped_bitrate = video_bitrate;
+                    // v40.53: no more than the picture needs (`set maxkbps`, 0 = AUTO_BPP)
+                    let pic_cap = if cfg.max_kbps > 0 {
+                        cfg.max_kbps as f32 * 1000.0
+                    } else {
+                        aw as f32 * ah as f32 * (afps as f32).max(1.0) * AUTO_BPP
+                    };
+                    video_bitrate = video_bitrate.min(pic_cap.max(60_000.0) as u32);
+                    // ... and no more than the ground decodes ("!cap" from it)
+                    if let Some(k) = far_cap_kbps() {
+                        video_bitrate = video_bitrate.min((k.max(60) * 1000) as u32);
+                    }
+                    fec_room = (uncapped_bitrate as f32 / video_bitrate.max(1) as f32 - 1.0).max(0.0);
                     if survival < 1.0 {
                         // v40.24 survival: the IDR must be short to get through at low MCS
                         video_bitrate =
@@ -1568,6 +2234,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                                 && enc.request_ltr_recovery(u32::from(id), i32::from(marked), i32::from(cur))
                             {
                                 ltr_repair = true;
+                                if !bw_hold {
+                                    lost_pics.push_back(Instant::now());
+                                }
                                 ltr_tries += 1;
                                 ltr_repairs += 1;
                                 ltr_last = Instant::now();
@@ -1612,8 +2281,33 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                             (idr_ok && std::mem::take(&mut fb.need_idr), fb.segs_ok)
                         }
                     };
-                    if force_idr {
+                    // v40.53 NO WAY BACK: with the feedback stale nothing the receiver asks for
+                    // arrives - no NACK, no keyframe, no LTR repair - and the encoder's own GOP is
+                    // 300 frames: one lost block froze the picture for up to 10 s. Bench 5/10,
+                    // B's power 40 dB down (control dead, the video way A->B clean): 0.7 fps,
+                    // "not recovered within 300 ms, asking for a keyframe" every few frames.
+                    // A keyframe every `blindidr` ms while blind; not counted as a failed
+                    // repair (nothing can confirm it), so no survival mode from it.
+                    let blind_idr = !force_idr
+                        && !fb_fresh
+                        && last_idr.map_or(true, |t| t.elapsed() >= Duration::from_millis(u64::from(cfg.blind_idr_ms)));
+                    if blind_idr {
                         idr_sent += 1;
+                        blind_idrs += 1;
+                        last_idr = Some(Instant::now());
+                        if blind_idrs == 1 || blind_idrs % 30 == 0 {
+                            log(&format!(
+                                "idr: no feedback for 3 s - a keyframe every {} ms until it is back (#{blind_idrs})",
+                                cfg.blind_idr_ms
+                            ));
+                        }
+                    }
+                    let force_idr = force_idr || blind_idr;
+                    if force_idr && !blind_idr {
+                        idr_sent += 1;
+                        if !bw_hold {
+                            lost_pics.push_back(Instant::now());
+                        }
                         // no frame delivered since the previous IDR = that IDR did not arrive
                         let unresolved = last_idr.is_some()
                             && segs_now < idr_segs_at.saturating_add(5);
@@ -1652,12 +2346,22 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     // tearing the main layer itself.
                     let main_mcs_now =
                         crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) as usize;
-                    if cfg.txconv && cfg.simulcast && main_mcs_now >= 2 {
+                    // v40.54: and while blind (`blindbase`)
+                    let base_on = cfg.simulcast || (cfg.blind_base && !fb_fresh);
+                    if cfg.txconv && base_on && (2..6).contains(&main_mcs_now) {
                         base_flip = !base_flip;
                         if base_flip {
-                            // downsample nearest 2x2 (re; du cho lop phao)
-                            let bw = f.width / 2;
-                            let bh = f.height / 2;
+                            // downsample nearest 2x2 (cheap; enough for the inset). v40.62: to even sizes -
+                            // H.264 needs them: 854x480 halved to 427 panicked the encoder thread
+                            // (openh264 "width needs to be a multiple of 2", 11/10 - the link went
+                            // blind, `blindbase` turned the base layer on at the 854x480 rung, and
+                            // the video stopped for good)
+                            let bw = (f.width / 2) & !1;
+                            let bh = (f.height / 2) & !1;
+                            if enc_base_dims != (bw, bh) {
+                                enc_base = None;
+                                enc_base_dims = (bw, bh);
+                            }
                             let mut rgb =
                                 Vec::with_capacity(bw * bh * 3);
                             for y in 0..bh {
@@ -1740,7 +2444,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 let cap = if cfg.txconv {
                     conv_air_ceiling_bps(
                             cfg.air_gap_ms, false,
-                            mcs, payload_bits, afps, cfg.fec,
+                            budget_rung, payload_bits, afps, cfg.fec,
                         )
                 } else {
                     f32::MAX
@@ -1781,7 +2485,8 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         // does NOT affect video_bitrate, so no feedback loop). EMA so the rung does not shake; only
         // H264 has a video_bitrate that is a "true ceiling".
         if src_type == SourceType::H264 {
-            let vb = video_bitrate as f32 / 1000.0;
+            // (the capacity before the picture cap, or the ladder would never climb past it)
+            let vb = video_bitrate.max(std::mem::take(&mut uncapped_bitrate)) as f32 / 1000.0;
             link_cap_kbps = if link_cap_kbps < 1.0 {
                 vb
             } else {
@@ -1798,22 +2503,109 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             first_frame = false;
         }
         let t_pk = Instant::now();
+        let (n_data, fec_k): (usize, usize);
         let mut blocks =
             {
                 // v40.48: cut the picture to one frame per block at the rung it will go out on,
                 // when the board compacts blocks (see BOARD_COMPACT)
-                let on = cfg.txconv && BOARD_COMPACT.load(Ordering::Relaxed);
+                // (branch B: never - a block is one packet at any length there)
+                let on = cfg.txconv && BOARD_COMPACT.load(Ordering::Relaxed) && !crate::phy64();
                 COMPACT_ON.store(on, Ordering::Relaxed);
                 let seg = if on {
                     nyx_proto::conv_seg_one_frame(crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) as usize)
                 } else {
                     nyx_link::SEG_PAYLOAD
                 };
-                nyx_link::packetize_fec_seg(frame_id, src_type, &app_data, cfg.fec, seg)
+                // v40.53: as many parity blocks as the loss at this rung calls for (a keyframe
+                // more), the first the XOR as ever
+                let seg_eff = if seg >= nyx_link::SEG_PAYLOAD - 2 { nyx_link::SEG_PAYLOAD } else { seg.max(1) };
+                n_data = app_data.len().div_ceil(seg_eff).max(1);
+                fec_k = if !cfg.fec {
+                    0
+                } else if crate::phy64() && cfg.fec_rs {
+                    // branch B: the ofdm64 PHY carries 3-10x what the picture needs, so every
+                    // picture gets the parity its rung's measured loss calls for, never sized for
+                    // under 3 % (WiFi takes 1.4-4.4 % of the packets on 2.4 GHz, measured 11/10 -
+                    // with the XOR alone ~7 % of the pictures broke and the ladder never left
+                    // 854x480): a keyframe up to half its blocks again, a picture up to a third
+                    let key = matches!(src_type, SourceType::H264) && h264_is_key(&app_data);
+                    let p = (PHY64_LOSS_Q16.load(Ordering::Relaxed) as f32 / 65535.0).max(0.03) * FEC_BURST;
+                    let kmax = if key { n_data.div_ceil(2).max(2) } else { n_data.div_ceil(3).max(2) };
+                    let k = nyx_link::parity_for(n_data, p.clamp(0.01, 0.6), 0.002, kmax);
+                    if key || frame_id % 30 == 0 {
+                        log(&format!(
+                            "fec: phy64 {} {n_data} blocks + {k} parity (design loss {:.1} %)",
+                            if key { "keyframe" } else { "picture" }, p / FEC_BURST * 100.0
+                        ));
+                    }
+                    k
+                } else if cfg.fec_rs && !fb_fresh && cfg.fec_blind > 0 {
+                    // v40.54 ONE WAY: no retransmission, no keyframe on request, no loss measured -
+                    // the parity is all the repair there is, sized for the design loss (`fecblind`)
+                    // at whatever rung the picture goes out on. The keyframe is what ends a tear,
+                    // so it gets up to half its blocks again; a picture the XOR and one more for
+                    // every four (the receiver conceals a lost one: torn, not frozen, until the
+                    // keyframe). Bench 8/10: up to as many parity blocks as data on every picture
+                    // ("1 block + 2 parity") took the air of a third of the pictures (20 fps).
+                    let key = matches!(src_type, SourceType::H264) && h264_is_key(&app_data);
+                    let p = f32::from(cfg.fec_blind) / 100.0 * FEC_BURST;
+                    let (target, kmax) = if key {
+                        (FEC_TARGET_KEY, (n_data / 2).max(2))
+                    } else {
+                        (FEC_TARGET, (n_data / 4).max(1))
+                    };
+                    let k = nyx_link::parity_for(n_data, p.clamp(0.01, 0.6), target, kmax);
+                    if key || frame_id % 30 == 0 {
+                        log(&format!(
+                            "fec: blind {} {n_data} blocks + {k} parity (design loss {} %)",
+                            if key { "keyframe" } else { "picture" }, cfg.fec_blind
+                        ));
+                    }
+                    k
+                } else if !cfg.fec_rs
+                    || FEC_LOSS_Q16.load(Ordering::Relaxed) == 0
+                    || crate::conv_tx::CUR_MCS.load(Ordering::Relaxed) != FEC_RUNG.load(Ordering::Relaxed)
+                {
+                    // the XOR alone outside the interference regime (see FEC_LOSS_Q16)
+                    1
+                } else {
+                    let key = matches!(src_type, SourceType::H264) && h264_is_key(&app_data);
+                    // a picture that is not a keyframe gets more than the XOR only above MCS0 and
+                    // only into the air the picture cap leaves (fec_room): where the air is what
+                    // the video is short of, parity takes it from the pictures - on the bench under
+                    // WiFi a second and third parity block on every picture left the video on the
+                    // repeat step at 207 kbps, 166 pictures lost a minute where the XOR alone lost 28
+                    let rung = crate::conv_tx::CUR_MCS.load(Ordering::Relaxed);
+                    // v40.59 (`fecsmall`): down to MCS0 and up to half the picture again (two at
+                    // least) - see Config::fec_small
+                    let (kmax_p, rung_ok) = if cfg.fec_small {
+                        (n_data.div_ceil(2).max(2), rung <= 5)
+                    } else {
+                        ((1 + (n_data as f32 * fec_room) as usize).min(2), (1..=5).contains(&rung))
+                    };
+                    if !key && (!rung_ok || kmax_p <= 1) {
+                        1
+                    } else {
+                        let p = FEC_LOSS_Q16.load(Ordering::Relaxed) as f32 / 65535.0 * FEC_BURST;
+                        let (target, kmax) = if key { (FEC_TARGET_KEY, (n_data / 4).max(2)) } else { (FEC_TARGET, kmax_p) };
+                        let k = nyx_link::parity_for(n_data, p.clamp(0.01, 0.6), target, kmax);
+                        if key || frame_id % 30 == 0 {
+                            log(&format!(
+                                "fec: {} {n_data} blocks + {k} parity (block loss {:.0} %)",
+                                if key { "keyframe" } else { "picture" }, p / FEC_BURST * 100.0
+                            ));
+                        }
+                        k
+                    }
+                };
+                let extra = fec_k.saturating_sub(1) as f32;
+                let e = FEC_EXTRA_Q8.load(Ordering::Relaxed) as f32 / 256.0;
+                FEC_EXTRA_Q8.store(((0.9 * e + 0.1 * extra) * 256.0) as u32, Ordering::Relaxed);
+                nyx_link::packetize_rs(frame_id, src_type, &app_data, seg, fec_k)
             };
-        // v40.45c: the video parity block is the LAST block packetize_fec made (before the
+        // v40.45c: the video parity block - the XOR, right after the data blocks (before the
         // text/data/info frames are appended); under interference it goes out twice.
-        let parity_idx = if cfg.fec && !blocks.is_empty() { Some(blocks.len() - 1) } else { None };
+        let parity_idx = if fec_k >= 1 && blocks.len() > n_data { Some(n_data) } else { None };
         if frame_id % 8 == 0 {
             log(&format!("pkpace: packetize={}us", t_pk.elapsed().as_micros()));
         }
@@ -2101,8 +2893,20 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         } else {
                             (deliv / sent_eff).clamp(0.0, 1.5)
                         };
-                        r_ema = 0.5 * r_ema + 0.5 * r;
-                        if r_ema < 0.92 {
+                        // v40.53: a window that delivered NOTHING is an outage (the far end out of
+                        // reach, a blockage), not a rate the air cannot carry: no cut. Cutting
+                        // x0.9 a second took the ceiling to its 25 % floor in a 13 s outage, and
+                        // the climb back at x1.05 a second held the video at 108 kbps on a clean
+                        // MCS1 for half a minute after it (bench 5/10, A -36 -> -40 dB).
+                        let outage = deliv < 1.0 || bw_hold;
+                        if !outage {
+                            r_ema = 0.5 * r_ema + 0.5 * r;
+                        }
+                        // (A faster climb after clean windows, x1.15, was tried with it: in the
+                        // simulator's fade it overshot the MCS0 / repeat-step ceiling, 1091 blocks
+                        // dropped from the queue, 10 % fewer pictures.)
+                        if outage {
+                        } else if r_ema < 0.92 {
                             air_scale = (air_scale * 0.90).max(0.25);
                         } else if r_ema > 0.96 {
                             air_scale = (air_scale * 1.05).min(1.0);
@@ -2177,14 +2981,18 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 if let Some(entry) = cache
                     .iter_mut()
                     .rev()
-                    .find(|e| e.seq & 0xFF == nseq & 0xFF && e.retx < max_retx)
+                    .find(|e| e.seq & 0xFF == nseq & 0xFF)
+                    // v40.53: the newest block with that sequence, and no Reed-Solomon row: lost
+                    // as the link fades, its retry goes at the rung the rate control fled to (five
+                    // frames a block at MCS0) for a row the data blocks' own retries make useless
+                    .filter(|e| e.retx < max_retx && !nyx_link::is_rs_parity(&e.block))
                 {
                     entry.retx += 1;
                     if cfg.txconv {
                         // v37.1: the conv path retransmits through the SAME conv_tx queue, OLD seq
                         // (the RX dedups by seq), at minstrel's CURRENT MCS; no need to remember
                         // the old rung.
-                        convtx.push(entry.seq, &entry.block);
+                        convtx.push_retx(entry.seq, &entry.block);
                         retransmits += 1;
                         if cfg.dup && interf_on {
                             dup_q.push_back((Instant::now() + DUP_GAP, entry.seq, entry.block));
@@ -2266,6 +3074,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         {
             let mut st = shared.stats.lock().unwrap();
             st.active_mcs = Some(mcs);
+            st.rep2 = rep2;
             st.seq = seq;
             st.blocks_per_frame = n_blocks;
             st.app_bytes_per_frame = app_data.len();
@@ -2295,7 +3104,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             afps,
             video_bitrate / 1000,
             idr_sent,
-            mcs.label(),
+            if rep2 { "QPSK 1/2 x2 (rung 6)" } else { mcs.label() },
             seq,
             n_blocks,
             tx_fps,
