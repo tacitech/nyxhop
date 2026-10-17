@@ -74,13 +74,26 @@ licence for your first ten boards.
 ### IP bridge: a private network over the link
 
 ```bash
-python link/scripts/nyx_ip.py on  --air 192.168.0.10 --ground 192.168.0.11
+python link/scripts/nyx_ip.py on   --air 192.168.0.10 --ground 192.168.0.11
+python link/scripts/nyx_ip.py test --air 192.168.0.10 --ground 192.168.0.11
 ```
 
 The aircraft board becomes the gateway of `192.168.10.0/24` and the ground board of
 `192.168.20.0/24`. Give a computer on each side an address there (`192.168.10.50`, gateway
 `192.168.10.1`; `192.168.20.50`, gateway `192.168.20.1`) and use them like two computers on one
 network: everything between them crosses the radio. `nyx_ip.py off` stops it.
+
+`test` checks the bridge from one end to the other over the radio: a ping, then a TCP stream
+each way, with the rate every second:
+
+```
+ping, ground 192.168.20.1 -> aircraft 192.168.10.1:
+  10 packets transmitted, 10 received, 0% packet loss, time 2707ms
+  rtt min/avg/max/mdev = 4.398/6.293/15.696/3.419 ms
+TCP, aircraft -> ground, 10 s:
+  18.3 Mbit/s
+  ...
+```
 
 ### Measuring the link
 
