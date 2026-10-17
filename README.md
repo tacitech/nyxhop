@@ -135,10 +135,18 @@ you are building:
 | PlutoSDR | Zynq-7010 | AD9363 | current radio, free |
 | ANTSDR E200 | Zynq-7020 | AD9361 | previous radio: pairs with another E200 |
 
-An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. The boards transmit
-at the power of their own front end, enough for a short-range test; for distance, add antennas
-with gain, a power amplifier and a low-noise amplifier. The frequencies and the power you
-transmit are yours to keep within your local rules.
+An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. Range depends on
+the amplifiers and antennas at each end:
+
+| RF chain at each end | band | video | link held |
+|---|---|---|---|
+| 0.5 W amplifier, LNA | 2.4 GHz | 13 km | 23 km |
+| 0.5 W amplifier, LNA | 5.8 GHz | 5.5 km | 9.5 km |
+| 1 W amplifier, LNA | 2.4 GHz | 18 km | 32 km |
+| 1 W amplifier, LNA | 5.8 GHz | 7.5 km | 13 km |
+
+*Calculated range, line of sight.* You are responsible for the frequencies and the power you
+transmit under the rules of your country.
 
 ## Repository layout and licensing
 
