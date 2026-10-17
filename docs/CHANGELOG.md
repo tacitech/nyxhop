@@ -2,6 +2,8 @@
 
 ## 1.0 (first public release, planned)
 
+* ADRV9364: 100 hours of operation before a licence is needed (was 20); flash the new
+  `deploy/adrv9364/BOOT.BIN`. The ANTSDR E200 keeps 20 hours.
 * Video link: H.264, adaptive bitrate and modulation, retransmission of lost frames, two-layer
   simulcast for the low end (off by default: it adds ~30 ms of latency; switch it on in the
   aircraft app for reach through fades). After a loss the aircraft repairs the picture with a

@@ -44,8 +44,8 @@ and loads at every boot.
 
 ## Grace period
 
-A board without a licence works for 20 hours of operation, counted by the board, so you can test
-before asking for a licence. After that video stops until a licence is loaded; control, pairing
+A board without a licence works for 100 hours of operation on the ADRV9364 (20 hours on the
+ANTSDR E200), counted by the board, so you can test before asking for a licence. After that video stops until a licence is loaded; control, pairing
 and the apps keep working so you can still read the DNA and apply the file.
 
 ## What the DNA is, and privacy
