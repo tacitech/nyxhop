@@ -43,6 +43,12 @@ pub static SENT_MCS: [AtomicU64; 7] = [
     AtomicU64::new(0),
 ];
 
+/// Branch B: spread a picture's blocks (SLOW_MS apart, over SPREAD_MS) only while the rate control
+/// is in the interference regime (the worker sets it every frame). On a clean channel spreading
+/// buys nothing and costs its whole width in latency: 14 blocks of a 720p picture 2 ms apart were
+/// 28 of the 28 ms from the encoder to the ground app (17/10, 2300 MHz, ARQ on or off alike).
+pub static SPREAD_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Blocks placed in the transmit queue.
 pub static CQ_IN: AtomicU64 = AtomicU64::new(0);
 /// Messages written to the socket.
@@ -345,9 +351,14 @@ fn send_paced(
             own_ms
         };
         let fast = own_ms.max(floor_ms).max(if crate::phy64() { 0.2 } else { 0.4 });
-        // frames waiting, this block's included (queued_us is air at the board's frame time)
-        let waiting = queued_us as f32 / 1000.0 / fast + nfrag.max(1) as f32;
-        (SPREAD_MS / waiting).clamp(fast, SLOW_MS.max(fast))
+        if crate::phy64() && !SPREAD_ON.load(Ordering::Relaxed) {
+            // branch B on a clean channel: back to back at the air's own pace
+            fast
+        } else {
+            // frames waiting, this block's included (queued_us is air at the board's frame time)
+            let waiting = queued_us as f32 / 1000.0 / fast + nfrag.max(1) as f32;
+            (SPREAD_MS / waiting).clamp(fast, SLOW_MS.max(fast))
+        }
     };
     let want = Duration::from_micros((gap_ms * 1000.0 * nfrag.max(1) as f32) as u64);
     // Windows thread::sleep OVERSLEEPS by ~1.5 ms (timer resolution); measured on the cable: a 2 ms

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1
+
+* Lower video latency: on a clean channel a picture goes out in one go, about 30 ms from frame
+  to screen at 720p. Its blocks are spread out only while the link sees interference.
+* The camera app for the board (`deploy/ipcam/`, `link/scripts/nyx_ipcam_install.py`) runs on
+  the 2.0 radio: an IP camera plugged into the aircraft board, no computer on board.
+
 ## 2.0
 
 * A new radio on the ADRV9364-Z7020 and the PlutoSDR: up to 48 Mbit/s between two ADRV9364s in a

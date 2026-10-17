@@ -1051,6 +1051,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 climb_at = None;
                 restore_at = None;
                 interf_on = false;
+                crate::conv_tx::SPREAD_ON.store(false, Ordering::Relaxed);
                 interf_down = 0;
                 interf_win = 0;
                 clean_cnt = 0;
@@ -1333,6 +1334,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                         clean_cnt = 0;
                     }
                     let interf = interf_on;
+                    crate::conv_tx::SPREAD_ON.store(interf, Ordering::Relaxed);
                     if interf != was {
                         surv_cnt = 0;
                         log(&format!(
