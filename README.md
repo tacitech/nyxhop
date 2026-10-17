@@ -11,7 +11,7 @@ the channels are yours, anywhere from 70 MHz to 6 GHz.**
 
 [![NyxHop demo: the two links on a spectrum analyser, live video, an LTE jammer, 48 Mbit/s and the IP bridge](docs/img/nyxhop-demo.jpg)](docs/img/nyxhop-demo.mp4)
 
-*Two minutes on the bench: the video and control links on a spectrum analyser, live video, an LTE
+*Two minutes: the video and control links on a spectrum analyser, live video, an LTE
 jammer on the video channel and the link moving away from it, 48 Mbit/s, the four channel widths
 and an IP network over the radio.*
 
