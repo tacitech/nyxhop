@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.3
+
+* PlutoSDR: the link starts on Auto, channel and width, every time the Pluto is switched on, as
+  the ADRV9364 since 2.0.2; a channel or a width picked by hand is no longer remembered. Flash the
+  new `deploy/pluto/pluto.frm`.
+
 ## 2.0.2
 
 * ADRV9364: the link starts on Auto, channel and width, every time the boards are switched on, and
