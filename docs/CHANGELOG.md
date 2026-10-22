@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.2
+
+* ADRV9364: the link starts on Auto, channel and width, every time the boards are switched on, and
+  finds itself. A channel or a width picked by hand holds until the boards are switched off; it is
+  no longer remembered.
+
 ## 2.0.1
 
 * Lower video latency: on a clean channel a picture goes out in one go, about 30 ms from frame
