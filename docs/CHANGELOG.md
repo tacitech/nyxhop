@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.4
+
+* ADRV9364: the control link hops over up to 64 channels, up from 8. Set the table on the ground
+  (`hop ctlchans`, or the app's channel panel); the aircraft gets it over the air. Channels that
+  get jammed or busy are dropped on their own and tried again later.
+
 ## 2.0.3
 
 * PlutoSDR: the link starts on Auto, channel and width, every time the Pluto is switched on, as
