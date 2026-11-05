@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.6
+
+* ADRV9364: when either board restarts or loses power for a moment, the link is back within
+  about ten seconds; it could take a minute or more before. Update both boards.
+* ADRV9364: after an outage the control link keeps its channels; it used to drop most of them
+  as jammed for a minute or two.
+
 ## 2.0.5
 
 * ADRV9364: better resistance to interference. Bursts that hit the channel, Wi-Fi sharing it for
