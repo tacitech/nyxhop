@@ -68,7 +68,7 @@ app press **Link aircraft** once to pair the two boards; the video appears on th
 Everything else is in the settings drawer (the gear, or `H`): the video source, your channel
 tables (*Auto* picks the best channel, *Off* holds one), the channel width, the radio.
 
-**4. The licence.** See [below](#licence): the first 100 hours of running are free, and so is a
+**4. The licence.** See [below](#licence): the first 20 hours of running are free, and so is a
 licence for your first ten boards.
 
 ### IP bridge: a private network over the link
@@ -115,10 +115,9 @@ antennas, your band and your distance.
 
 **PlutoSDR: free.** No licence, no time limit, commercial use included.
 
-**ADRV9364-Z7020: 100 running hours free, then a licence** (ANTSDR E200: 20 running hours). Only
-the time the board is switched on and running NyxHop counts; a board that is switched off counts
-nothing, so a board left in a drawer for a month has used none of its hours. 100 hours is, for
-example, 50 two-hour sessions.
+**ADRV9364-Z7020: 20 running hours free, then a licence.** Only the time the board is switched on
+and running NyxHop counts; a board that is switched off counts nothing, so a board left in a
+drawer for a month has used none of its hours. 20 hours is, for example, ten two-hour sessions.
 
 A licence for your first ten boards is free, commercial use included, and never expires:
 

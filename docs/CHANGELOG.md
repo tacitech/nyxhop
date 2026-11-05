@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.5
+
+* ADRV9364: better resistance to interference. Bursts that hit the channel, Wi-Fi sharing it for
+  one, now cost far fewer video frames. It needs 2.0.5 on both boards and turns itself on; paired
+  with an older release the link runs as before.
+* ADRV9364: a stronger signal at long range, while the fastest rates keep clear of overdriving the
+  amplifier. A board with an external amplifier needs its transmit power capped for it
+  (`tpc max -10` on that board's console, for example; the cap is remembered), or the extra power
+  at long range pushes the amplifier into compression.
+* ADRV9364: 20 running hours before a licence, down from 100. Boards that already have a licence
+  are not affected.
+
 ## 2.0.4
 
 * ADRV9364: the control link hops over up to 64 channels, up from 8. Set the table on the ground

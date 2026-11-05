@@ -43,14 +43,14 @@ Bug-fix releases belong to the generation they fix and load on every licence of 
 The licence pill turns to *licensed*. The file is stored on the board (and on the E200's SD card)
 and loads at every boot.
 
-## 100 running hours before a licence
+## 20 running hours before a licence
 
-A new ADRV9364-Z7020 runs NyxHop for **100 hours** before it needs a licence (an ANTSDR E200 for
-20 hours), so you can test everything first.
+A new ADRV9364-Z7020 or ANTSDR E200 runs NyxHop for **20 hours** before it needs a licence, so
+you can test everything first.
 
 These are **running hours**: the board counts only the time it is switched on and running
 NyxHop. Switched off, it counts nothing. A board that sits in a drawer for a month has used none
-of its hours; 100 hours is, for example, 50 sessions of two hours or four days running non-stop.
+of its hours; 20 hours is, for example, ten sessions of two hours.
 
 When the hours are used up, the video stops until a licence is loaded. Control, pairing and the
 apps keep working, so you can still read the DNA and apply the licence. `license` on the board
