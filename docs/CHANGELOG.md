@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.7
+
+* PlutoSDR: when either Pluto restarts or loses power for a moment, the link is back within about
+  fifteen seconds of it starting up; it could take a minute, or not come back to the full width,
+  before. After an outage the control link keeps its channels.
+* PlutoSDR: the control link hops over up to 64 channels, up from 8, as on the ADRV9364 since
+  2.0.4.
+* Flash the new `deploy/pluto/pluto.frm` on every Pluto.
+
 ## 2.0.6
 
 * ADRV9364: when either board restarts or loses power for a moment, the link is back within
