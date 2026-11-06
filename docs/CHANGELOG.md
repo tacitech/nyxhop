@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.10
+
+* ADRV9364 and PlutoSDR: telemetry and the IP network from the ground to the aircraft work again.
+  In 2.0.9 nothing sent from the ground reached the aircraft, so a flight controller behind the
+  link took no commands.
+* ADRV9364 and PlutoSDR: commands from the ground get through when some of the control channels
+  are busy (a cellular band nearby, for one).
+* ADRV9364 and PlutoSDR: after a restart the link goes back to its full width when some of its
+  control channels are busy; it could stay at 2.5 MHz.
+* Update both ADRV9364 boards, and flash the new `deploy/pluto/pluto.frm` on every Pluto.
+
 ## 2.0.9
 
 * ADRV9364 and PlutoSDR: two NyxHop links side by side no longer mix. A ground could take the
