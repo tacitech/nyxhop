@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.9
+
+* ADRV9364 and PlutoSDR: two NyxHop links side by side no longer mix. A ground could take the
+  video of another pair's aircraft on its channel for its own, and showed it while its own
+  aircraft was off. Update both ends of every pair; paired with an older release the link runs as
+  before.
+* ADRV9364 and PlutoSDR: after an outage the link widens back even when some of its control
+  channels are busy (another link nearby, a cellular band).
+
 ## 2.0.8
 
 * ADRV9364 and PlutoSDR: a control table set on the ground while the aircraft is off or out of
