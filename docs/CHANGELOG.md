@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.8
+
+* ADRV9364 and PlutoSDR: a control table set on the ground while the aircraft is off or out of
+  range reaches the aircraft when it comes back, within about fifteen seconds of it starting up.
+  The two used to stay apart until the aircraft was set by hand.
+* ADRV9364 and PlutoSDR: after an outage the link goes back to its full width in one step when
+  the signal allows it. An aircraft switched off and on a few times no longer keeps the link
+  narrow for minutes, and an aircraft that restarts no longer finds the ground on a narrower
+  width than the one it left.
+* PlutoSDR: on a channel shared with Wi-Fi, the ground now sees that the aircraft is gone and
+  narrows the link for it, as on a clear channel.
+* Update both ADRV9364 boards, and flash the new `deploy/pluto/pluto.frm` on every Pluto.
+
 ## 2.0.7
 
 * PlutoSDR: when either Pluto restarts or loses power for a moment, the link is back within about
