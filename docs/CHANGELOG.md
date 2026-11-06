@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.11
+
+* ADRV9364 and PlutoSDR: telemetry and the IP network from the ground to the aircraft hold up
+  when some of the control channels are busy (a cellular band nearby, for one): next to nothing is
+  lost, large IP packets included, and a command to a flight controller is answered in about
+  60 ms.
+* Update both ADRV9364 boards, and flash the new `deploy/pluto/pluto.frm` on every Pluto.
+
 ## 2.0.10
 
 * ADRV9364 and PlutoSDR: telemetry and the IP network from the ground to the aircraft work again.
