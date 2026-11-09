@@ -10,6 +10,10 @@ runs in an FPGA; the channels are yours, anywhere from 70 MHz to 6 GHz.**
 ![rate](https://img.shields.io/badge/up%20to-48%20Mbit%2Fs-brightgreen)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
 
+<img src="docs/img/nyxhop-board.jpg" width="560" alt="NyxHop board">
+
+*The NyxHop board: the link and a flight controller in one Zynq chip, 100 × 62 mm.*
+
 [![NyxHop demo: the two links on a spectrum analyser, live video, an LTE jammer, 48 Mbit/s and the IP bridge](docs/img/nyxhop-demo.jpg)](docs/img/nyxhop-demo.mp4)
 
 *Two minutes: the video and control links on a spectrum analyser, live video, an LTE
@@ -143,9 +147,15 @@ you are building:
 
 | FPGA board | FPGA | transceiver | status |
 |---|---|---|---|
+| NyxHop board | Zynq-7020 | AD9364 | current radio and flight controller, 2S–6S battery |
 | ADRV9364-Z7020 | Zynq-7020 | AD9364 | current radio |
 | PlutoSDR | Zynq-7010 | AD9363 | current radio, free |
 | ANTSDR E200 | Zynq-7020 | AD9361 | previous radio: pairs with another E200 |
+
+The NyxHop board runs the link and a PX4 or ArduPilot flight controller in the same Zynq chip,
+with no separate flight-controller board: its own IMU, a 2S–6S battery input, Pixhawk-standard
+autopilot ports (telemetry, GPS, RC, CAN, I2C, SPI), eight PWM/DShot motor outputs, a 4-in-1 ESC
+port, Ethernet, USB-C and microSD, 100 × 62 mm.
 
 An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. Range depends on
 the amplifiers and antennas at each end:
