@@ -10,9 +10,9 @@ runs in an FPGA; the channels are yours, anywhere from 70 MHz to 6 GHz.**
 ![rate](https://img.shields.io/badge/up%20to-48%20Mbit%2Fs-brightgreen)
 ![bands](https://img.shields.io/badge/70%20MHz-6%20GHz-green)
 
-<img src="docs/img/nyxhop-board.jpg" width="560" alt="NyxHop board">
+<img src="docs/img/nyxhop-board.jpg" width="380" alt="NyxHop board"> <img src="docs/img/nyxhop-stack.jpg" width="380" alt="NyxHop board with the radio module">
 
-*The NyxHop board: the link and a flight controller in one Zynq chip, 100 × 62 mm.*
+*The NyxHop board, 100 × 62 mm, with the radio module plugged in: the link and a flight controller in one Zynq chip.*
 
 [![NyxHop demo: the two links on a spectrum analyser, live video, an LTE jammer, 48 Mbit/s and the IP bridge](docs/img/nyxhop-demo.jpg)](docs/img/nyxhop-demo.mp4)
 
