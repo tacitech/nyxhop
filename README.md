@@ -155,7 +155,8 @@ you are building:
 The NyxHop board runs the link and a PX4 or ArduPilot flight controller in the same Zynq chip,
 with no separate flight-controller board: its own IMU, a 2S–6S battery input, Pixhawk-standard
 autopilot ports (telemetry, GPS, RC, CAN, I2C, SPI), eight PWM/DShot motor outputs, a 4-in-1 ESC
-port, Ethernet, USB-C and microSD, 100 × 62 mm.
+port, Ethernet, USB-C and microSD, 100 × 62 mm. Its flight-controller image, the install script,
+the PX4 patches and the board's schematic are in [fc/](fc/).
 
 An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. Range depends on
 the amplifiers and antennas at each end:

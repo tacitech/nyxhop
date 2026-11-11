@@ -1,0 +1,74 @@
+From db723a1075a1ab9c4426e56557e966327af6f188 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 13:34:11 +0700
+Subject: [PATCH 04/12] nyx_dshot: throttle 0 on exit, failsafe status;
+ nyx_fcio.hpp: CTRL bits, DSHOT_WD/DSHOT_FS
+
+---
+ src/drivers/nyx_dshot/nyx_dshot.cpp | 13 ++++++++++++-
+ src/lib/nyx_fcio/nyx_fcio.hpp       |  4 +++-
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index b9d0406..6d84fb2 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -4,7 +4,8 @@
+  * DShot out from the NyxHop board's PL (nyx_fcio): the mixer's 4 motor outputs written to the
+  * block, a frame on each line per update. Values as PX4's DShot driver: 0 disarmed (motor
+  * stopped), 1..1999 the throttle (DShot 48..2046). The line rate (DShot600 default) is the
+- * block's DSHOT_PERIOD, set here from NYX_DSHOT_RATE.
++ * block's DSHOT_PERIOD, set here from NYX_DSHOT_RATE. If this stops writing (PX4 dead or stuck)
++ * the block itself sends throttle 0 after DSHOT_WD ms (50 by default).
+  */
+ 
+ #include <drivers/drv_hrt.h>
+@@ -59,6 +60,13 @@ public:
+ 		if (should_exit()) {
+ 			ScheduleClear();
+ 			_mixing_output.unregister();
++
++			// the motors stopped now, not after the block's watchdog
++			for (unsigned i = 0; i < NUM_OUT; i++) {
++				_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, 0);
++			}
++
++			_fcio.wr(nyx_fcio::DSHOT_GO, 1);
+ 			exit_and_cleanup();
+ 			return;
+ 		}
+@@ -101,6 +109,9 @@ public:
+ 		PX4_INFO("DShot%d: %u frames sent; read back %u good, %u bad; bit %u clocks",
+ 			 _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT), (unsigned)_fcio.rd(nyx_fcio::DSHOT_GOOD),
+ 			 (unsigned)_fcio.rd(nyx_fcio::DSHOT_BAD), (unsigned)_fcio.rd(nyx_fcio::DSHOT_BITPER));
++		const uint32_t fs = _fcio.rd(nyx_fcio::DSHOT_FS);
++		PX4_INFO("failsafe after %u ms without an update: %s, %u trips", (unsigned)_fcio.rd(nyx_fcio::DSHOT_WD),
++			 (fs >> 31) ? "ON" : "off", (unsigned)(fs & 0xFFFF));
+ 
+ 		for (unsigned i = 0; i < NUM_OUT; i++) {
+ 			PX4_INFO("motor %u: out %4u, read back %4u", i, (unsigned)(_fcio.rd(nyx_fcio::DSHOT_TX + 4 * i) & 0x7FF),
+diff --git a/src/lib/nyx_fcio/nyx_fcio.hpp b/src/lib/nyx_fcio/nyx_fcio.hpp
+index ec02c9f..46dea55 100644
+--- a/src/lib/nyx_fcio/nyx_fcio.hpp
++++ b/src/lib/nyx_fcio/nyx_fcio.hpp
+@@ -23,7 +23,7 @@ static constexpr uint32_t VERSION = 0x46430001;
+ 
+ enum Reg : uint32_t {
+ 	VER          = 0x00,
+-	CTRL         = 0x04,
++	CTRL         = 0x04, // [0] emulated IMU on, [1] the real IMU on the header instead, [2] kill (DShot 0)
+ 	DSHOT_PERIOD = 0x08,
+ 	TEMP         = 0x0C,
+ 	AX           = 0x10, // ..GZ at 0x24: 20 bit signed, the chip's frame (x fwd, y left, z up)
+@@ -36,6 +36,8 @@ enum Reg : uint32_t {
+ 	DSHOT_TX     = 0x40, // ..0x4C: [10:0] throttle, [11] telemetry
+ 	DSHOT_GO     = 0x50,
+ 	DSHOT_SENT   = 0x54,
++	DSHOT_WD     = 0x58, // ms without DSHOT_GO before the block sends throttle 0 itself (0 off)
++	DSHOT_FS     = 0x5C, // [15:0] failsafe trips, [31] failsafe now
+ 	DSHOT_RX     = 0x60, // ..0x6C: [10:0] throttle, [11] telemetry, [31] a good frame seen
+ 	DSHOT_GOOD   = 0x70,
+ 	DSHOT_BAD    = 0x74,
+-- 
+2.53.0.windows.2
+

@@ -1,0 +1,17 @@
+[Unit]
+Description=PX4 flight controller on the NyxHop board
+After=nyxhop.service nyx-ipcam.service
+Wants=nyx-ipcam.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/root/px4
+Environment=PATH=/home/root/px4/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# the FPGA image checked, the board's ports on, the IMU's bus set for the mode (/home/root/px4/mode)
+ExecStartPre=/home/root/px4/fc-start.sh
+ExecStart=/bin/sh -c 'exec ./bin/px4 -d -s nyxhop-$(cat /home/root/px4/mode 2>/dev/null || echo hil).config'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

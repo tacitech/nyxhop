@@ -176,6 +176,45 @@ pub struct Shared {
     iq_stash: Mutex<std::collections::VecDeque<(u64, Instant, Vec<C32>)>>,
 }
 
+/// The link as a host that draws its own screen sees it (the pilot app): the same numbers the
+/// ground HUD shows.
+#[derive(Clone, Debug, Default)]
+pub struct LinkView {
+    pub connected: bool,
+    /// pictures coming (>= 5 a second)
+    pub live: bool,
+    pub snr_db: f32,
+    pub fps: f32,
+    pub kbps: f32,
+    pub bler: f32,
+    pub mcs: String,
+}
+
+impl Shared {
+    /// The picture on show, if it is newer than the version `seen` (pass the returned one back).
+    pub fn frame_since(&self, seen: u64) -> Option<(u64, RgbFrame)> {
+        let u = self.ui.lock().unwrap();
+        if u.rx_version == seen {
+            return None;
+        }
+        u.rx_frame.clone().map(|f| (u.rx_version, f))
+    }
+
+    pub fn link_view(&self) -> LinkView {
+        let m = self.ui.lock().unwrap().metrics.clone();
+        let connected = self.connected.load(Ordering::Relaxed);
+        LinkView {
+            connected,
+            live: connected && m.rx_fps >= 5.0,
+            snr_db: m.snr_db,
+            fps: m.disp_fps,
+            kbps: m.goodput_kbps,
+            bler: m.bler_recent,
+            mcs: mcs_disp_short(self.disp_mcs.load(Ordering::Relaxed) as usize),
+        }
+    }
+}
+
 /// The standalone app: options from the command line, a window of its own (or
 /// `--headless`).
 pub fn run(opts: Opts) -> eframe::Result {

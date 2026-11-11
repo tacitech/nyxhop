@@ -1,0 +1,466 @@
+From f8889a44d27d58eb7525706a8667a7e980728867 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Wed, 21 Oct 2026 20:25:32 +0700
+Subject: [PATCH 08/12] nyx_dshot: each motor DShot or PWM (NYX_PWM_OUTS,
+ NYX_PWM_RATE 50-400 Hz, NYX_PWM_MIN/MAX/DIS per motor; the PL's failsafe
+ pulse = NYX_PWM_DIS), NYX_DSHOT_MIN as DSHOT_MIN; nyx_fcio.hpp: block version
+ 2 registers (OUT_MODE, PWM_*), any version accepted; SIH_PL_IO reads a PWM
+ line's measured pulse (1000-2000 us)
+
+---
+ src/drivers/nyx_dshot/module.yaml             |  93 +++++++++++-
+ src/drivers/nyx_dshot/nyx_dshot.cpp           | 134 +++++++++++++++---
+ src/lib/nyx_fcio/nyx_fcio.hpp                 |  17 ++-
+ src/modules/simulation/simulator_sih/sih.cpp  |  18 ++-
+ .../simulation/simulator_sih/sih_params.c     |   3 +-
+ 5 files changed, 234 insertions(+), 31 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/module.yaml b/src/drivers/nyx_dshot/module.yaml
+index ea6c639..27995b2 100644
+--- a/src/drivers/nyx_dshot/module.yaml
++++ b/src/drivers/nyx_dshot/module.yaml
+@@ -1,4 +1,4 @@
+-module_name: NyxHop DShot (PL)
++module_name: NyxHop motor outputs (PL)
+ actuator_output:
+   output_groups:
+     - param_prefix: NYX_DSHOT
+@@ -19,13 +19,98 @@ parameters:
+             default: 600
+         NYX_DSHOT_WD:
+             description:
+-                short: DShot failsafe of the NyxHop PL outputs
++                short: Failsafe of the NyxHop PL outputs
+                 long: |
+-                    The PL sends throttle 0 on its own after this many ms without an update from
+-                    PX4 (dead or stuck). 0 turns it off. Keep it above 50 ms: the mixer updates at
++                    The PL stops the motors on its own after this many ms without an update from
++                    PX4 (dead or stuck): DShot throttle 0, or on a PWM motor its NYX_PWM_DIS pulse
++                    (the pulses go on). 0 turns it off. Keep it above 50 ms: the mixer updates at
+                     20 Hz before the controllers run.
+             type: int32
+             unit: ms
+             min: 0
+             max: 255
+             default: 100
++        NYX_DSHOT_MIN:
++            description:
++                short: Minimum DShot motor output of the NyxHop PL outputs
++                long: |
++                    The lowest throttle while armed, as a fraction of full throttle (PX4's DSHOT_MIN
++                    for these outputs). Set it so that the motors always spin while armed.
++            type: float
++            unit: norm
++            min: 0
++            max: 1
++            decimal: 3
++            increment: 0.005
++            default: 0.055
++    - group: PWM Outputs
++      definitions:
++        NYX_PWM_OUTS:
++            description:
++                short: NyxHop PL motors on PWM instead of DShot
++                long: |
++                    The motors driven by a PWM ESC (a pulse NYX_PWM_MIN..NYX_PWM_MAX us at
++                    NYX_PWM_RATE); the others are DShot. On a PWM motor the PL never stops the
++                    pulses: before PX4 starts, in its failsafe and with kill it sends NYX_PWM_DIS
++                    (an old PWM ESC that loses its signal may hold the last throttle).
++            type: bitmask
++            bit:
++                0: Motor 1
++                1: Motor 2
++                2: Motor 3
++                3: Motor 4
++            min: 0
++            max: 15
++            default: 0
++            reboot_required: true
++        NYX_PWM_RATE:
++            description:
++                short: PWM rate of the NyxHop PL outputs
++                long: |
++                    Pulses per second on the PWM motors: 50 for any ESC, up to 400 for the
++                    multicopter ESCs that take it.
++            type: int32
++            unit: Hz
++            min: 50
++            max: 400
++            default: 50
++            reboot_required: true
++        NYX_PWM_MIN${i}:
++            description:
++                short: PWM minimum of NyxHop motor ${i}
++                long: |
++                    The pulse at the lowest throttle while armed (us). Only for a motor on PWM
++                    (NYX_PWM_OUTS).
++            type: int32
++            unit: us
++            min: 800
++            max: 1400
++            num_instances: 4
++            instance_start: 1
++            default: [1000, 1000, 1000, 1000]
++        NYX_PWM_MAX${i}:
++            description:
++                short: PWM maximum of NyxHop motor ${i}
++                long: |
++                    The pulse at full throttle (us). Only for a motor on PWM (NYX_PWM_OUTS).
++            type: int32
++            unit: us
++            min: 1600
++            max: 2200
++            num_instances: 4
++            instance_start: 1
++            default: [2000, 2000, 2000, 2000]
++        NYX_PWM_DIS${i}:
++            description:
++                short: PWM disarmed pulse of NyxHop motor ${i}
++                long: |
++                    The pulse while disarmed (us), and the one the PL itself sends before PX4
++                    starts, in its failsafe (NYX_DSHOT_WD) and with kill. Only for a motor on PWM
++                    (NYX_PWM_OUTS).
++            type: int32
++            unit: us
++            min: 800
++            max: 2200
++            num_instances: 4
++            instance_start: 1
++            default: [1000, 1000, 1000, 1000]
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index ae9cf0f..ac9ba50 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -1,18 +1,27 @@
+ /**
+  * @file nyx_dshot.cpp
+  *
+- * DShot out from the NyxHop board's PL (nyx_fcio): the mixer's 4 motor outputs written to the
+- * block, a frame on each line per update. Values as PX4's DShot driver: 0 disarmed (motor
+- * stopped), 1..1999 the throttle (DShot 48..2046). The line rate (DShot600 default) is the
+- * block's DSHOT_PERIOD, set here from NYX_DSHOT_RATE. If this stops writing (PX4 dead or stuck)
+- * the block itself sends throttle 0 after NYX_DSHOT_WD ms (100 by default: above the mixer's own
+- * 50 ms backup schedule, which is all it runs on before the controllers publish).
++ * The motors out of the NyxHop board's PL (nyx_fcio): the mixer's 4 motor outputs written to the
++ * block, all lines updated at once per mixer update. Each line is DShot, or PWM if its bit is set
++ * in NYX_PWM_OUTS (the block's version 2).
++ *
++ * DShot: values as PX4's DShot driver: 0 disarmed (motor stopped), NYX_DSHOT_MIN..1999 the
++ * throttle (DShot 48..2046). The line rate (DShot600 default) is the block's DSHOT_PERIOD, set
++ * here from NYX_DSHOT_RATE.
++ * PWM: the pulse in us, NYX_PWM_DISn disarmed, NYX_PWM_MINn..NYX_PWM_MAXn armed, NYX_PWM_RATE
++ * pulses a second. The block makes the pulses on its own clock and never stops them: before the
++ * first update, in its failsafe and with kill they are NYX_PWM_DISn.
++ *
++ * If this stops writing (PX4 dead or stuck) the block itself stops the motors after NYX_DSHOT_WD
++ * ms (100 by default: above the mixer's own 50 ms backup schedule, which is all it runs on before
++ * the controllers publish): throttle 0 on DShot, the disarmed pulse on PWM.
+  */
+ 
+ #include <drivers/drv_hrt.h>
+ #include <lib/mathlib/mathlib.h>
+ #include <lib/mixer_module/mixer_module.hpp>
+ #include <lib/nyx_fcio/nyx_fcio.hpp>
++#include <parameters/param.h>
+ #include <lib/perf/perf_counter.h>
+ #include <px4_platform_common/log.h>
+ #include <px4_platform_common/module.h>
+@@ -30,7 +39,7 @@ public:
+ 	{
+ 		_mixing_output.setAllDisarmedValues(0);
+ 		_mixing_output.setAllMinValues(1);
+-		_mixing_output.setAllMaxValues(1999);
++		_mixing_output.setAllMaxValues(DSHOT_MAX);
+ 		_mixing_output.setAllFailsafeValues(0);
+ 	}
+ 
+@@ -51,7 +60,24 @@ public:
+ 			return PX4_ERROR;
+ 		}
+ 
+-		set_rate();
++		// which lines are PWM, and their rate: only here (reboot_required)
++		_pwm_mask = _param_pwm_outs.get() & 0xF;
++
++		if (_pwm_mask != 0 && _fcio.version() < 2) {
++			PX4_ERR("NYX_PWM_OUTS %u, but this bitstream's FC block (version %u) has no PWM",
++				(unsigned)_pwm_mask, (unsigned)_fcio.version());
++			return PX4_ERROR;
++		}
++
++		apply_params();
++
++		if (_fcio.version() >= 2) {
++			// (each line's minimum pulse is in the block before it turns to PWM)
++			const int rate = math::constrain((int)_param_pwm_rate.get(), 50, 400);
++			_fcio.wr(nyx_fcio::PWM_PERIOD, (1000000 + rate / 2) / rate);
++			_fcio.wr(nyx_fcio::OUT_MODE, _pwm_mask);
++		}
++
+ 		ScheduleNow();
+ 		return PX4_OK;
+ 	}
+@@ -62,9 +88,14 @@ public:
+ 			ScheduleClear();
+ 			_mixing_output.unregister();
+ 
+-			// the motors stopped now, not after the block's watchdog
++			// the motors stopped now, not after the block's watchdog (PWM: the pulses go on)
+ 			for (unsigned i = 0; i < NUM_OUT; i++) {
+-				_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, 0);
++				if (is_pwm(i)) {
++					_fcio.wr(nyx_fcio::PWM_US + 4 * i, _pwm_dis[i]);
++
++				} else {
++					_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, 0);
++				}
+ 			}
+ 
+ 			_fcio.wr(nyx_fcio::DSHOT_GO, 1);
+@@ -81,7 +112,7 @@ public:
+ 			parameter_update_s pupdate;
+ 			_parameter_update_sub.copy(&pupdate);
+ 			updateParams();
+-			set_rate();
++			apply_params();
+ 		}
+ 
+ 		_mixing_output.updateSubscriptions(false);
+@@ -94,9 +125,16 @@ public:
+ 	{
+ 		for (unsigned i = 0; i < NUM_OUT; i++) {
+ 			const uint16_t o = i < num_outputs ? outputs[i] : 0;
+-			// 0 (disarmed, or failsafe) stops the motor; 1..1999 = DShot 48..2046
+-			const uint32_t v = (o == 0 || o == UINT16_MAX) ? 0 : math::min<uint32_t>(o, 1999) + 47;
+-			_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, v);
++			const bool stop = o == 0 || o == UINT16_MAX;
++
++			if (is_pwm(i)) {
++				// the pulse in us; stopped (failsafe): the disarmed pulse
++				_fcio.wr(nyx_fcio::PWM_US + 4 * i, stop ? _pwm_dis[i] : math::min<uint32_t>(o, PWM_MAX_US));
++
++			} else {
++				// 0 (disarmed, or failsafe) stops the motor; 1..1999 = DShot 48..2046
++				_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, stop ? 0 : math::min<uint32_t>(o, DSHOT_MAX) + 47);
++			}
+ 		}
+ 
+ 		_fcio.wr(nyx_fcio::DSHOT_GO, 1);
+@@ -107,16 +145,30 @@ public:
+ 	{
+ 		perf_print_counter(_cycle_perf);
+ 		perf_print_counter(_interval_perf);
++		PX4_INFO("FC block version %u", (unsigned)_fcio.version());
+ 		PX4_INFO("DShot%d: %u frames sent; read back %u good, %u bad; bit %u clocks",
+ 			 _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT), (unsigned)_fcio.rd(nyx_fcio::DSHOT_GOOD),
+ 			 (unsigned)_fcio.rd(nyx_fcio::DSHOT_BAD), (unsigned)_fcio.rd(nyx_fcio::DSHOT_BITPER));
++
++		if (_pwm_mask) {
++			PX4_INFO("PWM every %u us", (unsigned)_fcio.rd(nyx_fcio::PWM_PERIOD));
++		}
++
+ 		const uint32_t fs = _fcio.rd(nyx_fcio::DSHOT_FS);
+ 		PX4_INFO("failsafe after %u ms without an update: %s, %u trips", (unsigned)_fcio.rd(nyx_fcio::DSHOT_WD),
+ 			 (fs >> 31) ? "ON" : "off", (unsigned)(fs & 0xFFFF));
+ 
+ 		for (unsigned i = 0; i < NUM_OUT; i++) {
+-			PX4_INFO("motor %u: out %4u, read back %4u", i, (unsigned)(_fcio.rd(nyx_fcio::DSHOT_TX + 4 * i) & 0x7FF),
+-				 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF));
++			if (is_pwm(i)) {
++				PX4_INFO("motor %u: PWM %4u us, read back %4u us (disarmed %u)", i + 1,
++					 (unsigned)(_fcio.rd(nyx_fcio::PWM_US + 4 * i) & 0xFFF),
++					 (unsigned)(_fcio.rd(nyx_fcio::PWM_RX + 4 * i) & 0xFFF), (unsigned)_pwm_dis[i]);
++
++			} else {
++				PX4_INFO("motor %u: DShot %4u, read back %4u", i + 1,
++					 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_TX + 4 * i) & 0x7FF),
++					 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF));
++			}
+ 		}
+ 
+ 		_mixing_output.printStatus();
+@@ -125,9 +177,47 @@ public:
+ 
+ private:
+ 	static constexpr unsigned NUM_OUT = 4;
++	static constexpr uint16_t DSHOT_MAX = 1999;
++	static constexpr uint32_t PWM_MAX_US = 2200;
++
++	bool is_pwm(unsigned i) const { return _pwm_mask & (1u << i); }
++
++	/** a per-motor parameter, NAME1..NAME4 */
++	static int32_t param_motor(const char *name, unsigned i, int32_t dflt)
++	{
++		char n[17];
++		snprintf(n, sizeof(n), "%s%u", name, i + 1);
++		int32_t v = dflt;
++		const param_t h = param_find(n);
++
++		if (h != PARAM_INVALID) {
++			param_get(h, &v);
++		}
+ 
+-	void set_rate()
++		return v;
++	}
++
++	/** the mixer's range of each line, and the block's DShot rate, watchdog and PWM minimum pulses */
++	void apply_params()
+ 	{
++		// we use a minimum value of 1, since 0 is for disarmed (as PX4's DShot driver)
++		const uint16_t dshot_min = math::constrain((int)(_param_dshot_min.get() * DSHOT_MAX), 1, (int)DSHOT_MAX);
++
++		for (unsigned i = 0; i < NUM_OUT; i++) {
++			if (is_pwm(i)) {
++				_pwm_dis[i] = math::constrain((int)param_motor("NYX_PWM_DIS", i, 1000), 800, (int)PWM_MAX_US);
++				_mixing_output.disarmedValue(i) = _pwm_dis[i];
++				_mixing_output.minValue(i) = math::constrain((int)param_motor("NYX_PWM_MIN", i, 1000), 800, 1400);
++				_mixing_output.maxValue(i) = math::constrain((int)param_motor("NYX_PWM_MAX", i, 2000), 1600, (int)PWM_MAX_US);
++				_fcio.wr(nyx_fcio::PWM_FS_US + 4 * i, _pwm_dis[i]);
++
++			} else {
++				_mixing_output.disarmedValue(i) = 0;
++				_mixing_output.minValue(i) = dshot_min;
++				_mixing_output.maxValue(i) = DSHOT_MAX;
++			}
++		}
++
+ 		// the block's clock is 200 MHz: a DShot600 bit = 333 clocks
+ 		const int rate = math::constrain((int)_param_rate.get(), 150, 1200);
+ 		_fcio.wr(nyx_fcio::DSHOT_PERIOD, (200000 + rate / 2) / rate);
+@@ -137,13 +227,18 @@ private:
+ 	MixingOutput _mixing_output{"NYX_DSHOT", NUM_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+ 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
+ 	nyx_fcio::Map _fcio;
++	uint8_t _pwm_mask{0};
++	uint16_t _pwm_dis[NUM_OUT] {1000, 1000, 1000, 1000};
+ 
+ 	perf_counter_t _cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
+ 	perf_counter_t _interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
+ 
+ 	DEFINE_PARAMETERS(
+ 		(ParamInt<px4::params::NYX_DSHOT_RATE>) _param_rate,
+-		(ParamInt<px4::params::NYX_DSHOT_WD>) _param_wd
++		(ParamInt<px4::params::NYX_DSHOT_WD>) _param_wd,
++		(ParamFloat<px4::params::NYX_DSHOT_MIN>) _param_dshot_min,
++		(ParamInt<px4::params::NYX_PWM_OUTS>) _param_pwm_outs,
++		(ParamInt<px4::params::NYX_PWM_RATE>) _param_pwm_rate
+ 	)
+ };
+ 
+@@ -178,7 +273,8 @@ int NyxDShot::print_usage(const char *reason)
+ 	PRINT_MODULE_DESCRIPTION(
+ 		R"DESCR_STR(
+ ### Description
+-DShot out on 4 lines from the NyxHop board's PL (the nyx_fcio block), read back by its decoder.
++The 4 motor outputs of the NyxHop board's PL (the nyx_fcio block): each DShot, or PWM
++(NYX_PWM_OUTS), read back by the block.
+ )DESCR_STR");
+ 
+ 	PRINT_MODULE_USAGE_NAME("nyx_dshot", "driver");
+diff --git a/src/lib/nyx_fcio/nyx_fcio.hpp b/src/lib/nyx_fcio/nyx_fcio.hpp
+index 46dea55..7eb0235 100644
+--- a/src/lib/nyx_fcio/nyx_fcio.hpp
++++ b/src/lib/nyx_fcio/nyx_fcio.hpp
+@@ -3,7 +3,7 @@
+  *
+  * The NyxHop board's flight controller I/O block in the PL (fpga/rtl/nyx_fcio.v in NyxHop-FC):
+  * an ICM-42688-P on the PS's SPI1 (read by the icm42688p driver over /dev/spidev) whose accel and
+- * gyro values are written here, and DShot out on 4 lines with a decoder reading them back.
++ * gyro values are written here, and 4 motor lines, each DShot or (version 2) PWM, read back.
+  * Mapped from /dev/mem (root). Only with a bitstream that has the block: elsewhere the address
+  * is not decoded and an access faults.
+  */
+@@ -19,7 +19,7 @@ namespace nyx_fcio
+ {
+ 
+ static constexpr uint32_t BASE = 0x43C70000;
+-static constexpr uint32_t VERSION = 0x46430001;
++static constexpr uint32_t ID = 0x4643;      // VER's high half; the low half the version (2: PWM)
+ 
+ enum Reg : uint32_t {
+ 	VER          = 0x00,
+@@ -42,6 +42,12 @@ enum Reg : uint32_t {
+ 	DSHOT_GOOD   = 0x70,
+ 	DSHOT_BAD    = 0x74,
+ 	DSHOT_BITPER = 0x78,
++	// version 2
++	OUT_MODE     = 0x7C, // [3:0] line i PWM (1) or DShot (0)
++	PWM_PERIOD   = 0x80, // us from one PWM pulse to the next
++	PWM_US       = 0x84, // ..0x90: [11:0] each PWM line's pulse, us
++	PWM_FS_US    = 0x94, // ..0xA0: [11:0] the pulse before the first DSHOT_GO, in the failsafe, with kill
++	PWM_RX       = 0xA4, // ..0xB0: [11:0] each PWM line's last pulse measured, us; [31] a pulse seen
+ };
+ 
+ // the chip's scales in high-resolution FIFO packets (20 bit)
+@@ -62,7 +68,7 @@ public:
+ 		}
+ 	}
+ 
+-	/** map the block; true if its version is there */
++	/** map the block; true if it is there */
+ 	bool open()
+ 	{
+ 		_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
+@@ -77,9 +83,12 @@ public:
+ 			return false;
+ 		}
+ 
+-		return rd(VER) == VERSION;
++		return (rd(VER) >> 16) == ID;
+ 	}
+ 
++	/** the block's version: 1 DShot only, 2 PWM too */
++	uint32_t version() const { return rd(VER) & 0xFFFF; }
++
+ 	// (off: a register's byte address, a multiple of 4)
+ 	uint32_t rd(uint32_t off) const { return static_cast<volatile uint32_t *>(_p)[off / 4]; }
+ 	void wr(uint32_t off, uint32_t v) { static_cast<volatile uint32_t *>(_p)[off / 4] = v; }
+diff --git a/src/modules/simulation/simulator_sih/sih.cpp b/src/modules/simulation/simulator_sih/sih.cpp
+index dd4220b..d0ebdd1 100644
+--- a/src/modules/simulation/simulator_sih/sih.cpp
++++ b/src/modules/simulation/simulator_sih/sih.cpp
+@@ -667,11 +667,23 @@ void Sih::pl_read_motors(const float dt)
+ {
+ #if defined(__PX4_POSIX)
+ 	_last_actuator_output_time = hrt_absolute_time();
++	// (the block's version 2: any line may be PWM)
++	const uint32_t pwm = _fcio.version() >= 2 ? _fcio.rd(nyx_fcio::OUT_MODE) : 0;
+ 
+ 	for (int i = 0; i < 4; i++) {
+-		// DShot: 0 stop (and 1..47 commands), 48..2047 the throttle
+-		const uint32_t thr = _fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF;
+-		const float u_sp = thr >= 48 ? (thr - 48) / 1999.f : 0.f;
++		float u_sp;
++
++		if (pwm & (1u << i)) {
++			// PWM: the pulse measured, 1000..2000 us (an ESC's usual range)
++			const uint32_t us = _fcio.rd(nyx_fcio::PWM_RX + 4 * i) & 0xFFF;
++			u_sp = math::constrain((us - 1000.f) / 1000.f, 0.f, 1.f);
++
++		} else {
++			// DShot: 0 stop (and 1..47 commands), 48..2047 the throttle
++			const uint32_t thr = _fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF;
++			u_sp = thr >= 48 ? (thr - 48) / 1999.f : 0.f;
++		}
++
+ 		_u[i] = _u[i] + dt / _T_TAU * (u_sp - _u[i]); // first order transfer function with time constant tau
+ 	}
+ #endif
+diff --git a/src/modules/simulation/simulator_sih/sih_params.c b/src/modules/simulation/simulator_sih/sih_params.c
+index a82bdf1..4fb8a7c 100644
+--- a/src/modules/simulation/simulator_sih/sih_params.c
++++ b/src/modules/simulation/simulator_sih/sih_params.c
+@@ -343,7 +343,8 @@ PARAM_DEFINE_INT32(SIH_VEHICLE_TYPE, 0);
+ /**
+  * Motors and IMU through the NyxHop board's PL
+  *
+- * The motor commands are read from the DShot decoder in the PL (what nyx_dshot sent), and the
++ * The motor commands are read back from the PL's lines (what nyx_dshot sent: the DShot decoder,
++ * or on a PWM line the pulse measured, 1000..2000 us), and the
+  * accelerometer and gyroscope go into the PL's emulated ICM-42688-P (read back by the icm42688p
+  * driver over SPI) instead of being published by the simulator. Needs the bitstream with the
+  * nyx_fcio block.
+-- 
+2.53.0.windows.2
+

@@ -1,0 +1,667 @@
+From 2e43c10effec226acbc8eeff0a92417078b7463e Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 12:12:45 +0700
+Subject: [PATCH 02/12] nyxhop/zynq step 2: icm42688p on /dev/spidev2.0
+ (PL-emulated chip), nyx_dshot (DShot out from the PL), SIH_PL_IO (SIH reads
+ the PL's DShot decoder, writes accel/gyro into the PL), nyxhop-hil.config,
+ SPI1 overlay
+
+---
+ boards/nyxhop/zynq/default.px4board           |   2 +
+ boards/nyxhop/zynq/fcio-spi.dtso              |  26 +++
+ boards/nyxhop/zynq/nyxhop-hil.config          |  75 ++++++++
+ boards/nyxhop/zynq/src/CMakeLists.txt         |   3 +
+ boards/nyxhop/zynq/src/spi.cpp                |   6 +-
+ src/drivers/nyx_dshot/CMakeLists.txt          |  10 +
+ src/drivers/nyx_dshot/Kconfig                 |   6 +
+ src/drivers/nyx_dshot/module.yaml             |  19 ++
+ src/drivers/nyx_dshot/nyx_dshot.cpp           | 179 ++++++++++++++++++
+ src/lib/nyx_fcio/nyx_fcio.hpp                 |  90 +++++++++
+ src/modules/simulation/simulator_sih/sih.cpp  |  58 +++++-
+ src/modules/simulation/simulator_sih/sih.hpp  |  15 +-
+ .../simulation/simulator_sih/sih_params.c     |  14 ++
+ 13 files changed, 498 insertions(+), 5 deletions(-)
+ create mode 100644 boards/nyxhop/zynq/fcio-spi.dtso
+ create mode 100644 boards/nyxhop/zynq/nyxhop-hil.config
+ create mode 100644 src/drivers/nyx_dshot/CMakeLists.txt
+ create mode 100644 src/drivers/nyx_dshot/Kconfig
+ create mode 100644 src/drivers/nyx_dshot/module.yaml
+ create mode 100644 src/drivers/nyx_dshot/nyx_dshot.cpp
+ create mode 100644 src/lib/nyx_fcio/nyx_fcio.hpp
+
+diff --git a/boards/nyxhop/zynq/default.px4board b/boards/nyxhop/zynq/default.px4board
+index 264ae32..7a62772 100644
+--- a/boards/nyxhop/zynq/default.px4board
++++ b/boards/nyxhop/zynq/default.px4board
+@@ -4,6 +4,8 @@ CONFIG_BOARD_TOOLCHAIN="arm-linux-gnueabihf"
+ CONFIG_BOARD_ARCHITECTURE="cortex-a9"
+ CONFIG_BOARD_NOLOCKSTEP=y
+ CONFIG_DRIVERS_GPS=y
++CONFIG_DRIVERS_IMU_INVENSENSE_ICM42688P=y
++CONFIG_DRIVERS_NYX_DSHOT=y
+ CONFIG_MODULES_ATTITUDE_ESTIMATOR_Q=y
+ CONFIG_MODULES_COMMANDER=y
+ CONFIG_MODULES_CONTROL_ALLOCATOR=y
+diff --git a/boards/nyxhop/zynq/fcio-spi.dtso b/boards/nyxhop/zynq/fcio-spi.dtso
+new file mode 100644
+index 0000000..2ce4946
+--- /dev/null
++++ b/boards/nyxhop/zynq/fcio-spi.dtso
+@@ -0,0 +1,26 @@
++/*
++ * fcio-spi.dtso - the PS's SPI1 (EMIO, disabled in the Kuiper device tree) on, with a spidev on
++ * chip select 0: /dev/spidev2.0 for PX4's icm42688p driver. Applied at run time (configfs):
++ *   dtc -@ -I dts -O dtb -o fcio-spi.dtbo fcio-spi.dtso
++ *   mkdir /sys/kernel/config/device-tree/overlays/fcio
++ *   cat fcio-spi.dtbo > /sys/kernel/config/device-tree/overlays/fcio/dtbo
++ */
++/dts-v1/;
++/plugin/;
++
++/ {
++	fragment@0 {
++		target-path = "/axi/spi@e0007000";
++		__overlay__ {
++			status = "okay";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			spidev@0 {
++				compatible = "rohm,dh2228fv";
++				reg = <0>;
++				spi-max-frequency = <25000000>;
++			};
++		};
++	};
++};
+diff --git a/boards/nyxhop/zynq/nyxhop-hil.config b/boards/nyxhop/zynq/nyxhop-hil.config
+new file mode 100644
+index 0000000..bd68dea
+--- /dev/null
++++ b/boards/nyxhop/zynq/nyxhop-hil.config
+@@ -0,0 +1,75 @@
++#!/bin/sh
++# NyxHop Zynq, step 2: PX4 with its real I/O path and the vehicle still simulated. The IMU is the
++# icm42688p driver on /dev/spidev2.0, talking to the ICM-42688-P emulated in the PL (nyx_fcio);
++# the motors go out as DShot600 from the PL (nyx_dshot). SIH (SIH_PL_IO) reads the motors back
++# from the PL's DShot decoder and writes its accel/gyro into the emulated chip. Needs the bitstream
++# with nyx_fcio and the overlay fcio-spi.dtbo applied. Run from the folder holding bin/ and etc/:
++#   PATH=$PWD/bin:$PATH ./bin/px4 -d -s nyxhop-hil.config
++. px4-alias.sh
++
++param select parameters_hil.bson
++if [ -f parameters_hil.bson ]
++then
++	param import
++fi
++
++# the vehicle: the multicopter defaults, then SIH's quad X
++. etc/init.d/rc.mc_defaults
++param set-default MAV_TYPE 2
++param set-default SENS_EN_GPSSIM 1
++param set-default SENS_EN_BAROSIM 1
++param set-default SENS_EN_MAGSIM 1
++param set-default CA_ROTOR_COUNT 4
++param set-default CA_ROTOR0_PX 1
++param set-default CA_ROTOR0_PY 1
++param set-default CA_ROTOR1_PX -1
++param set-default CA_ROTOR1_PY -1
++param set-default CA_ROTOR2_PX 1
++param set-default CA_ROTOR2_PY -1
++param set-default CA_ROTOR2_KM -0.05
++param set-default CA_ROTOR3_PX -1
++param set-default CA_ROTOR3_PY 1
++param set-default CA_ROTOR3_KM -0.05
++param set-default NYX_DSHOT_FUNC1 101
++param set-default NYX_DSHOT_FUNC2 102
++param set-default NYX_DSHOT_FUNC3 103
++param set-default NYX_DSHOT_FUNC4 104
++param set-default EKF2_GPS_DELAY 0
++param set SIH_VEHICLE_TYPE 0
++param set SIH_PL_IO 1
++param set-default IMU_INTEG_RATE 250
++param set-default COM_MODE_ARM_CHK 1
++# the IMU: ICM-42688-P on SPI bus 2, chip select 0 (device id 0x260012); the simulated mag
++param set-default CAL_ACC0_ID 2490386
++param set-default CAL_GYRO0_ID 2490386
++param set-default CAL_MAG0_ID 197388
++param set-default CAL_MAG0_PRIO 50
++param set-default SENS_BOARD_X_OFF 0.000001
++param set-default BAT1_N_CELLS 4
++# no RC receiver: commands come from the ground station only; the load checks off
++param set-default COM_RC_IN_MODE 4
++param set-default COM_CPU_MAX -1
++param set-default COM_RAM_MAX -1
++param set-default EKF2_REQ_GPS_H 0.5
++
++dataman start -f dataman
++simulator_sih start
++sensor_baro_sim start
++sensor_gps_sim start
++sensor_mag_sim start
++icm42688p -s -b 2 start
++load_mon start
++battery_simulator start
++system_power_simulator start
++rc_update start
++manual_control start
++sensors start
++commander start
++ekf2 start &
++nyx_dshot start
++. etc/init.d/rc.vehicle_setup
++navigator start
++
++# MAVLink over the NyxHop link (nyx-ipcam: 14557 up the link, 14556 what comes down)
++mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
++mavlink boot_complete
+diff --git a/boards/nyxhop/zynq/src/CMakeLists.txt b/boards/nyxhop/zynq/src/CMakeLists.txt
+index 732138c..b871ca7 100644
+--- a/boards/nyxhop/zynq/src/CMakeLists.txt
++++ b/boards/nyxhop/zynq/src/CMakeLists.txt
+@@ -2,3 +2,6 @@ add_library(drivers_board
+ 	i2c.cpp
+ 	spi.cpp
+ )
++
++# the SPI/I2C device classes (posix: spidev, i2c-dev) for the drivers on the board
++target_link_libraries(drivers_board PRIVATE drivers__device)
+diff --git a/boards/nyxhop/zynq/src/spi.cpp b/boards/nyxhop/zynq/src/spi.cpp
+index 96cdf33..0857678 100644
+--- a/boards/nyxhop/zynq/src/spi.cpp
++++ b/boards/nyxhop/zynq/src/spi.cpp
+@@ -1,9 +1,11 @@
+ #include <px4_arch/spi_hw_description.h>
+ #include <drivers/drv_sensor.h>
+ 
+-// /dev/spidev1.0 on the carrier's header (the IMU of step 2)
++// /dev/spidev2.0: the PS's SPI1 (EMIO), enabled by the device tree overlay fcio-spi.dtbo (bus 2:
++// the AD936x's SPI0 and the QSPI flash take 0 and 1). In the PL it reaches the FC I/O block's
++// ICM-42688-P (or, later, the real one on the carrier's header).
+ constexpr px4_spi_bus_t px4_spi_buses[SPI_BUS_MAX_BUS_ITEMS] = {
+-	initSPIBus(1, {
++	initSPIBus(2, {
+ 		initSPIDevice(DRV_IMU_DEVTYPE_ICM42688P, 0),
+ 	}),
+ };
+diff --git a/src/drivers/nyx_dshot/CMakeLists.txt b/src/drivers/nyx_dshot/CMakeLists.txt
+new file mode 100644
+index 0000000..641bc2b
+--- /dev/null
++++ b/src/drivers/nyx_dshot/CMakeLists.txt
+@@ -0,0 +1,10 @@
++px4_add_module(
++	MODULE drivers__nyx_dshot
++	MAIN nyx_dshot
++	SRCS
++		nyx_dshot.cpp
++	MODULE_CONFIG
++		module.yaml
++	DEPENDS
++		mixer_module
++	)
+diff --git a/src/drivers/nyx_dshot/Kconfig b/src/drivers/nyx_dshot/Kconfig
+new file mode 100644
+index 0000000..a98d666
+--- /dev/null
++++ b/src/drivers/nyx_dshot/Kconfig
+@@ -0,0 +1,6 @@
++menuconfig DRIVERS_NYX_DSHOT
++	bool "nyx_dshot"
++	default n
++	depends on PLATFORM_POSIX
++	---help---
++		DShot out from the NyxHop board's PL (nyx_fcio)
+diff --git a/src/drivers/nyx_dshot/module.yaml b/src/drivers/nyx_dshot/module.yaml
+new file mode 100644
+index 0000000..7dc0fc7
+--- /dev/null
++++ b/src/drivers/nyx_dshot/module.yaml
+@@ -0,0 +1,19 @@
++module_name: NyxHop DShot (PL)
++actuator_output:
++  output_groups:
++    - param_prefix: NYX_DSHOT
++      channel_label: 'Motor'
++      num_channels: 4
++
++parameters:
++    - group: DShot
++      definitions:
++        NYX_DSHOT_RATE:
++            description:
++                short: DShot rate of the NyxHop PL outputs
++                long: |
++                    150, 300, 600 or 1200 (kbit/s on the line).
++            type: int32
++            min: 150
++            max: 1200
++            default: 600
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+new file mode 100644
+index 0000000..b9d0406
+--- /dev/null
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -0,0 +1,179 @@
++/**
++ * @file nyx_dshot.cpp
++ *
++ * DShot out from the NyxHop board's PL (nyx_fcio): the mixer's 4 motor outputs written to the
++ * block, a frame on each line per update. Values as PX4's DShot driver: 0 disarmed (motor
++ * stopped), 1..1999 the throttle (DShot 48..2046). The line rate (DShot600 default) is the
++ * block's DSHOT_PERIOD, set here from NYX_DSHOT_RATE.
++ */
++
++#include <drivers/drv_hrt.h>
++#include <lib/mathlib/mathlib.h>
++#include <lib/mixer_module/mixer_module.hpp>
++#include <lib/nyx_fcio/nyx_fcio.hpp>
++#include <lib/perf/perf_counter.h>
++#include <px4_platform_common/log.h>
++#include <px4_platform_common/module.h>
++#include <px4_platform_common/module_params.h>
++#include <uORB/SubscriptionInterval.hpp>
++#include <uORB/topics/parameter_update.h>
++
++using namespace time_literals;
++
++class NyxDShot : public ModuleBase<NyxDShot>, public OutputModuleInterface
++{
++public:
++	NyxDShot() :
++		OutputModuleInterface(MODULE_NAME, px4::wq_configurations::hp_default)
++	{
++		_mixing_output.setAllDisarmedValues(0);
++		_mixing_output.setAllMinValues(1);
++		_mixing_output.setAllMaxValues(1999);
++		_mixing_output.setAllFailsafeValues(0);
++	}
++
++	~NyxDShot() override
++	{
++		perf_free(_cycle_perf);
++		perf_free(_interval_perf);
++	}
++
++	static int task_spawn(int argc, char *argv[]);
++	static int custom_command(int argc, char *argv[]) { return print_usage("unknown command"); }
++	static int print_usage(const char *reason = nullptr);
++
++	int init()
++	{
++		if (!_fcio.open()) {
++			PX4_ERR("no FC I/O block at 0x%08x (a bitstream without it?)", (unsigned)nyx_fcio::BASE);
++			return PX4_ERROR;
++		}
++
++		set_rate();
++		ScheduleNow();
++		return PX4_OK;
++	}
++
++	void Run() override
++	{
++		if (should_exit()) {
++			ScheduleClear();
++			_mixing_output.unregister();
++			exit_and_cleanup();
++			return;
++		}
++
++		perf_begin(_cycle_perf);
++		perf_count(_interval_perf);
++
++		_mixing_output.update();
++
++		if (_parameter_update_sub.updated()) {
++			parameter_update_s pupdate;
++			_parameter_update_sub.copy(&pupdate);
++			updateParams();
++			set_rate();
++		}
++
++		_mixing_output.updateSubscriptions(false);
++
++		perf_end(_cycle_perf);
++	}
++
++	bool updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
++			   unsigned num_control_groups_updated) override
++	{
++		for (unsigned i = 0; i < NUM_OUT; i++) {
++			const uint16_t o = i < num_outputs ? outputs[i] : 0;
++			// 0 (disarmed, or failsafe) stops the motor; 1..1999 = DShot 48..2046
++			const uint32_t v = (o == 0 || o == UINT16_MAX) ? 0 : math::min<uint32_t>(o, 1999) + 47;
++			_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, v);
++		}
++
++		_fcio.wr(nyx_fcio::DSHOT_GO, 1);
++		return true;
++	}
++
++	int print_status() override
++	{
++		perf_print_counter(_cycle_perf);
++		perf_print_counter(_interval_perf);
++		PX4_INFO("DShot%d: %u frames sent; read back %u good, %u bad; bit %u clocks",
++			 _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT), (unsigned)_fcio.rd(nyx_fcio::DSHOT_GOOD),
++			 (unsigned)_fcio.rd(nyx_fcio::DSHOT_BAD), (unsigned)_fcio.rd(nyx_fcio::DSHOT_BITPER));
++
++		for (unsigned i = 0; i < NUM_OUT; i++) {
++			PX4_INFO("motor %u: out %4u, read back %4u", i, (unsigned)(_fcio.rd(nyx_fcio::DSHOT_TX + 4 * i) & 0x7FF),
++				 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF));
++		}
++
++		_mixing_output.printStatus();
++		return 0;
++	}
++
++private:
++	static constexpr unsigned NUM_OUT = 4;
++
++	void set_rate()
++	{
++		// the block's clock is 200 MHz: a DShot600 bit = 333 clocks
++		const int rate = math::constrain((int)_param_rate.get(), 150, 1200);
++		_fcio.wr(nyx_fcio::DSHOT_PERIOD, (200000 + rate / 2) / rate);
++	}
++
++	MixingOutput _mixing_output{"NYX_DSHOT", NUM_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
++	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
++	nyx_fcio::Map _fcio;
++
++	perf_counter_t _cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
++	perf_counter_t _interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
++
++	DEFINE_PARAMETERS(
++		(ParamInt<px4::params::NYX_DSHOT_RATE>) _param_rate
++	)
++};
++
++int NyxDShot::task_spawn(int argc, char *argv[])
++{
++	NyxDShot *instance = new NyxDShot();
++
++	if (instance) {
++		_object.store(instance);
++		_task_id = task_id_is_work_queue;
++
++		if (instance->init() == PX4_OK) {
++			return PX4_OK;
++		}
++
++	} else {
++		PX4_ERR("alloc failed");
++	}
++
++	delete instance;
++	_object.store(nullptr);
++	_task_id = -1;
++	return PX4_ERROR;
++}
++
++int NyxDShot::print_usage(const char *reason)
++{
++	if (reason) {
++		PX4_WARN("%s\n", reason);
++	}
++
++	PRINT_MODULE_DESCRIPTION(
++		R"DESCR_STR(
++### Description
++DShot out on 4 lines from the NyxHop board's PL (the nyx_fcio block), read back by its decoder.
++)DESCR_STR");
++
++	PRINT_MODULE_USAGE_NAME("nyx_dshot", "driver");
++	PRINT_MODULE_USAGE_COMMAND("start");
++	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
++	return 0;
++}
++
++extern "C" __EXPORT int nyx_dshot_main(int argc, char *argv[])
++{
++	return NyxDShot::main(argc, argv);
++}
+diff --git a/src/lib/nyx_fcio/nyx_fcio.hpp b/src/lib/nyx_fcio/nyx_fcio.hpp
+new file mode 100644
+index 0000000..ec02c9f
+--- /dev/null
++++ b/src/lib/nyx_fcio/nyx_fcio.hpp
+@@ -0,0 +1,90 @@
++/**
++ * @file nyx_fcio.hpp
++ *
++ * The NyxHop board's flight controller I/O block in the PL (fpga/rtl/nyx_fcio.v in NyxHop-FC):
++ * an ICM-42688-P on the PS's SPI1 (read by the icm42688p driver over /dev/spidev) whose accel and
++ * gyro values are written here, and DShot out on 4 lines with a decoder reading them back.
++ * Mapped from /dev/mem (root). Only with a bitstream that has the block: elsewhere the address
++ * is not decoded and an access faults.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace nyx_fcio
++{
++
++static constexpr uint32_t BASE = 0x43C70000;
++static constexpr uint32_t VERSION = 0x46430001;
++
++enum Reg : uint32_t {
++	VER          = 0x00,
++	CTRL         = 0x04,
++	DSHOT_PERIOD = 0x08,
++	TEMP         = 0x0C,
++	AX           = 0x10, // ..GZ at 0x24: 20 bit signed, the chip's frame (x fwd, y left, z up)
++	IMU_COMMIT   = 0x28,
++	IMU_STAT     = 0x2C,
++	PKTS         = 0x30,
++	SPI_XFERS    = 0x34,
++	RESETS       = 0x38,
++	DROPPED      = 0x3C,
++	DSHOT_TX     = 0x40, // ..0x4C: [10:0] throttle, [11] telemetry
++	DSHOT_GO     = 0x50,
++	DSHOT_SENT   = 0x54,
++	DSHOT_RX     = 0x60, // ..0x6C: [10:0] throttle, [11] telemetry, [31] a good frame seen
++	DSHOT_GOOD   = 0x70,
++	DSHOT_BAD    = 0x74,
++	DSHOT_BITPER = 0x78,
++};
++
++// the chip's scales in high-resolution FIFO packets (20 bit)
++static constexpr float ACCEL_LSB_PER_G = 32768.f;
++static constexpr float GYRO_LSB_PER_DPS = 262.f;
++
++class Map
++{
++public:
++	~Map()
++	{
++		if (_p != MAP_FAILED) {
++			munmap(_p, 0x1000);
++		}
++
++		if (_fd >= 0) {
++			::close(_fd);
++		}
++	}
++
++	/** map the block; true if its version is there */
++	bool open()
++	{
++		_fd = ::open("/dev/mem", O_RDWR | O_SYNC);
++
++		if (_fd < 0) {
++			return false;
++		}
++
++		_p = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, _fd, BASE);
++
++		if (_p == MAP_FAILED) {
++			return false;
++		}
++
++		return rd(VER) == VERSION;
++	}
++
++	// (off: a register's byte address, a multiple of 4)
++	uint32_t rd(uint32_t off) const { return static_cast<volatile uint32_t *>(_p)[off / 4]; }
++	void wr(uint32_t off, uint32_t v) { static_cast<volatile uint32_t *>(_p)[off / 4] = v; }
++
++private:
++	int _fd{-1};
++	void *_p{MAP_FAILED};
++};
++
++} // namespace nyx_fcio
+diff --git a/src/modules/simulation/simulator_sih/sih.cpp b/src/modules/simulation/simulator_sih/sih.cpp
+index d6227ed..dd4220b 100644
+--- a/src/modules/simulation/simulator_sih/sih.cpp
++++ b/src/modules/simulation/simulator_sih/sih.cpp
+@@ -81,6 +81,19 @@ void Sih::run()
+ 
+ 	_actuator_out_sub = uORB::Subscription{ORB_ID(actuator_outputs_sim)};
+ 
++	if (_sih_pl_io.get()) {
++#if defined(__PX4_POSIX)
++		_pl_io = _fcio.open();
++#endif
++
++		if (_pl_io) {
++			PX4_INFO("motors from the PL's DShot, IMU into the PL's ICM-42688-P");
++
++		} else {
++			PX4_ERR("SIH_PL_IO: no FC I/O block in the PL, the IMU and motors stay simulated here");
++		}
++	}
++
+ #if defined(ENABLE_LOCKSTEP_SCHEDULER)
+ 	lockstep_loop();
+ #else
+@@ -302,6 +315,11 @@ void Sih::init_variables()
+ 
+ void Sih::read_motors(const float dt)
+ {
++	if (_pl_io) {
++		pl_read_motors(dt);
++		return;
++	}
++
+ 	actuator_outputs_s actuators_out;
+ 
+ 	if (_actuator_out_sub.update(&actuators_out)) {
+@@ -636,8 +654,44 @@ void Sih::reconstruct_sensors_signals(const hrt_abstime &time_now_us)
+ 	Vector3f gyro = _w_B + earth_spin_rate_B + gyro_noise;
+ 
+ 	// update IMU every iteration
+-	_px4_accel.update(time_now_us, accel(0), accel(1), accel(2));
+-	_px4_gyro.update(time_now_us, gyro(0), gyro(1), gyro(2));
++	if (_pl_io) {
++		pl_write_imu(accel, gyro);
++
++	} else {
++		_px4_accel.update(time_now_us, accel(0), accel(1), accel(2));
++		_px4_gyro.update(time_now_us, gyro(0), gyro(1), gyro(2));
++	}
++}
++
++void Sih::pl_read_motors(const float dt)
++{
++#if defined(__PX4_POSIX)
++	_last_actuator_output_time = hrt_absolute_time();
++
++	for (int i = 0; i < 4; i++) {
++		// DShot: 0 stop (and 1..47 commands), 48..2047 the throttle
++		const uint32_t thr = _fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF;
++		const float u_sp = thr >= 48 ? (thr - 48) / 1999.f : 0.f;
++		_u[i] = _u[i] + dt / _T_TAU * (u_sp - _u[i]); // first order transfer function with time constant tau
++	}
++#endif
++}
++
++void Sih::pl_write_imu(const Vector3f &accel, const Vector3f &gyro)
++{
++#if defined(__PX4_POSIX)
++	// the chip's frame is x forward, y left, z up (the driver flips y and z back); 20 bit
++	const float a = nyx_fcio::ACCEL_LSB_PER_G / CONSTANTS_ONE_G;
++	const float g = nyx_fcio::GYRO_LSB_PER_DPS * (180.f / M_PI_F);
++	const float v[6] = {accel(0) * a, -accel(1) * a, -accel(2) * a, gyro(0) * g, -gyro(1) * g, -gyro(2) * g};
++
++	for (int i = 0; i < 6; i++) {
++		const int32_t x = (int32_t)lroundf(constrain(v[i], -524287.f, 524287.f));
++		_fcio.wr(nyx_fcio::AX + 4 * i, (uint32_t)x & 0xFFFFF);
++	}
++
++	_fcio.wr(nyx_fcio::IMU_COMMIT, 1);
++#endif
+ }
+ 
+ void Sih::send_airspeed(const hrt_abstime &time_now_us)
+diff --git a/src/modules/simulation/simulator_sih/sih.hpp b/src/modules/simulation/simulator_sih/sih.hpp
+index bda4484..8ccf205 100644
+--- a/src/modules/simulation/simulator_sih/sih.hpp
++++ b/src/modules/simulation/simulator_sih/sih.hpp
+@@ -68,6 +68,9 @@
+ #include <lib/geo/geo.h>
+ #include <lib/lat_lon_alt/lat_lon_alt.hpp>
+ #include <lib/perf/perf_counter.h>
++#if defined(__PX4_POSIX)
++#include <lib/nyx_fcio/nyx_fcio.hpp>         // the NyxHop board's PL: IMU on SPI, DShot
++#endif
+ #include <uORB/Publication.hpp>
+ #include <uORB/Subscription.hpp>
+ #include <uORB/SubscriptionInterval.hpp>
+@@ -221,6 +224,15 @@ private:
+ 
+ 	float _u[NUM_ACTUATORS_MAX] {}; // thruster signals
+ 
++#if defined(__PX4_POSIX)
++	// SIH_PL_IO: the motors from the DShot decoder in the NyxHop board's PL, the IMU into its
++	// emulated ICM-42688-P (read by the icm42688p driver over SPI) instead of published here
++	nyx_fcio::Map _fcio;
++#endif
++	bool _pl_io{false};
++	void pl_read_motors(const float dt);
++	void pl_write_imu(const matrix::Vector3f &accel, const matrix::Vector3f &gyro);
++
+ 	enum class VehicleType {Quadcopter, FixedWing, TailsitterVTOL, StandardVTOL, Hexacopter, RoverAckermann, First = Quadcopter, Last = RoverAckermann}; // numbering dependent on parameter SIH_VEHICLE_TYPE
+ 	VehicleType _vehicle = VehicleType::Quadcopter;
+ 
+@@ -301,6 +313,7 @@ private:
+ 		(ParamFloat<px4::params::SIH_DISTSNSR_MAX>) _sih_distance_snsr_max,
+ 		(ParamFloat<px4::params::SIH_DISTSNSR_OVR>) _sih_distance_snsr_override,
+ 		(ParamFloat<px4::params::SIH_T_TAU>) _sih_thrust_tau,
+-		(ParamInt<px4::params::SIH_VEHICLE_TYPE>) _sih_vtype
++		(ParamInt<px4::params::SIH_VEHICLE_TYPE>) _sih_vtype,
++		(ParamInt<px4::params::SIH_PL_IO>) _sih_pl_io
+ 	)
+ };
+diff --git a/src/modules/simulation/simulator_sih/sih_params.c b/src/modules/simulation/simulator_sih/sih_params.c
+index 25c9498..a82bdf1 100644
+--- a/src/modules/simulation/simulator_sih/sih_params.c
++++ b/src/modules/simulation/simulator_sih/sih_params.c
+@@ -339,3 +339,17 @@ PARAM_DEFINE_FLOAT(SIH_T_TAU, 0.05f);
+  * @group Simulation In Hardware
+  */
+ PARAM_DEFINE_INT32(SIH_VEHICLE_TYPE, 0);
++
++/**
++ * Motors and IMU through the NyxHop board's PL
++ *
++ * The motor commands are read from the DShot decoder in the PL (what nyx_dshot sent), and the
++ * accelerometer and gyroscope go into the PL's emulated ICM-42688-P (read back by the icm42688p
++ * driver over SPI) instead of being published by the simulator. Needs the bitstream with the
++ * nyx_fcio block.
++ *
++ * @boolean
++ * @reboot_required true
++ * @group Simulation In Hardware
++ */
++PARAM_DEFINE_INT32(SIH_PL_IO, 0);
+-- 
+2.53.0.windows.2
+

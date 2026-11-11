@@ -13,6 +13,7 @@ members = [
     "apps/video/nyx-ipcam-ctl",
     "apps/nyxhop",
     "apps/nyx-bitrate",
+    "apps/nyx-pilot",
 ]
 
 [workspace.dependencies]

@@ -1,0 +1,71 @@
+From cd1bac948a17d28b6e02b3651841a8e2f5a48cfc Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 13:34:33 +0700
+Subject: [PATCH 05/12] nyxhop-fc.config: the real IMU on the header + DShot to
+ the ESCs, no simulation (step 3)
+
+---
+ boards/nyxhop/zynq/nyxhop-fc.config | 51 +++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+ create mode 100644 boards/nyxhop/zynq/nyxhop-fc.config
+
+diff --git a/boards/nyxhop/zynq/nyxhop-fc.config b/boards/nyxhop/zynq/nyxhop-fc.config
+new file mode 100644
+index 0000000..075d027
+--- /dev/null
++++ b/boards/nyxhop/zynq/nyxhop-fc.config
+@@ -0,0 +1,51 @@
++#!/bin/sh
++# NyxHop Zynq, step 3 (the real vehicle): the real ICM-42688-P on the carrier's
++# header (P2-27 MISO, P2-28 SCLK, P2-30 MOSI, P2-32 CS; fc-start.sh sets the PL to pass SPI1 there)
++# and the motors' ESCs on DShot600 (P2-38/40/42/44 = motors 1..4). No simulation. The barometer,
++# magnetometer and GPS drivers go here once the parts are chosen; until then the estimator has the
++# IMU only (attitude). Accel and gyro are calibrated on the vehicle (QGroundControl), as any real IMU.
++. px4-alias.sh
++
++param select parameters_fc.bson
++if [ -f parameters_fc.bson ]
++then
++	param import
++fi
++
++. etc/init.d/rc.mc_defaults
++param set-default MAV_TYPE 2
++param set-default CA_ROTOR_COUNT 4
++param set-default CA_ROTOR0_PX 1
++param set-default CA_ROTOR0_PY 1
++param set-default CA_ROTOR1_PX -1
++param set-default CA_ROTOR1_PY -1
++param set-default CA_ROTOR2_PX 1
++param set-default CA_ROTOR2_PY -1
++param set-default CA_ROTOR2_KM -0.05
++param set-default CA_ROTOR3_PX -1
++param set-default CA_ROTOR3_PY 1
++param set-default CA_ROTOR3_KM -0.05
++param set-default NYX_DSHOT_FUNC1 101
++param set-default NYX_DSHOT_FUNC2 102
++param set-default NYX_DSHOT_FUNC3 103
++param set-default NYX_DSHOT_FUNC4 104
++param set-default NYX_DSHOT_RATE 600
++param set-default IMU_INTEG_RATE 250
++# commands come over the NyxHop link from the ground station
++param set-default COM_RC_IN_MODE 4
++
++dataman start -f dataman
++icm42688p -s -b 2 start
++# (barometer, magnetometer, GPS: their drivers here)
++load_mon start
++rc_update start
++manual_control start
++sensors start
++commander start
++ekf2 start &
++nyx_dshot start
++. etc/init.d/rc.vehicle_setup
++navigator start
++
++mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
++mavlink boot_complete
+-- 
+2.53.0.windows.2
+

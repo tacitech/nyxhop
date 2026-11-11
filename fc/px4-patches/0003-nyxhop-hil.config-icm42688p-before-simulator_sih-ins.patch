@@ -1,0 +1,32 @@
+From ce5145bcc01bf5569d570bb867b97711a343b031 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 13:17:02 +0700
+Subject: [PATCH 03/12] nyxhop-hil.config: icm42688p before simulator_sih
+ (instance 0 must be the real IMU, else arming fails 'no data')
+
+---
+ boards/nyxhop/zynq/nyxhop-hil.config | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/boards/nyxhop/zynq/nyxhop-hil.config b/boards/nyxhop/zynq/nyxhop-hil.config
+index bd68dea..1241f26 100644
+--- a/boards/nyxhop/zynq/nyxhop-hil.config
++++ b/boards/nyxhop/zynq/nyxhop-hil.config
+@@ -53,11 +53,13 @@ param set-default COM_RAM_MAX -1
+ param set-default EKF2_REQ_GPS_H 0.5
+ 
+ dataman start -f dataman
++# the IMU first: it must be sensor_accel/sensor_gyro instance 0 (SIH's own, never published with
++# SIH_PL_IO, would take 0 and fail the arming checks as "no data")
++icm42688p -s -b 2 start
+ simulator_sih start
+ sensor_baro_sim start
+ sensor_gps_sim start
+ sensor_mag_sim start
+-icm42688p -s -b 2 start
+ load_mon start
+ battery_simulator start
+ system_power_simulator start
+-- 
+2.53.0.windows.2
+

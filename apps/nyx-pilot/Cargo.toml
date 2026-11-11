@@ -1,0 +1,25 @@
+[package]
+name = "nyx-pilot"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "nyxhop-pilot"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.35.0"
+gilrs = "0.11"
+# the map's tiles: decoded (the same build of image as nyx-common's), fetched over HTTPS
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+nyx-common = { path = "../../link/nyx-common" }
+nyx-rx = { path = "../video/nyx-rx" }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }

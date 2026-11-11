@@ -1,0 +1,59 @@
+From 3b9e0d9f174f6bfff61786873eb1a30383d00db5 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 19:12:49 +0700
+Subject: [PATCH 07/12] nyxhop configs: COM_RC_IN_MODE 1 (sticks as
+ MANUAL_CONTROL over the link, the pilot app)
+
+---
+ boards/nyxhop/zynq/nyxhop-fc.config  | 2 +-
+ boards/nyxhop/zynq/nyxhop-hil.config | 4 ++--
+ boards/nyxhop/zynq/nyxhop-sih.config | 4 ++--
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/boards/nyxhop/zynq/nyxhop-fc.config b/boards/nyxhop/zynq/nyxhop-fc.config
+index 075d027..2cf508f 100644
+--- a/boards/nyxhop/zynq/nyxhop-fc.config
++++ b/boards/nyxhop/zynq/nyxhop-fc.config
+@@ -32,7 +32,7 @@ param set-default NYX_DSHOT_FUNC4 104
+ param set-default NYX_DSHOT_RATE 600
+ param set-default IMU_INTEG_RATE 250
+ # commands come over the NyxHop link from the ground station
+-param set-default COM_RC_IN_MODE 4
++param set-default COM_RC_IN_MODE 1
+ 
+ dataman start -f dataman
+ icm42688p -s -b 2 start
+diff --git a/boards/nyxhop/zynq/nyxhop-hil.config b/boards/nyxhop/zynq/nyxhop-hil.config
+index 1241f26..09fae66 100644
+--- a/boards/nyxhop/zynq/nyxhop-hil.config
++++ b/boards/nyxhop/zynq/nyxhop-hil.config
+@@ -46,8 +46,8 @@ param set-default CAL_MAG0_ID 197388
+ param set-default CAL_MAG0_PRIO 50
+ param set-default SENS_BOARD_X_OFF 0.000001
+ param set-default BAT1_N_CELLS 4
+-# no RC receiver: commands come from the ground station only; the load checks off
+-param set-default COM_RC_IN_MODE 4
++# the sticks come over the link as MANUAL_CONTROL (the pilot app); the load checks off
++param set-default COM_RC_IN_MODE 1
+ param set-default COM_CPU_MAX -1
+ param set-default COM_RAM_MAX -1
+ param set-default EKF2_REQ_GPS_H 0.5
+diff --git a/boards/nyxhop/zynq/nyxhop-sih.config b/boards/nyxhop/zynq/nyxhop-sih.config
+index 32fd0a3..ec5af36 100644
+--- a/boards/nyxhop/zynq/nyxhop-sih.config
++++ b/boards/nyxhop/zynq/nyxhop-sih.config
+@@ -43,9 +43,9 @@ param set-default CAL_MAG0_ID 197388
+ param set-default CAL_MAG0_PRIO 50
+ param set-default SENS_BOARD_X_OFF 0.000001
+ param set-default BAT1_N_CELLS 4
+-# no RC receiver: commands come from the ground station only; the load checks off (measured,
++# the sticks come over the link as MANUAL_CONTROL (the pilot app); the load checks off (measured,
+ # not gating the arm)
+-param set-default COM_RC_IN_MODE 4
++param set-default COM_RC_IN_MODE 1
+ param set-default COM_CPU_MAX -1
+ param set-default COM_RAM_MAX -1
+ param set-default EKF2_REQ_GPS_H 0.5
+-- 
+2.53.0.windows.2
+

@@ -1,0 +1,181 @@
+From 8580af0c86d1fe74f24a82398a73bee23ab92ef6 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Mon, 9 Nov 2026 17:43:06 +0700
+Subject: [PATCH 11/12] nyxhop/zynq: the NyxHop baseboard v0.2
+ (nyxhop-bb.config): the board's ICM-42688-P (roll 180), CH1..8, GPS1 ttyPS1 +
+ GPS2 ttyS2, CRSF on ttyS0, ADS1115 battery (AIN0 VBAT/11, battery_status),
+ compass/baro probed on the two external I2C (buses 11/12, links made to the
+ real ones), MAVLink on TELEM1 ttyS1; ADS1115, battery_status, crsf_rc,
+ rc_input, IST8310/QMC5883L/HMC5883, MS5611/BMP388/DPS310/SPL06 built
+
+---
+ boards/nyxhop/zynq/default.px4board   | 11 ++++
+ boards/nyxhop/zynq/nyxhop-bb.config   | 88 +++++++++++++++++++++++++++
+ boards/nyxhop/zynq/src/board_config.h |  9 ++-
+ boards/nyxhop/zynq/src/i2c.cpp        |  5 +-
+ 4 files changed, 109 insertions(+), 4 deletions(-)
+ create mode 100644 boards/nyxhop/zynq/nyxhop-bb.config
+
+diff --git a/boards/nyxhop/zynq/default.px4board b/boards/nyxhop/zynq/default.px4board
+index 7a62772..256151b 100644
+--- a/boards/nyxhop/zynq/default.px4board
++++ b/boards/nyxhop/zynq/default.px4board
+@@ -3,10 +3,21 @@ CONFIG_BOARD_LINUX_TARGET=y
+ CONFIG_BOARD_TOOLCHAIN="arm-linux-gnueabihf"
+ CONFIG_BOARD_ARCHITECTURE="cortex-a9"
+ CONFIG_BOARD_NOLOCKSTEP=y
++CONFIG_DRIVERS_ADC_ADS1115=y
++CONFIG_DRIVERS_BAROMETER_BMP388=y
++CONFIG_DRIVERS_BAROMETER_DPS310=y
++CONFIG_DRIVERS_BAROMETER_GOERTEK_SPL06=y
++CONFIG_DRIVERS_BAROMETER_MS5611=y
+ CONFIG_DRIVERS_GPS=y
+ CONFIG_DRIVERS_IMU_INVENSENSE_ICM42688P=y
++CONFIG_DRIVERS_MAGNETOMETER_HMC5883=y
++CONFIG_DRIVERS_MAGNETOMETER_ISENTEK_IST8310=y
++CONFIG_DRIVERS_MAGNETOMETER_QMC5883L=y
+ CONFIG_DRIVERS_NYX_DSHOT=y
++CONFIG_DRIVERS_RC_CRSF_RC=y
++CONFIG_DRIVERS_RC_INPUT=y
+ CONFIG_MODULES_ATTITUDE_ESTIMATOR_Q=y
++CONFIG_MODULES_BATTERY_STATUS=y
+ CONFIG_MODULES_COMMANDER=y
+ CONFIG_MODULES_CONTROL_ALLOCATOR=y
+ CONFIG_MODULES_DATAMAN=y
+diff --git a/boards/nyxhop/zynq/nyxhop-bb.config b/boards/nyxhop/zynq/nyxhop-bb.config
+new file mode 100644
+index 0000000..50951e1
+--- /dev/null
++++ b/boards/nyxhop/zynq/nyxhop-bb.config
+@@ -0,0 +1,88 @@
++#!/bin/sh
++# NyxHop Zynq on the NyxHop baseboard v0.2: the FC I/O v2 image (nyx_fcio version 3 with HIL 0)
++# and its device tree overlays:
++#   IMU      the ICM-42688-P on the board, /dev/spidev2.0 (the PL passes SPI1 to it from reset). It
++#            sits on the board's underside (z reads -1 g level): roll 180 here; the yaw of its x/y is
++#            to be checked by tilting the board (or set SENS_BOARD_ROT after QGC's level check).
++#   motors   CH1..8 (nyx_dshot, DShot600 by default, NYX_PWM_OUTS for PWM ESCs); a quad X on CH1..4.
++#   GPS      GPS1 /dev/ttyPS1 (J_GPS1, the PS's UART0), GPS2 /dev/ttyS2 (J_GPS2).
++#   compass, barometer   on the GPS modules or the I2C ports, whichever answer: /dev/i2c-11 (J_GPS1)
++#            and /dev/i2c-12 (J_GPS2, J_I2C; the ADS1115 sits there too). The board has no barometer.
++#   RC       /dev/ttyS0 (J_RC): CRSF / ELRS (crsf_rc). For SBUS: rc_input on it instead, the PL
++#            inverting RC_RX (EMIO GPIO bit 62 = 1), and RC_TX_DIR (bit 57) left 0.
++#   battery  the ADS1115's AIN0 = VBAT / 11 (battery_status): BAT1_V_DIV against a meter.
++#   TELEM1   /dev/ttyS1: MAVLink at 57600 (a telemetry radio). The ground station's MAVLink goes over
++#            the NyxHop link (UDP 14556/14557) as on the other configs.
++# Not here yet: the IMU heater, the safety switch/LED, the buzzer (EMIO GPIO, no PX4 driver on Linux),
++# DroneCAN (PX4's uavcan driver is NuttX only).
++. px4-alias.sh
++
++# the baseboard's I2C buses under the numbers the board's px4_i2c_buses know (Linux numbers them in
++# the order the overlays came)
++for d in /sys/class/i2c-dev/i2c-*; do
++	case $(readlink -f $d/device/of_node) in
++	*/i2c@e0004000) ln -sf /dev/${d##*/} /dev/i2c-11 ;;
++	*/i2c@e0005000) ln -sf /dev/${d##*/} /dev/i2c-12 ;;
++	esac
++done
++
++param select parameters_bb.bson
++if [ -f parameters_bb.bson ]
++then
++	param import
++fi
++
++. etc/init.d/rc.mc_defaults
++param set-default MAV_TYPE 2
++param set-default CA_ROTOR_COUNT 4
++param set-default CA_ROTOR0_PX 1
++param set-default CA_ROTOR0_PY 1
++param set-default CA_ROTOR1_PX -1
++param set-default CA_ROTOR1_PY -1
++param set-default CA_ROTOR2_PX 1
++param set-default CA_ROTOR2_PY -1
++param set-default CA_ROTOR2_KM -0.05
++param set-default CA_ROTOR3_PX -1
++param set-default CA_ROTOR3_PY 1
++param set-default CA_ROTOR3_KM -0.05
++param set-default NYX_DSHOT_FUNC1 101
++param set-default NYX_DSHOT_FUNC2 102
++param set-default NYX_DSHOT_FUNC3 103
++param set-default NYX_DSHOT_FUNC4 104
++param set-default NYX_DSHOT_RATE 600
++param set-default IMU_INTEG_RATE 250
++# sticks come over the NyxHop link (the pilot app); 2 to fly on the RC on J_RC as well
++param set-default COM_RC_IN_MODE 1
++param set-default BAT1_SOURCE 0
++param set-default BAT1_V_DIV 11
++param set-default BAT1_N_CELLS 4
++
++dataman start -f dataman
++icm42688p -s -b 2 -R 8 start
++gps start -d /dev/ttyPS1 -e /dev/ttyS2
++crsf_rc start -d /dev/ttyS0
++ads1115 start -X -b 12
++battery_status start
++for b in 11 12
++do
++	ist8310 -X -b $b start
++	qmc5883l -X -b $b start
++	hmc5883 -X -b $b start
++	ms5611 -X -b $b start
++	bmp388 -X -b $b start
++	dps310 -X -b $b start
++	spl06 -X -b $b start
++done
++load_mon start
++rc_update start
++manual_control start
++sensors start
++commander start
++ekf2 start &
++nyx_dshot start
++. etc/init.d/rc.vehicle_setup
++navigator start
++
++mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
++mavlink start -d /dev/ttyS1 -b 57600
++mavlink boot_complete
+diff --git a/boards/nyxhop/zynq/src/board_config.h b/boards/nyxhop/zynq/src/board_config.h
+index c035a93..a7ab2ab 100644
+--- a/boards/nyxhop/zynq/src/board_config.h
++++ b/boards/nyxhop/zynq/src/board_config.h
+@@ -11,14 +11,17 @@
+ #define BOARD_OVERRIDE_UUID "NYXZYNQ000000000" // must be of length 16
+ #define PX4_SOC_ARCH_ID     PX4_SOC_ARCH_ID_UNUSED
+ 
+-// I2C
++// I2C: /dev/i2c-1 on the BOB's header; on the baseboard /dev/i2c-11 (the PS's I2C0, J_GPS1) and
++// /dev/i2c-12 (the PS's I2C1 over EMIO: the ADS1115 and J_GPS2/J_I2C), links nyxhop-bb.config
++// makes to the buses' real numbers (they follow the order the overlays came in)
+ #define CONFIG_I2C 1
+-#define PX4_NUMBER_I2C_BUSES    1
++#define PX4_NUMBER_I2C_BUSES    3
+ 
+ // SPI
+ #define CONFIG_SPI 1
+ 
+-#define ADC_BATTERY_VOLTAGE_CHANNEL	-1
++// the baseboard's ADS1115: AIN0 VBAT / 11 (100k / 10k), AIN1 an ESC's current output
++#define ADC_BATTERY_VOLTAGE_CHANNEL	0
+ #define ADC_BATTERY_CURRENT_CHANNEL	-1
+ 
+ #include <system_config.h>
+diff --git a/boards/nyxhop/zynq/src/i2c.cpp b/boards/nyxhop/zynq/src/i2c.cpp
+index 437c5a5..7f0898a 100644
+--- a/boards/nyxhop/zynq/src/i2c.cpp
++++ b/boards/nyxhop/zynq/src/i2c.cpp
+@@ -1,6 +1,9 @@
+ #include <px4_arch/i2c_hw_description.h>
+ 
+-// /dev/i2c-1 on the carrier's header (the baro / mag of step 2)
++// /dev/i2c-1 on the BOB's header (the baro / mag of step 2); the baseboard's: 11 the external I2C 1
++// (J_GPS1: a GPS's compass), 12 the sensors' bus with the external I2C 2 (the ADS1115, J_GPS2, J_I2C)
+ constexpr px4_i2c_bus_t px4_i2c_buses[I2C_BUS_MAX_BUS_ITEMS] = {
+ 	initI2CBusExternal(1),
++	initI2CBusExternal(11),
++	initI2CBusExternal(12),
+ };
+-- 
+2.53.0.windows.2
+

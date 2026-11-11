@@ -1,0 +1,97 @@
+From 07890e1e2e50787ebf052653f90328b074e21af9 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Mon, 9 Nov 2026 17:43:06 +0700
+Subject: [PATCH 10/12] posix SerialImpl: a rate termios has no Bxxx for (CRSF
+ 420000) set through termios2/BOTHER on Linux instead of failing in
+ cfsetispeed
+
+---
+ platforms/posix/src/px4/common/SerialImpl.cpp | 50 +++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/platforms/posix/src/px4/common/SerialImpl.cpp b/platforms/posix/src/px4/common/SerialImpl.cpp
+index 0c23b05..1b4f6e9 100644
+--- a/platforms/posix/src/px4/common/SerialImpl.cpp
++++ b/platforms/posix/src/px4/common/SerialImpl.cpp
+@@ -40,6 +40,26 @@
+ #include <poll.h>
+ #include <drivers/drv_hrt.h>
+ 
++#if defined(__linux__)
++// A rate termios has no Bxxx for (CRSF's 420000): Linux takes it through termios2 with BOTHER, the
++// UART driver working its divisor out of its own clock. (asm/termbits.h has these but clashes with
++// termios.h, so the kernel's struct is spelled out here; TCGETS2/TCSETS2 come with sys/ioctl.h.)
++#include <sys/ioctl.h>
++struct termios2 {
++	tcflag_t c_iflag;
++	tcflag_t c_oflag;
++	tcflag_t c_cflag;
++	tcflag_t c_lflag;
++	cc_t c_line;
++	cc_t c_cc[19];
++	speed_t c_ispeed;
++	speed_t c_ospeed;
++};
++#ifndef BOTHER
++#define BOTHER 0010000
++#endif
++#endif
++
+ namespace device
+ {
+ 
+@@ -70,6 +90,7 @@ bool SerialImpl::configure()
+ {
+ 	/* process baud rate */
+ 	int speed;
++	[[maybe_unused]] bool nonstandard = false;
+ 
+ 	switch (_baudrate) {
+ 	case 9600:   speed = B9600;   break;
+@@ -121,7 +142,13 @@ bool SerialImpl::configure()
+ 	case 1500000: speed = B1500000; break;
+ 
+ 	default:
++#if defined(__linux__)
++		// set up at a standard rate first, the real one through termios2 below
++		speed = B38400;
++		nonstandard = true;
++#else
+ 		speed = _baudrate;
++#endif
+ 		PX4_WARN("Using non-standard baudrate: %u", _baudrate);
+ 		break;
+ 	}
+@@ -188,6 +215,29 @@ bool SerialImpl::configure()
+ 		return false;
+ 	}
+ 
++#if defined(__linux__)
++
++	if (nonstandard) {
++		struct termios2 t2;
++
++		if (ioctl(_serial_fd, TCGETS2, &t2) < 0) {
++			PX4_ERR("ERR: %d (TCGETS2)", errno);
++			return false;
++		}
++
++		t2.c_cflag &= ~CBAUD;
++		t2.c_cflag |= BOTHER;
++		t2.c_ispeed = _baudrate;
++		t2.c_ospeed = _baudrate;
++
++		if (ioctl(_serial_fd, TCSETS2, &t2) < 0) {
++			PX4_ERR("ERR: %d (TCSETS2 %u)", errno, _baudrate);
++			return false;
++		}
++	}
++
++#endif
++
+ 	return true;
+ }
+ 
+-- 
+2.53.0.windows.2
+

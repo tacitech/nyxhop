@@ -1,0 +1,233 @@
+From 080d18c8dfa8e18018e03b9fdee20baae8073dbf Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 10:56:17 +0700
+Subject: [PATCH 01/12] boards: nyxhop/zynq - Linux ARM Cortex-A9 (Zynq-7000),
+ no lockstep, root path '.', SIH quad X startup (nyxhop-sih.config), MAVLink
+ over the NyxHop link (14556/14557)
+
+---
+ boards/nyxhop/zynq/default.px4board       | 40 +++++++++++++
+ boards/nyxhop/zynq/init/rc.board_defaults |  7 +++
+ boards/nyxhop/zynq/nyxhop-sih.config      | 73 +++++++++++++++++++++++
+ boards/nyxhop/zynq/src/CMakeLists.txt     |  4 ++
+ boards/nyxhop/zynq/src/board_config.h     | 25 ++++++++
+ boards/nyxhop/zynq/src/i2c.cpp            |  6 ++
+ boards/nyxhop/zynq/src/spi.cpp            |  9 +++
+ 7 files changed, 164 insertions(+)
+ create mode 100644 boards/nyxhop/zynq/default.px4board
+ create mode 100644 boards/nyxhop/zynq/init/rc.board_defaults
+ create mode 100644 boards/nyxhop/zynq/nyxhop-sih.config
+ create mode 100644 boards/nyxhop/zynq/src/CMakeLists.txt
+ create mode 100644 boards/nyxhop/zynq/src/board_config.h
+ create mode 100644 boards/nyxhop/zynq/src/i2c.cpp
+ create mode 100644 boards/nyxhop/zynq/src/spi.cpp
+
+diff --git a/boards/nyxhop/zynq/default.px4board b/boards/nyxhop/zynq/default.px4board
+new file mode 100644
+index 0000000..264ae32
+--- /dev/null
++++ b/boards/nyxhop/zynq/default.px4board
+@@ -0,0 +1,40 @@
++CONFIG_PLATFORM_POSIX=y
++CONFIG_BOARD_LINUX_TARGET=y
++CONFIG_BOARD_TOOLCHAIN="arm-linux-gnueabihf"
++CONFIG_BOARD_ARCHITECTURE="cortex-a9"
++CONFIG_BOARD_NOLOCKSTEP=y
++CONFIG_DRIVERS_GPS=y
++CONFIG_MODULES_ATTITUDE_ESTIMATOR_Q=y
++CONFIG_MODULES_COMMANDER=y
++CONFIG_MODULES_CONTROL_ALLOCATOR=y
++CONFIG_MODULES_DATAMAN=y
++CONFIG_MODULES_EKF2=y
++CONFIG_MODULES_EVENTS=y
++CONFIG_MODULES_FLIGHT_MODE_MANAGER=y
++CONFIG_MODULES_GYRO_CALIBRATION=y
++CONFIG_MODULES_LAND_DETECTOR=y
++CONFIG_MODULES_LOAD_MON=y
++CONFIG_MODULES_LOGGER=y
++CONFIG_MODULES_MAG_BIAS_ESTIMATOR=y
++CONFIG_MODULES_MANUAL_CONTROL=y
++CONFIG_MODULES_MAVLINK=y
++CONFIG_MODULES_MC_ATT_CONTROL=y
++CONFIG_MODULES_MC_HOVER_THRUST_ESTIMATOR=y
++CONFIG_MODULES_MC_POS_CONTROL=y
++CONFIG_MODULES_MC_RATE_CONTROL=y
++CONFIG_MODULES_NAVIGATOR=y
++CONFIG_MODULES_RC_UPDATE=y
++CONFIG_MODULES_SENSORS=y
++CONFIG_COMMON_SIMULATION=y
++CONFIG_SYSTEMCMDS_ACTUATOR_TEST=y
++CONFIG_SYSTEMCMDS_FAILURE=y
++CONFIG_SYSTEMCMDS_PARAM=y
++CONFIG_SYSTEMCMDS_PERF=y
++CONFIG_SYSTEMCMDS_SHUTDOWN=y
++CONFIG_SYSTEMCMDS_SYSTEM_TIME=y
++CONFIG_SYSTEMCMDS_TOP=y
++CONFIG_SYSTEMCMDS_TOPIC_LISTENER=y
++CONFIG_SYSTEMCMDS_UORB=y
++CONFIG_SYSTEMCMDS_VER=y
++CONFIG_SYSTEMCMDS_WORK_QUEUE=y
++CONFIG_BOARD_ROOT_PATH="."
+diff --git a/boards/nyxhop/zynq/init/rc.board_defaults b/boards/nyxhop/zynq/init/rc.board_defaults
+new file mode 100644
+index 0000000..2c493b2
+--- /dev/null
++++ b/boards/nyxhop/zynq/init/rc.board_defaults
+@@ -0,0 +1,7 @@
++#!/bin/sh
++#
++# NyxHop Zynq board defaults
++#------------------------------------------------------------------------------
++
++# MAVLink to the ground goes over the NyxHop link: the daemon's UDP port on this board
++param set-default MAV_0_BROADCAST 0
+diff --git a/boards/nyxhop/zynq/nyxhop-sih.config b/boards/nyxhop/zynq/nyxhop-sih.config
+new file mode 100644
+index 0000000..32fd0a3
+--- /dev/null
++++ b/boards/nyxhop/zynq/nyxhop-sih.config
+@@ -0,0 +1,73 @@
++#!/bin/sh
++# NyxHop Zynq, step 1: PX4 on the board's ARM with the SIH quad X (no sensors attached: SIH
++# simulates the vehicle, its IMU, GPS, baro and mag in real time), MAVLink to the ground over the
++# NyxHop link. Run from the folder holding bin/ and etc/:
++#   PATH=$PWD/bin:$PATH ./bin/px4 -d -s nyxhop-sih.config
++. px4-alias.sh
++
++param select parameters.bson
++if [ -f parameters.bson ]
++then
++	param import
++fi
++
++# the vehicle: the multicopter defaults, then SIH's quad X (init.d-posix/airframes/10040_sihsim_quadx)
++. etc/init.d/rc.mc_defaults
++param set-default MAV_TYPE 2
++param set-default SENS_EN_GPSSIM 1
++param set-default SENS_EN_BAROSIM 1
++param set-default SENS_EN_MAGSIM 1
++param set-default CA_ROTOR_COUNT 4
++param set-default CA_ROTOR0_PX 1
++param set-default CA_ROTOR0_PY 1
++param set-default CA_ROTOR1_PX -1
++param set-default CA_ROTOR1_PY -1
++param set-default CA_ROTOR2_PX 1
++param set-default CA_ROTOR2_PY -1
++param set-default CA_ROTOR2_KM -0.05
++param set-default CA_ROTOR3_PX -1
++param set-default CA_ROTOR3_PY 1
++param set-default CA_ROTOR3_KM -0.05
++param set-default HIL_ACT_FUNC1 101
++param set-default HIL_ACT_FUNC2 102
++param set-default HIL_ACT_FUNC3 103
++param set-default HIL_ACT_FUNC4 104
++param set-default EKF2_GPS_DELAY 0
++param set SIH_VEHICLE_TYPE 0
++param set-default IMU_INTEG_RATE 250
++param set-default COM_MODE_ARM_CHK 1
++# the simulated sensors' ids (as SITL calibrates them)
++param set-default CAL_ACC0_ID 1310988
++param set-default CAL_GYRO0_ID 1310988
++param set-default CAL_MAG0_ID 197388
++param set-default CAL_MAG0_PRIO 50
++param set-default SENS_BOARD_X_OFF 0.000001
++param set-default BAT1_N_CELLS 4
++# no RC receiver: commands come from the ground station only; the load checks off (measured,
++# not gating the arm)
++param set-default COM_RC_IN_MODE 4
++param set-default COM_CPU_MAX -1
++param set-default COM_RAM_MAX -1
++param set-default EKF2_REQ_GPS_H 0.5
++
++dataman start -f dataman
++simulator_sih start
++sensor_baro_sim start
++sensor_gps_sim start
++sensor_mag_sim start
++load_mon start
++battery_simulator start
++system_power_simulator start
++rc_update start
++manual_control start
++sensors start
++commander start
++ekf2 start &
++pwm_out_sim start -m sim
++. etc/init.d/rc.vehicle_setup
++navigator start
++
++# MAVLink over the NyxHop link: nyx-ipcam on this board takes datagrams on 14557 up the link and
++# hands what comes down to 14556 (its --tlm-out)
++mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
++mavlink boot_complete
+diff --git a/boards/nyxhop/zynq/src/CMakeLists.txt b/boards/nyxhop/zynq/src/CMakeLists.txt
+new file mode 100644
+index 0000000..732138c
+--- /dev/null
++++ b/boards/nyxhop/zynq/src/CMakeLists.txt
+@@ -0,0 +1,4 @@
++add_library(drivers_board
++	i2c.cpp
++	spi.cpp
++)
+diff --git a/boards/nyxhop/zynq/src/board_config.h b/boards/nyxhop/zynq/src/board_config.h
+new file mode 100644
+index 0000000..c035a93
+--- /dev/null
++++ b/boards/nyxhop/zynq/src/board_config.h
+@@ -0,0 +1,25 @@
++/****************************************************************************
++ *
++ *   NyxHop on a Zynq-7000 board (ADRV9364/9361 + carrier, Linux): PX4 runs on the ARM next to the
++ *   NyxHop link daemon. Step 1 has no sensors attached (SIH simulates them); the buses below are
++ *   the PS's, for the IMU / baro of step 2.
++ *
++ ****************************************************************************/
++
++#pragma once
++
++#define BOARD_OVERRIDE_UUID "NYXZYNQ000000000" // must be of length 16
++#define PX4_SOC_ARCH_ID     PX4_SOC_ARCH_ID_UNUSED
++
++// I2C
++#define CONFIG_I2C 1
++#define PX4_NUMBER_I2C_BUSES    1
++
++// SPI
++#define CONFIG_SPI 1
++
++#define ADC_BATTERY_VOLTAGE_CHANNEL	-1
++#define ADC_BATTERY_CURRENT_CHANNEL	-1
++
++#include <system_config.h>
++#include <px4_platform_common/board_common.h>
+diff --git a/boards/nyxhop/zynq/src/i2c.cpp b/boards/nyxhop/zynq/src/i2c.cpp
+new file mode 100644
+index 0000000..437c5a5
+--- /dev/null
++++ b/boards/nyxhop/zynq/src/i2c.cpp
+@@ -0,0 +1,6 @@
++#include <px4_arch/i2c_hw_description.h>
++
++// /dev/i2c-1 on the carrier's header (the baro / mag of step 2)
++constexpr px4_i2c_bus_t px4_i2c_buses[I2C_BUS_MAX_BUS_ITEMS] = {
++	initI2CBusExternal(1),
++};
+diff --git a/boards/nyxhop/zynq/src/spi.cpp b/boards/nyxhop/zynq/src/spi.cpp
+new file mode 100644
+index 0000000..96cdf33
+--- /dev/null
++++ b/boards/nyxhop/zynq/src/spi.cpp
+@@ -0,0 +1,9 @@
++#include <px4_arch/spi_hw_description.h>
++#include <drivers/drv_sensor.h>
++
++// /dev/spidev1.0 on the carrier's header (the IMU of step 2)
++constexpr px4_spi_bus_t px4_spi_buses[SPI_BUS_MAX_BUS_ITEMS] = {
++	initSPIBus(1, {
++		initSPIDevice(DRV_IMU_DEVTYPE_ICM42688P, 0),
++	}),
++};
+-- 
+2.53.0.windows.2
+

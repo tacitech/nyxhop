@@ -1,0 +1,50 @@
+From d8a7ea47928ea06ca49dc9feb55edf7eaeb6077f Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Wed, 21 Oct 2026 19:03:25 +0700
+Subject: [PATCH 1/2] AP_Math: make Vector2 may_alias so Vector3::xy() is
+ defined
+
+Vector3<T>::xy() returns the x and y of a Vector3 as a Vector2 by casting
+the Vector3 pointer. That breaks the strict-aliasing rule: GCC may assume
+an access through the Vector2 does not touch the Vector3 and reorder them.
+
+GCC 10.2 for armhf at -O3 (SITL on a Zynq ARM board) did exactly that in
+AC_Loiter::set_pilot_desired_acceleration_rad():
+
+    _predicted_accel_ne_mss = predicted_accel_ned_mss.xy();
+
+the 8-byte copy of the Vector2 view was scheduled before the Vector3
+returned by lean_angles_rad_to_accel_NED_mss() had been stored to the
+stack, so it copied stale stack contents. LOITER ignored the roll and
+pitch sticks, and POSHOLD (which calls clear_pilot_desired_acceleration()
+every loop) drifted on garbage depending on what was left on the stack.
+
+ChibiOS boards build with -fno-strict-aliasing and never see this. With
+__may_alias__ on Vector2 the Vector2 view may alias anything, and the
+store and the copy stay in order (checked in the assembly).
+---
+ libraries/AP_Math/vector2.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/libraries/AP_Math/vector2.h b/libraries/AP_Math/vector2.h
+index 4ac6198..a2539f0 100644
+--- a/libraries/AP_Math/vector2.h
++++ b/libraries/AP_Math/vector2.h
+@@ -41,8 +41,13 @@
+ #include <AP_Common/AP_Common.h>
+ #include "ftype.h"
+ 
++// may_alias: Vector3<T>::xy() hands out the x and y of a Vector3 as a Vector2 (a cast of the
++// Vector3 pointer). Without it that is a strict-aliasing violation and GCC may move the read of
++// the Vector2 view ahead of the stores to the Vector3 (seen with GCC 10 armhf -O3 in
++// AC_Loiter::set_pilot_desired_acceleration_rad(): the predicted acceleration was read before the
++// Vector3 it comes from had been written).
+ template <typename T>
+-struct Vector2
++struct __attribute__((__may_alias__)) Vector2
+ {
+     T x, y;
+ 
+-- 
+2.53.0.windows.2
+

@@ -1,0 +1,25 @@
+NyxHop FC board image: the NyxHop board (baseboard v0.2 with the ADRV9364-Z7020 module).
+install.py checks every file against this list before and after it uploads.
+
+link: 2.0.11
+link-daemon: 785fdfcfc4f185e8aaf0852ee09e7fe0
+fc-io: 0x46430003
+px4: v1.17.0 with px4-patches 0001-0012
+kernel-release: 6.1.70-284114-g2e8908932dfd
+kernel: Linux 6.1.70, github.com/analogdevicesinc/linux 2e8908932dfd9faf40ec9220a508aa1ce02699a8, configuration in kernel.config (GPLv2)
+
+files:
+474dd04eb5ad3994effd14bd56255d54   4680672  BOOT.BIN
+8393421a93506a29b4e896fcbe358e80     24263  devicetree.dtb
+96f14e92da0a1eae2a8df35e23c9fdf4      3272  fc-start.sh
+4d3f2101d37a32341e584977e28b8b7d      2422  fc-status.sh
+d5190d0acf5b8235aed234a208c2e31b       355  fcio-spi.dtbo
+084a5d9ce46d8bfe1f626357ee1cacd3    170296  kernel.config
+0bb831b456bc10575fa2633a953b270c      1414  nyxbb-can.dtbo
+7782209615dab4291003309d9f0c6551      1191  nyxbb-io.dtbo
+8c9df39629e22a9ff377923e3a372188      1604  nyxbb-ps.dtbo
+fa108eb07c572f3db430b2f75f6c870f        78  px4-tlm.conf
+edff699315a9e8d95f0342d92d17ff19       596  px4.service
+314688e91e96dbca99e915611750048e   1056733  px4.tar.gz
+cfeca078907382084b6302a3aa7b1fd5     53812  u-dma-buf.ko
+7edda556e6bfe996b4390d63400520ce   8467328  uImage

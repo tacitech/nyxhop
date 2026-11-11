@@ -1,0 +1,66 @@
+From 305de97a7143c048ce14194b893f32c0fae2a1b3 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 18 Oct 2026 14:12:56 +0700
+Subject: [PATCH 06/12] nyx_dshot: NYX_DSHOT_WD (default 100 ms, above the
+ mixer's 50 ms backup schedule) written to the PL
+
+---
+ src/drivers/nyx_dshot/module.yaml   | 12 ++++++++++++
+ src/drivers/nyx_dshot/nyx_dshot.cpp |  7 +++++--
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/module.yaml b/src/drivers/nyx_dshot/module.yaml
+index 7dc0fc7..ea6c639 100644
+--- a/src/drivers/nyx_dshot/module.yaml
++++ b/src/drivers/nyx_dshot/module.yaml
+@@ -17,3 +17,15 @@ parameters:
+             min: 150
+             max: 1200
+             default: 600
++        NYX_DSHOT_WD:
++            description:
++                short: DShot failsafe of the NyxHop PL outputs
++                long: |
++                    The PL sends throttle 0 on its own after this many ms without an update from
++                    PX4 (dead or stuck). 0 turns it off. Keep it above 50 ms: the mixer updates at
++                    20 Hz before the controllers run.
++            type: int32
++            unit: ms
++            min: 0
++            max: 255
++            default: 100
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index 6d84fb2..ae9cf0f 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -5,7 +5,8 @@
+  * block, a frame on each line per update. Values as PX4's DShot driver: 0 disarmed (motor
+  * stopped), 1..1999 the throttle (DShot 48..2046). The line rate (DShot600 default) is the
+  * block's DSHOT_PERIOD, set here from NYX_DSHOT_RATE. If this stops writing (PX4 dead or stuck)
+- * the block itself sends throttle 0 after DSHOT_WD ms (50 by default).
++ * the block itself sends throttle 0 after NYX_DSHOT_WD ms (100 by default: above the mixer's own
++ * 50 ms backup schedule, which is all it runs on before the controllers publish).
+  */
+ 
+ #include <drivers/drv_hrt.h>
+@@ -130,6 +131,7 @@ private:
+ 		// the block's clock is 200 MHz: a DShot600 bit = 333 clocks
+ 		const int rate = math::constrain((int)_param_rate.get(), 150, 1200);
+ 		_fcio.wr(nyx_fcio::DSHOT_PERIOD, (200000 + rate / 2) / rate);
++		_fcio.wr(nyx_fcio::DSHOT_WD, math::constrain((int)_param_wd.get(), 0, 255));
+ 	}
+ 
+ 	MixingOutput _mixing_output{"NYX_DSHOT", NUM_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+@@ -140,7 +142,8 @@ private:
+ 	perf_counter_t _interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
+ 
+ 	DEFINE_PARAMETERS(
+-		(ParamInt<px4::params::NYX_DSHOT_RATE>) _param_rate
++		(ParamInt<px4::params::NYX_DSHOT_RATE>) _param_rate,
++		(ParamInt<px4::params::NYX_DSHOT_WD>) _param_wd
+ 	)
+ };
+ 
+-- 
+2.53.0.windows.2
+

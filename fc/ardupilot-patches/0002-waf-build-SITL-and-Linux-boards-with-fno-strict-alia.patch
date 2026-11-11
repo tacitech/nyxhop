@@ -1,0 +1,46 @@
+From 3c1098cdabb203de17ec8ffab57fcc0bffd87de9 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Wed, 21 Oct 2026 19:03:25 +0700
+Subject: [PATCH 2/2] waf: build SITL and Linux boards with
+ -fno-strict-aliasing
+
+As the ChibiOS boards always have. The code type-puns in places
+(Vector3::xy() hands out a Vector3 as a Vector2), and with strict
+aliasing GCC 10 armhf -O3 miscompiled AC_Loiter: LOITER ignored the
+sticks in SITL on an ARM board. Building SITL and Linux with the same
+aliasing rule as the flight-controller builds keeps them testing the
+same code.
+---
+ Tools/ardupilotwaf/boards.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/Tools/ardupilotwaf/boards.py b/Tools/ardupilotwaf/boards.py
+index b1d6681..00fe462 100644
+--- a/Tools/ardupilotwaf/boards.py
++++ b/Tools/ardupilotwaf/boards.py
+@@ -874,6 +874,11 @@ class SITLBoard(Board):
+                 '-O3',
+             ]
+ 
++        # as the ChibiOS boards: the code type-puns (Vector3::xy() hands out a Vector3 as a
++        # Vector2), which GCC 10 armhf -O3 broke in AC_Loiter (LOITER ignored the sticks)
++        env.CFLAGS += ['-fno-strict-aliasing']
++        env.CXXFLAGS += ['-fno-strict-aliasing']
++
+         if 'clang++' in cfg.env.COMPILER_CXX and cfg.options.asan:
+             env.CXXFLAGS += [
+                 '-fsanitize=address',
+@@ -1424,6 +1429,10 @@ class LinuxBoard(Board):
+                 '-O3',
+             ]
+ 
++        # as the ChibiOS boards (see SITLBoard)
++        env.CFLAGS += ['-fno-strict-aliasing']
++        env.CXXFLAGS += ['-fno-strict-aliasing']
++
+         env.LIB += [
+             'm',
+         ]
+-- 
+2.53.0.windows.2
+

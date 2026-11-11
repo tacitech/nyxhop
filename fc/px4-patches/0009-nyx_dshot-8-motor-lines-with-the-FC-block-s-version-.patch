@@ -1,0 +1,340 @@
+From 8a38c8b29bbce580060e3e65d87174a917695fd1 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Mon, 9 Nov 2026 17:43:06 +0700
+Subject: [PATCH 09/12] nyx_dshot: 8 motor lines with the FC block's version 3
+ (the NyxHop baseboard's CH1..8: NYX_PWM_OUTS 8 bits, NYX_PWM_MIN/MAX/DIS1..8,
+ 8 output channels); nyx_fcio.hpp: version 3 registers (lines 5..8, CAPS),
+ lines(), hil(); the read-back only where the block has it (HIL); SIH_PL_IO
+ refuses a block without HIL
+
+---
+ src/drivers/nyx_dshot/module.yaml            | 22 +++---
+ src/drivers/nyx_dshot/nyx_dshot.cpp          | 72 ++++++++++++--------
+ src/lib/nyx_fcio/nyx_fcio.hpp                | 22 +++++-
+ src/modules/simulation/simulator_sih/sih.cpp | 18 +++--
+ 4 files changed, 87 insertions(+), 47 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/module.yaml b/src/drivers/nyx_dshot/module.yaml
+index 27995b2..765db08 100644
+--- a/src/drivers/nyx_dshot/module.yaml
++++ b/src/drivers/nyx_dshot/module.yaml
+@@ -3,7 +3,7 @@ actuator_output:
+   output_groups:
+     - param_prefix: NYX_DSHOT
+       channel_label: 'Motor'
+-      num_channels: 4
++      num_channels: 8
+ 
+ parameters:
+     - group: DShot
+@@ -59,8 +59,12 @@ parameters:
+                 1: Motor 2
+                 2: Motor 3
+                 3: Motor 4
++                4: Motor 5
++                5: Motor 6
++                6: Motor 7
++                7: Motor 8
+             min: 0
+-            max: 15
++            max: 255
+             default: 0
+             reboot_required: true
+         NYX_PWM_RATE:
+@@ -80,14 +84,14 @@ parameters:
+                 short: PWM minimum of NyxHop motor ${i}
+                 long: |
+                     The pulse at the lowest throttle while armed (us). Only for a motor on PWM
+-                    (NYX_PWM_OUTS).
++                    (NYX_PWM_OUTS). Motors 5..8: the baseboard's CH5..8 (the FC block's version 3).
+             type: int32
+             unit: us
+             min: 800
+             max: 1400
+-            num_instances: 4
++            num_instances: 8
+             instance_start: 1
+-            default: [1000, 1000, 1000, 1000]
++            default: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]
+         NYX_PWM_MAX${i}:
+             description:
+                 short: PWM maximum of NyxHop motor ${i}
+@@ -97,9 +101,9 @@ parameters:
+             unit: us
+             min: 1600
+             max: 2200
+-            num_instances: 4
++            num_instances: 8
+             instance_start: 1
+-            default: [2000, 2000, 2000, 2000]
++            default: [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000]
+         NYX_PWM_DIS${i}:
+             description:
+                 short: PWM disarmed pulse of NyxHop motor ${i}
+@@ -111,6 +115,6 @@ parameters:
+             unit: us
+             min: 800
+             max: 2200
+-            num_instances: 4
++            num_instances: 8
+             instance_start: 1
+-            default: [1000, 1000, 1000, 1000]
++            default: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index ac9ba50..860c5f6 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -1,9 +1,9 @@
+ /**
+  * @file nyx_dshot.cpp
+  *
+- * The motors out of the NyxHop board's PL (nyx_fcio): the mixer's 4 motor outputs written to the
+- * block, all lines updated at once per mixer update. Each line is DShot, or PWM if its bit is set
+- * in NYX_PWM_OUTS (the block's version 2).
++ * The motors out of the NyxHop board's PL (nyx_fcio): the mixer's motor outputs written to the
++ * block, all lines updated at once per mixer update - 4 lines, 8 from the block's version 3 (the
++ * baseboard's CH1..8). Each line is DShot, or PWM if its bit is set in NYX_PWM_OUTS (version 2).
+  *
+  * DShot: values as PX4's DShot driver: 0 disarmed (motor stopped), NYX_DSHOT_MIN..1999 the
+  * throttle (DShot 48..2046). The line rate (DShot600 default) is the block's DSHOT_PERIOD, set
+@@ -60,8 +60,9 @@ public:
+ 			return PX4_ERROR;
+ 		}
+ 
+-		// which lines are PWM, and their rate: only here (reboot_required)
+-		_pwm_mask = _param_pwm_outs.get() & 0xF;
++		// the block's lines; which are PWM, and their rate: only here (reboot_required)
++		_n_out = math::min(_fcio.lines(), MAX_OUT);
++		_pwm_mask = _param_pwm_outs.get() & ((1u << _n_out) - 1);
+ 
+ 		if (_pwm_mask != 0 && _fcio.version() < 2) {
+ 			PX4_ERR("NYX_PWM_OUTS %u, but this bitstream's FC block (version %u) has no PWM",
+@@ -89,12 +90,12 @@ public:
+ 			_mixing_output.unregister();
+ 
+ 			// the motors stopped now, not after the block's watchdog (PWM: the pulses go on)
+-			for (unsigned i = 0; i < NUM_OUT; i++) {
++			for (unsigned i = 0; i < _n_out; i++) {
+ 				if (is_pwm(i)) {
+-					_fcio.wr(nyx_fcio::PWM_US + 4 * i, _pwm_dis[i]);
++					_fcio.wr(nyx_fcio::pwm_us(i), _pwm_dis[i]);
+ 
+ 				} else {
+-					_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, 0);
++					_fcio.wr(nyx_fcio::dshot_tx(i), 0);
+ 				}
+ 			}
+ 
+@@ -123,17 +124,17 @@ public:
+ 	bool updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+ 			   unsigned num_control_groups_updated) override
+ 	{
+-		for (unsigned i = 0; i < NUM_OUT; i++) {
++		for (unsigned i = 0; i < _n_out; i++) {
+ 			const uint16_t o = i < num_outputs ? outputs[i] : 0;
+ 			const bool stop = o == 0 || o == UINT16_MAX;
+ 
+ 			if (is_pwm(i)) {
+ 				// the pulse in us; stopped (failsafe): the disarmed pulse
+-				_fcio.wr(nyx_fcio::PWM_US + 4 * i, stop ? _pwm_dis[i] : math::min<uint32_t>(o, PWM_MAX_US));
++				_fcio.wr(nyx_fcio::pwm_us(i), stop ? _pwm_dis[i] : math::min<uint32_t>(o, PWM_MAX_US));
+ 
+ 			} else {
+ 				// 0 (disarmed, or failsafe) stops the motor; 1..1999 = DShot 48..2046
+-				_fcio.wr(nyx_fcio::DSHOT_TX + 4 * i, stop ? 0 : math::min<uint32_t>(o, DSHOT_MAX) + 47);
++				_fcio.wr(nyx_fcio::dshot_tx(i), stop ? 0 : math::min<uint32_t>(o, DSHOT_MAX) + 47);
+ 			}
+ 		}
+ 
+@@ -145,10 +146,18 @@ public:
+ 	{
+ 		perf_print_counter(_cycle_perf);
+ 		perf_print_counter(_interval_perf);
+-		PX4_INFO("FC block version %u", (unsigned)_fcio.version());
+-		PX4_INFO("DShot%d: %u frames sent; read back %u good, %u bad; bit %u clocks",
+-			 _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT), (unsigned)_fcio.rd(nyx_fcio::DSHOT_GOOD),
+-			 (unsigned)_fcio.rd(nyx_fcio::DSHOT_BAD), (unsigned)_fcio.rd(nyx_fcio::DSHOT_BITPER));
++		const bool rb = _fcio.hil();
++		PX4_INFO("FC block version %u, %u lines, %s", (unsigned)_fcio.version(), _n_out,
++			 rb ? "read back (HIL)" : "no read-back (no HIL in this image)");
++
++		if (rb) {
++			PX4_INFO("DShot%d: %u frames sent; read back %u good, %u bad; bit %u clocks",
++				 _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT), (unsigned)_fcio.rd(nyx_fcio::DSHOT_GOOD),
++				 (unsigned)_fcio.rd(nyx_fcio::DSHOT_BAD), (unsigned)_fcio.rd(nyx_fcio::DSHOT_BITPER));
++
++		} else {
++			PX4_INFO("DShot%d: %u frames sent", _param_rate.get(), (unsigned)_fcio.rd(nyx_fcio::DSHOT_SENT));
++		}
+ 
+ 		if (_pwm_mask) {
+ 			PX4_INFO("PWM every %u us", (unsigned)_fcio.rd(nyx_fcio::PWM_PERIOD));
+@@ -158,16 +167,18 @@ public:
+ 		PX4_INFO("failsafe after %u ms without an update: %s, %u trips", (unsigned)_fcio.rd(nyx_fcio::DSHOT_WD),
+ 			 (fs >> 31) ? "ON" : "off", (unsigned)(fs & 0xFFFF));
+ 
+-		for (unsigned i = 0; i < NUM_OUT; i++) {
++		for (unsigned i = 0; i < _n_out; i++) {
++			const bool back = rb && i < 4;
++
+ 			if (is_pwm(i)) {
+-				PX4_INFO("motor %u: PWM %4u us, read back %4u us (disarmed %u)", i + 1,
+-					 (unsigned)(_fcio.rd(nyx_fcio::PWM_US + 4 * i) & 0xFFF),
+-					 (unsigned)(_fcio.rd(nyx_fcio::PWM_RX + 4 * i) & 0xFFF), (unsigned)_pwm_dis[i]);
++				PX4_INFO("motor %u: PWM %4u us, read back %4d us (disarmed %u)", i + 1,
++					 (unsigned)(_fcio.rd(nyx_fcio::pwm_us(i)) & 0xFFF),
++					 back ? (int)(_fcio.rd(nyx_fcio::PWM_RX + 4 * i) & 0xFFF) : -1, (unsigned)_pwm_dis[i]);
+ 
+ 			} else {
+-				PX4_INFO("motor %u: DShot %4u, read back %4u", i + 1,
+-					 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_TX + 4 * i) & 0x7FF),
+-					 (unsigned)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF));
++				PX4_INFO("motor %u: DShot %4u, read back %4d", i + 1,
++					 (unsigned)(_fcio.rd(nyx_fcio::dshot_tx(i)) & 0x7FF),
++					 back ? (int)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF) : -1);
+ 			}
+ 		}
+ 
+@@ -176,13 +187,13 @@ public:
+ 	}
+ 
+ private:
+-	static constexpr unsigned NUM_OUT = 4;
++	static constexpr unsigned MAX_OUT = 8;
+ 	static constexpr uint16_t DSHOT_MAX = 1999;
+ 	static constexpr uint32_t PWM_MAX_US = 2200;
+ 
+ 	bool is_pwm(unsigned i) const { return _pwm_mask & (1u << i); }
+ 
+-	/** a per-motor parameter, NAME1..NAME4 */
++	/** a per-motor parameter, NAME1..NAME8 */
+ 	static int32_t param_motor(const char *name, unsigned i, int32_t dflt)
+ 	{
+ 		char n[17];
+@@ -203,13 +214,13 @@ private:
+ 		// we use a minimum value of 1, since 0 is for disarmed (as PX4's DShot driver)
+ 		const uint16_t dshot_min = math::constrain((int)(_param_dshot_min.get() * DSHOT_MAX), 1, (int)DSHOT_MAX);
+ 
+-		for (unsigned i = 0; i < NUM_OUT; i++) {
++		for (unsigned i = 0; i < _n_out; i++) {
+ 			if (is_pwm(i)) {
+ 				_pwm_dis[i] = math::constrain((int)param_motor("NYX_PWM_DIS", i, 1000), 800, (int)PWM_MAX_US);
+ 				_mixing_output.disarmedValue(i) = _pwm_dis[i];
+ 				_mixing_output.minValue(i) = math::constrain((int)param_motor("NYX_PWM_MIN", i, 1000), 800, 1400);
+ 				_mixing_output.maxValue(i) = math::constrain((int)param_motor("NYX_PWM_MAX", i, 2000), 1600, (int)PWM_MAX_US);
+-				_fcio.wr(nyx_fcio::PWM_FS_US + 4 * i, _pwm_dis[i]);
++				_fcio.wr(nyx_fcio::pwm_fs_us(i), _pwm_dis[i]);
+ 
+ 			} else {
+ 				_mixing_output.disarmedValue(i) = 0;
+@@ -224,11 +235,12 @@ private:
+ 		_fcio.wr(nyx_fcio::DSHOT_WD, math::constrain((int)_param_wd.get(), 0, 255));
+ 	}
+ 
+-	MixingOutput _mixing_output{"NYX_DSHOT", NUM_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
++	MixingOutput _mixing_output{"NYX_DSHOT", MAX_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+ 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
+ 	nyx_fcio::Map _fcio;
++	unsigned _n_out{4};
+ 	uint8_t _pwm_mask{0};
+-	uint16_t _pwm_dis[NUM_OUT] {1000, 1000, 1000, 1000};
++	uint16_t _pwm_dis[MAX_OUT] {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+ 
+ 	perf_counter_t _cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
+ 	perf_counter_t _interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
+@@ -273,8 +285,8 @@ int NyxDShot::print_usage(const char *reason)
+ 	PRINT_MODULE_DESCRIPTION(
+ 		R"DESCR_STR(
+ ### Description
+-The 4 motor outputs of the NyxHop board's PL (the nyx_fcio block): each DShot, or PWM
+-(NYX_PWM_OUTS), read back by the block.
++The motor outputs of the NyxHop board's PL (the nyx_fcio block): 4, or 8 from its version 3 (the
++baseboard's CH1..8); each DShot, or PWM (NYX_PWM_OUTS).
+ )DESCR_STR");
+ 
+ 	PRINT_MODULE_USAGE_NAME("nyx_dshot", "driver");
+diff --git a/src/lib/nyx_fcio/nyx_fcio.hpp b/src/lib/nyx_fcio/nyx_fcio.hpp
+index 7eb0235..5dd6794 100644
+--- a/src/lib/nyx_fcio/nyx_fcio.hpp
++++ b/src/lib/nyx_fcio/nyx_fcio.hpp
+@@ -3,7 +3,8 @@
+  *
+  * The NyxHop board's flight controller I/O block in the PL (fpga/rtl/nyx_fcio.v in NyxHop-FC):
+  * an ICM-42688-P on the PS's SPI1 (read by the icm42688p driver over /dev/spidev) whose accel and
+- * gyro values are written here, and 4 motor lines, each DShot or (version 2) PWM, read back.
++ * gyro values are written here, and 4 motor lines (8 from version 3), each DShot or (version 2)
++ * PWM, read back (lines 1..4, when the block has its HIL parts).
+  * Mapped from /dev/mem (root). Only with a bitstream that has the block: elsewhere the address
+  * is not decoded and an access faults.
+  */
+@@ -48,8 +49,18 @@ enum Reg : uint32_t {
+ 	PWM_US       = 0x84, // ..0x90: [11:0] each PWM line's pulse, us
+ 	PWM_FS_US    = 0x94, // ..0xA0: [11:0] the pulse before the first DSHOT_GO, in the failsafe, with kill
+ 	PWM_RX       = 0xA4, // ..0xB0: [11:0] each PWM line's last pulse measured, us; [31] a pulse seen
++	// version 3: lines 5..8 (the baseboard's CH5..8; the read-back stays on lines 1..4)
++	DSHOT_TX_HI  = 0xB4, // ..0xC0
++	PWM_US_HI    = 0xC4, // ..0xD0
++	PWM_FS_US_HI = 0xD4, // ..0xE0
++	CAPS         = 0xFC, // [0] HIL: the emulated IMU and the read-back are in the block (0 on the baseboard)
+ };
+ 
++// a line's registers, lines 0..7
++static constexpr uint32_t dshot_tx(unsigned i) { return i < 4 ? DSHOT_TX + 4 * i : DSHOT_TX_HI + 4 * (i - 4); }
++static constexpr uint32_t pwm_us(unsigned i) { return i < 4 ? PWM_US + 4 * i : PWM_US_HI + 4 * (i - 4); }
++static constexpr uint32_t pwm_fs_us(unsigned i) { return i < 4 ? PWM_FS_US + 4 * i : PWM_FS_US_HI + 4 * (i - 4); }
++
+ // the chip's scales in high-resolution FIFO packets (20 bit)
+ static constexpr float ACCEL_LSB_PER_G = 32768.f;
+ static constexpr float GYRO_LSB_PER_DPS = 262.f;
+@@ -86,9 +97,16 @@ public:
+ 		return (rd(VER) >> 16) == ID;
+ 	}
+ 
+-	/** the block's version: 1 DShot only, 2 PWM too */
++	/** the block's version: 1 DShot only, 2 PWM too, 3 eight lines */
+ 	uint32_t version() const { return rd(VER) & 0xFFFF; }
+ 
++	/** its motor lines */
++	unsigned lines() const { return version() >= 3 ? 8 : 4; }
++
++	/** the emulated IMU and the read-back (DSHOT_RX, PWM_RX) are there: all before version 3,
++	 * from 3 the block's HIL parameter (0 in the baseboard's image) */
++	bool hil() const { return version() < 3 || (rd(CAPS) & 1); }
++
+ 	// (off: a register's byte address, a multiple of 4)
+ 	uint32_t rd(uint32_t off) const { return static_cast<volatile uint32_t *>(_p)[off / 4]; }
+ 	void wr(uint32_t off, uint32_t v) { static_cast<volatile uint32_t *>(_p)[off / 4] = v; }
+diff --git a/src/modules/simulation/simulator_sih/sih.cpp b/src/modules/simulation/simulator_sih/sih.cpp
+index d0ebdd1..3d0c15a 100644
+--- a/src/modules/simulation/simulator_sih/sih.cpp
++++ b/src/modules/simulation/simulator_sih/sih.cpp
+@@ -84,14 +84,20 @@ void Sih::run()
+ 	if (_sih_pl_io.get()) {
+ #if defined(__PX4_POSIX)
+ 		_pl_io = _fcio.open();
+-#endif
+ 
+-		if (_pl_io) {
+-			PX4_INFO("motors from the PL's DShot, IMU into the PL's ICM-42688-P");
++		if (_pl_io && !_fcio.hil()) {
++			// (the baseboard's image: a real IMU on the board, no emulated one, no read-back)
++			_pl_io = false;
++			PX4_ERR("SIH_PL_IO: this image's FC block has no HIL parts, the IMU and motors stay simulated here");
+ 
+-		} else {
+-			PX4_ERR("SIH_PL_IO: no FC I/O block in the PL, the IMU and motors stay simulated here");
+-		}
++		} else
++#endif
++			if (_pl_io) {
++				PX4_INFO("motors from the PL's DShot, IMU into the PL's ICM-42688-P");
++
++			} else {
++				PX4_ERR("SIH_PL_IO: no FC I/O block in the PL, the IMU and motors stay simulated here");
++			}
+ 	}
+ 
+ #if defined(ENABLE_LOCKSTEP_SCHEDULER)
+-- 
+2.53.0.windows.2
+
