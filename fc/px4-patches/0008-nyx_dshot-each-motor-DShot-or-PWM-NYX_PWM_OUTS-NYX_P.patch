@@ -1,7 +1,7 @@
 From f8889a44d27d58eb7525706a8667a7e980728867 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Wed, 21 Oct 2026 20:25:32 +0700
-Subject: [PATCH 08/12] nyx_dshot: each motor DShot or PWM (NYX_PWM_OUTS,
+Subject: [PATCH 08/13] nyx_dshot: each motor DShot or PWM (NYX_PWM_OUTS,
  NYX_PWM_RATE 50-400 Hz, NYX_PWM_MIN/MAX/DIS per motor; the PL's failsafe
  pulse = NYX_PWM_DIS), NYX_DSHOT_MIN as DSHOT_MIN; nyx_fcio.hpp: block version
  2 registers (OUT_MODE, PWM_*), any version accepted; SIH_PL_IO reads a PWM

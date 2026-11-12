@@ -1,7 +1,7 @@
 From 080d18c8dfa8e18018e03b9fdee20baae8073dbf Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 10:56:17 +0700
-Subject: [PATCH 01/12] boards: nyxhop/zynq - Linux ARM Cortex-A9 (Zynq-7000),
+Subject: [PATCH 01/13] boards: nyxhop/zynq - Linux ARM Cortex-A9 (Zynq-7000),
  no lockstep, root path '.', SIH quad X startup (nyxhop-sih.config), MAVLink
  over the NyxHop link (14556/14557)
 

@@ -1,7 +1,7 @@
 From ce5145bcc01bf5569d570bb867b97711a343b031 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 13:17:02 +0700
-Subject: [PATCH 03/12] nyxhop-hil.config: icm42688p before simulator_sih
+Subject: [PATCH 03/13] nyxhop-hil.config: icm42688p before simulator_sih
  (instance 0 must be the real IMU, else arming fails 'no data')
 
 ---

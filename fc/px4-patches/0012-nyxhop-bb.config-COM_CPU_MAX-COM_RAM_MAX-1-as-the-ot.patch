@@ -1,7 +1,7 @@
 From 3a0e1820994771a197aa3f8aa80e2b8367d0bf71 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Mon, 9 Nov 2026 18:37:30 +0700
-Subject: [PATCH 12/12] nyxhop-bb.config: COM_CPU_MAX/COM_RAM_MAX -1 as the
+Subject: [PATCH 12/13] nyxhop-bb.config: COM_CPU_MAX/COM_RAM_MAX -1 as the
  other nyxhop configs
 
 ---

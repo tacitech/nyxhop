@@ -84,7 +84,7 @@ pub fn tag(p: &egui::Painter, at: Pos2, anchor: Align2, text: &str, size: f32, c
     r
 }
 
-fn button(ui: &egui::Ui, r: Rect, id: &str, label: &str, size: f32) -> bool {
+pub fn button(ui: &egui::Ui, r: Rect, id: &str, label: &str, size: f32) -> bool {
     let resp = ui.interact(r, ui.id().with(id), Sense::click());
     let fill = if resp.is_pointer_button_down_on() {
         ACCENT

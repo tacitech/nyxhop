@@ -213,6 +213,18 @@ impl Shared {
             mcs: mcs_disp_short(self.disp_mcs.load(Ordering::Relaxed) as usize),
         }
     }
+
+    /// The far end's licence as it told it over the link (empty until it did): for the licence
+    /// panel of an app built on this one (nyxhop-pilot)
+    pub fn far_licence(&self) -> String {
+        self.far_lic.lock().unwrap().clone()
+    }
+}
+
+/// The receiver's sample rate on this PC (the radio panel's rate change, for an app built on this
+/// one)
+pub fn set_samp_rate_hz(hz: u64) {
+    pc::set_samp_rate_hz(hz);
 }
 
 /// The standalone app: options from the command line, a window of its own (or
@@ -3099,6 +3111,26 @@ impl RxApp {
         // antennas a known distance apart.
         section(ui, "Range", t("Range", "Khoảng cách"), true, |ui| {
             let hw = st.kv.get("range_hw").map(String::as_str);
+            // off at a board's start (an extra, 12/11): turned on here; the aircraft follows the
+            // ground board
+            let on = st.kv.get("range_on").map(String::as_str);
+            th::row(ui, t("Measure over the link", "Đo qua sóng"), |ui| {
+                let opts = [(t("On", "Bật"), "1"), (t("Off", "Tắt"), "0")];
+                if let Some(hit) = nu::segmented(ui, &opts, on.unwrap_or("")) {
+                    self.board.send(if hit == "1" { "range on" } else { "range off" });
+                }
+            });
+            if on == Some("0") {
+                ui.label(
+                    egui::RichText::new(t(
+                        "Off by default: turn it on to see how far the aircraft is when it has no GPS.",
+                        "Mặc định tắt: bật khi cần biết máy bay cách bao xa mà không có GPS.",
+                    ))
+                    .small()
+                    .color(th::DIM),
+                );
+                return;
+            }
             match (nu::range_of(&st), hw) {
                 (Some((m, s)), _) => {
                     let pairs = st.kv.get("range_pairs").cloned().unwrap_or_default();

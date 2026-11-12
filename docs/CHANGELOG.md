@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.12
+
+* ADRV9364: next to a busy WiFi channel the link no longer narrows to 2.5 MHz and stays there. It
+  goes back to a wider channel as soon as that one does no worse, and it does not narrow for losses
+  a narrower channel would not cure.
+* ADRV9364: on some boards the video no longer drops for two seconds every half minute.
+* ADRV9364: the link's distance reading is an extra now, off by default. Turn it on in the app
+  (Range; in NyxHop Pilot: Distance without GPS) when you need it: the aircraft follows the ground
+  station.
+* ADRV9364: both ends start at full transmit power. With an external amplifier after the board,
+  set its ceiling once: `tpc max -10`.
+* NyxHop Pilot: a flight screen like a camera drone's app: ready to fly, or why not, in the
+  flight controller's words; Cine, Normal and Sport; take off, land and return home held for a
+  second; distance, height and speeds along the bottom; the aircraft's camera and transmit power
+  in Settings, over the link.
+* NyxHop board (`fc/`): DShot motors get the whole throttle range (they got half of it), and the
+  ESC commands (spin direction, beeps) work from the console.
+* Update both ADRV9364 boards and the camera program on the aircraft (`deploy/ipcam`). PlutoSDR
+  is unchanged.
+
 ## 2.0.11
 
 * ADRV9364 and PlutoSDR: telemetry and the IP network from the ground to the aircraft hold up

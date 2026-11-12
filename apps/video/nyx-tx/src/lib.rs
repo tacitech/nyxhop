@@ -15,6 +15,7 @@ pub fn packetize_fec_base(frame_id: u32, data: &[u8]) -> Vec<[u8; nyx_link::BLOC
     nyx_link::packetize_fec(frame_id, nyx_link::SourceType::H264Base, data, true)
 }
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -419,6 +420,15 @@ pub struct Shared {
     /// v40.33: the daemon's licence state (lic_* lines) - sent in-band every few
     /// seconds so the app on the receive end sees this board's DNA and state.
     pub lic_info: Mutex<String>,
+    /// This end's own radio as its board's console tells it (`tpc`: the transmit power, its
+    /// ceiling, the automatic lowering), as `air_*` lines for the far app (the Info frame): what the
+    /// pilot app's Link page shows of the aircraft
+    pub air_radio: Mutex<String>,
+    /// The video sources this program can run, as the ground may pick them (`air_sources`): a PC
+    /// all of its own, the board's camera program the camera alone - 12/11, "Test picture" picked
+    /// from the pilot app put the board's program in standby, off the link, and no setting could
+    /// reach it any more to put it back
+    pub sources: Mutex<&'static [&'static str]>,
     /// The config file read at start; `save` writes the running settings back to it.
     pub cfg_path: Mutex<String>,
     /// Shell command run after `save` (`{path}` = the file), for a board that runs from RAM
@@ -577,6 +587,8 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         text_out: Mutex::new(Vec::new()),
         tlm_tx_q: Mutex::new(Vec::new()),
         lic_info: Mutex::new(String::new()),
+        air_radio: Mutex::new(String::new()),
+        sources: Mutex::new(&["rtsp", "pattern", "webcam"]),
         cfg_path: Mutex::new(String::new()),
         save_hook: Mutex::new(String::new()),
         // `--standby`: start with nothing sent until the host process says otherwise
@@ -691,6 +703,7 @@ fn spawn_board_limits(shared: Arc<Shared>) {
         .name("board-limits".into())
         .spawn(move || {
             use std::io::{BufRead, BufReader, Write};
+            let mut air_at = std::time::Instant::now() - Duration::from_secs(10);
             while !shared.stop.load(Ordering::Relaxed) {
                 let host = {
                     let a = shared.channel_addr.lock().unwrap().clone();
@@ -742,6 +755,34 @@ fn spawn_board_limits(shared: Arc<Shared>) {
                         }
                     }
                 }
+                // the board's own transmit power, every 3 s, for the far app (Info frame `air_*`)
+                if air_at.elapsed() >= Duration::from_secs(3) {
+                    air_at = std::time::Instant::now();
+                    if let Some(r) = board_console(&host, "tpc") {
+                        let mut lines = String::new();
+                        for (k, v) in r.lines().filter_map(|l| l.split_once('=')) {
+                            match k {
+                                "tpc_on" | "tpc_max_db" => lines.push_str(&format!("air_{k}={v}\n")),
+                                _ => {}
+                            }
+                            // ... and under the names the ground sets them by (REMOTE_KEYS)
+                            match k {
+                                "tpc_max_db" => lines.push_str(&format!("air_txpower={v}\n")),
+                                "tpc_on" => lines.push_str(&format!("air_tpc={v}\n")),
+                                _ => {}
+                            }
+                        }
+                        // the power it sends at now: the radio's own gain (a raw `txgain`, the boot
+                        // config's among them, leaves the power control's number behind - 12/11, it
+                        // said 0 dB at -20)
+                        if let Some(g) = board_console(&host, "get")
+                            .and_then(|g| g.split_whitespace().find_map(|w| w.strip_prefix("txgain=")?.parse::<f32>().ok()))
+                        {
+                            lines.push_str(&format!("air_tpc_cur_db={}\n", g.round() as i32));
+                        }
+                        *shared.air_radio.lock().unwrap() = lines;
+                    }
+                }
                 // branch B: twice a second - until the width change is read here the blocks go
                 // out paced for the old width (13/10, 20 -> 5 MHz: 116 frames queued on the board
                 // in the change's 177 ms, 0.76 s to drain, retransmissions behind them too late)
@@ -759,6 +800,166 @@ impl FirstAddr for String {
     fn to_socket_addrs_first(&self) -> Option<std::net::SocketAddr> {
         use std::net::ToSocketAddrs;
         self.to_socket_addrs().ok()?.next()
+    }
+}
+
+/// One command on this end's board console (`host`:7202): its answer up to `ok` (None: no answer,
+/// or an `err`).
+fn board_console(host: &str, cmd: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::Duration;
+    let addr = format!("{host}:7202").to_socket_addrs_first()?;
+    let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(700)).ok()?;
+    s.set_read_timeout(Some(Duration::from_millis(800))).ok()?;
+    s.write_all(format!("{cmd}\n").as_bytes()).ok()?;
+    let mut out = String::new();
+    for line in BufReader::new(s).lines() {
+        // (the read timing out ends it too: `tpc` answers without the closing `ok`)
+        let Ok(l) = line else { break };
+        if l == "ok" {
+            return Some(out);
+        }
+        if l.starts_with("err") {
+            log(&format!("board console: {cmd} -> {l}"));
+            return None;
+        }
+        out.push_str(&l);
+        out.push('\n');
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The settings the ground may change on this end over the link (`!set <session>:<n> <key>
+/// <value>`, the pilot app's Video and Link pages): the video's, and the board's transmit power -
+/// never the transport, the radio's channels (those the ground sets on its own board) or anything
+/// that could cut the link from here.
+const REMOTE_KEYS: &[&str] = &["source", "pause", "res", "fps", "maxkbps", "quality", "autores", "cammax", "camadapt", "txpower", "tpc"];
+
+/// The ground's last command per key (its session and number): a text goes up three times and an
+/// older one can come after a newer (the ground daemon's repeats), so a key takes only numbers
+/// above the last it took from that session. A new session (the ground app started again) starts
+/// afresh.
+static REMOTE_LAST: Mutex<Option<HashMap<String, (u32, u32)>>> = Mutex::new(None);
+
+/// A command for `key` numbered `n` in the ground's session `sess` is new (and is taken as the
+/// key's last): not a repeat, not an older one come late
+fn remote_fresh(last: &mut HashMap<String, (u32, u32)>, key: &str, sess: u32, n: u32) -> bool {
+    if last.get(key).is_some_and(|&(s0, n0)| s0 == sess && n <= n0) {
+        return false;
+    }
+    last.insert(key.to_string(), (sess, n));
+    true
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn the_grounds_repeats_and_late_ones() {
+        let mut l = HashMap::new();
+        // res asked twice (5 then 7), fps between: each key on its own
+        assert!(remote_fresh(&mut l, "res", 9, 5));
+        assert!(remote_fresh(&mut l, "fps", 9, 6));
+        assert!(remote_fresh(&mut l, "res", 9, 7));
+        // the repeats, and res's first come late: none taken again
+        assert!(!remote_fresh(&mut l, "res", 9, 7));
+        assert!(!remote_fresh(&mut l, "res", 9, 5));
+        assert!(!remote_fresh(&mut l, "fps", 9, 6));
+        // the ground app started again: its numbers start again
+        assert!(remote_fresh(&mut l, "res", 10, 1));
+    }
+}
+
+/// What the keys are as the far app sees them (Info frame `air_*`): the settings it may change,
+/// as this end runs them
+pub fn remote_state(shared: &Shared) -> String {
+    let (lines, paused) = {
+        let c = shared.config.lock().unwrap();
+        (config_lines(&c), c.paused)
+    };
+    let mut out: String = lines
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(k, _)| REMOTE_KEYS.contains(k) || *k == "pass")
+        .map(|(k, v)| format!("air_{k}={}\n", v.trim()))
+        .collect();
+    out.push_str(&format!("air_pause={}\n", u8::from(paused)));
+    out.push_str(&format!("air_sources={}\n", shared.sources.lock().unwrap().join(",")));
+    // the camera as it comes (pass-through): its own picture size, rate and bitrate, and the
+    // ceiling it may be taken to
+    let r = &shared.rtsp;
+    let (cw, ch) = *r.dims.lock().unwrap();
+    if cw > 0 && ch > 0 {
+        out.push_str(&format!(
+            "air_cam_res={cw}x{ch}\nair_cam_fps={:.1}\nair_cam_kbps={}\nair_cam_ceiling={}\n",
+            r.fps_x10.load(Ordering::Relaxed) as f32 / 10.0,
+            r.kbps.load(Ordering::Relaxed),
+            cam_ceiling(shared)
+        ));
+    }
+    out.push_str(&shared.air_radio.lock().unwrap());
+    out
+}
+
+/// `!set <session>:<n> <key> <value>` from the ground (see REMOTE_KEYS): applied and saved; the
+/// result rides back in the Info frame (remote_state), so the ground shows what this end runs
+/// rather than waiting for an answer.
+pub fn remote_set(shared: &Shared, s: &str) {
+    let mut it = s.split_whitespace();
+    let (Some(id), Some(key), Some(val)) = (it.next(), it.next(), it.next()) else { return };
+    let Some((sess, n)) = id.split_once(':').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))) else {
+        return;
+    };
+    if !remote_fresh(REMOTE_LAST.lock().unwrap().get_or_insert_with(HashMap::new), key, sess, n) {
+        return;
+    }
+    if !REMOTE_KEYS.contains(&key) {
+        log(&format!("remote: {key} is not one the ground may set - ignored"));
+        return;
+    }
+    if key == "source" && !shared.sources.lock().unwrap().contains(&val) {
+        log(&format!("remote: source {val} is not one this end can run - ignored"));
+        return;
+    }
+    // the board's own transmit power: through its console (`tpc max` is kept on the board)
+    if key == "txpower" || key == "tpc" {
+        let host = {
+            let a = shared.channel_addr.lock().unwrap().clone();
+            a.rsplit_once(':').map_or(a.clone(), |(h, _)| h.to_string())
+        };
+        let cmd = match key {
+            "txpower" => match val.parse::<i32>() {
+                Ok(db) if (-40..=0).contains(&db) => format!("tpc max {db}"),
+                _ => return log(&format!("remote: txpower {val} out of -40..0 dB - ignored")),
+            },
+            _ => format!("tpc {}", u8::from(val != "0")),
+        };
+        let ok = board_console(&host, &cmd).is_some();
+        log(&format!("remote: the ground set {key} {val} -> board `{cmd}` {}", if ok { "done" } else { "FAILED" }));
+        // the power itself too while nothing lowers it on its own: `tpc max` moves the radio only
+        // when the power control's own number differs, and a raw gain (the boot config's) left that
+        // behind - 0 dB asked at -20 stayed -20
+        if key == "txpower" && ok {
+            let auto = board_console(&host, "tpc").is_some_and(|t| t.lines().any(|l| l.trim() == "tpc_on=1"));
+            if !auto {
+                let g = format!("txgain {val}");
+                let ok = board_console(&host, &g).is_some();
+                log(&format!("remote: board `{g}` {}", if ok { "done" } else { "FAILED" }));
+            }
+        }
+        return;
+    }
+    let r = {
+        let mut c = shared.config.lock().unwrap();
+        apply_set(&mut c, key, val)
+    };
+    match r {
+        Ok(()) => {
+            log(&format!("remote: the ground set {key} {val}"));
+            save_config(shared);
+        }
+        Err(e) => log(&format!("remote: the ground's {key} {val} refused: {e}")),
     }
 }
 

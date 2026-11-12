@@ -57,6 +57,8 @@ fn main() {
     let fresh = !std::path::Path::new(&cfg).exists();
 
     let shared = nyx_tx::setup(&opts);
+    // (the camera alone: any other source is standby, off the link - the ground must not pick one)
+    *shared.sources.lock().unwrap() = &["rtsp"];
     *shared.save_hook.lock().unwrap() = opts.arg("--save-hook", "");
     {
         let mut c = shared.config.lock().unwrap();

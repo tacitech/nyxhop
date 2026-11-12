@@ -1,0 +1,330 @@
+From ea79aa62d5f4f46626ec86838017b9728c53f5cf Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Thu, 12 Nov 2026 09:20:14 +0700
+Subject: [PATCH 13/13] nyx_dshot: the DShot frame as the PL sends it, (value
+ << 1) | telemetry (11-bit value, then the telemetry bit; it went out as the
+ value alone, every motor at half the throttle asked); ESC commands 'nyx_dshot
+ reverse|normal|save|beep1..5|cmd -c N [-m motor] [-r repeats]' as PX4's own
+ dshot driver, sent only while the motors are stopped, telemetry bit set;
+ nyx_fcio.hpp dshot_frame()/dshot_value(); SIH_PL_IO decodes the frame's value
+
+---
+ src/drivers/nyx_dshot/nyx_dshot.cpp          | 182 ++++++++++++++++++-
+ src/lib/nyx_fcio/nyx_fcio.hpp                |  11 +-
+ src/modules/simulation/simulator_sih/sih.cpp |   2 +-
+ 3 files changed, 186 insertions(+), 9 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index 860c5f6..a4f8f10 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -6,8 +6,11 @@
+  * baseboard's CH1..8). Each line is DShot, or PWM if its bit is set in NYX_PWM_OUTS (version 2).
+  *
+  * DShot: values as PX4's DShot driver: 0 disarmed (motor stopped), NYX_DSHOT_MIN..1999 the
+- * throttle (DShot 48..2046). The line rate (DShot600 default) is the block's DSHOT_PERIOD, set
++ * throttle (DShot 48..2046), written as the frame's 12 bits (nyx_fcio::dshot_frame: the value,
++ * then the telemetry request). The line rate (DShot600 default) is the block's DSHOT_PERIOD, set
+  * here from NYX_DSHOT_RATE.
++ * ESC commands (nyx_dshot reverse|normal|save|beep1..5|cmd, as PX4's dshot driver): sent to
++ * stopped motors in place of their 0, one frame per mixer update (~1 ms), telemetry request set.
+  * PWM: the pulse in us, NYX_PWM_DISn disarmed, NYX_PWM_MINn..NYX_PWM_MAXn armed, NYX_PWM_RATE
+  * pulses a second. The block makes the pulses on its own clock and never stops them: before the
+  * first update, in its failsafe and with kill they are NYX_PWM_DISn.
+@@ -23,9 +26,14 @@
+ #include <lib/nyx_fcio/nyx_fcio.hpp>
+ #include <parameters/param.h>
+ #include <lib/perf/perf_counter.h>
++#include <px4_platform_common/atomic.h>
++#include <px4_platform_common/getopt.h>
+ #include <px4_platform_common/log.h>
+ #include <px4_platform_common/module.h>
+ #include <px4_platform_common/module_params.h>
++#include <px4_platform_common/time.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <uORB/SubscriptionInterval.hpp>
+ #include <uORB/topics/parameter_update.h>
+ 
+@@ -50,7 +58,7 @@ public:
+ 	}
+ 
+ 	static int task_spawn(int argc, char *argv[]);
+-	static int custom_command(int argc, char *argv[]) { return print_usage("unknown command"); }
++	static int custom_command(int argc, char *argv[]);
+ 	static int print_usage(const char *reason = nullptr);
+ 
+ 	int init()
+@@ -124,6 +132,25 @@ public:
+ 	bool updateOutputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs,
+ 			   unsigned num_control_groups_updated) override
+ 	{
++		// an ESC command going out (send_command): to its motors only while all of them are stopped
++		uint32_t cmd_mask = 0;
++
++		if (_cmd_left.load() > 0) {
++			cmd_mask = _cmd_mask.load();
++
++			for (unsigned i = 0; i < _n_out; i++) {
++				const uint16_t o = i < num_outputs ? outputs[i] : 0;
++
++				if ((cmd_mask & (1u << i)) && o != 0 && o != UINT16_MAX) {
++					_cmd_left.store(-1);
++					cmd_mask = 0;
++					break;
++				}
++			}
++		}
++
++		const uint32_t cmd_frame = _cmd_frame.load();
++
+ 		for (unsigned i = 0; i < _n_out; i++) {
+ 			const uint16_t o = i < num_outputs ? outputs[i] : 0;
+ 			const bool stop = o == 0 || o == UINT16_MAX;
+@@ -132,16 +159,66 @@ public:
+ 				// the pulse in us; stopped (failsafe): the disarmed pulse
+ 				_fcio.wr(nyx_fcio::pwm_us(i), stop ? _pwm_dis[i] : math::min<uint32_t>(o, PWM_MAX_US));
+ 
++			} else if (stop) {
++				// 0 (disarmed, or failsafe) stops the motor, or the command
++				_fcio.wr(nyx_fcio::dshot_tx(i), (cmd_mask & (1u << i)) ? cmd_frame : 0);
++
+ 			} else {
+-				// 0 (disarmed, or failsafe) stops the motor; 1..1999 = DShot 48..2046
+-				_fcio.wr(nyx_fcio::dshot_tx(i), stop ? 0 : math::min<uint32_t>(o, DSHOT_MAX) + 47);
++				// 1..1999 = DShot 48..2046
++				_fcio.wr(nyx_fcio::dshot_tx(i), nyx_fcio::dshot_frame(math::min<uint32_t>(o, DSHOT_MAX) + 47));
+ 			}
+ 		}
+ 
+ 		_fcio.wr(nyx_fcio::DSHOT_GO, 1);
++
++		if (cmd_mask) {
++			_cmd_left.fetch_sub(1);
++		}
++
+ 		return true;
+ 	}
+ 
++	/** a DShot command (1..47) to the stopped DShot motors in mask, repeat frames; returns once sent */
++	int send_command(uint32_t command, uint32_t mask, int repeat)
++	{
++		mask &= ~(uint32_t)_pwm_mask & ((1u << _n_out) - 1);
++
++		if (mask == 0) {
++			PX4_ERR("no DShot motor to send it to");
++			return PX4_ERROR;
++		}
++
++		if (_cmd_left.load() > 0) {
++			PX4_ERR("a command is still going out");
++			return PX4_ERROR;
++		}
++
++		_cmd_frame.store(nyx_fcio::dshot_frame(command, true));
++		_cmd_mask.store(mask);
++		_cmd_left.store(repeat);
++
++		// a frame per mixer update; 2 s at most
++		for (int t = 0; t < 2000 && _cmd_left.load() > 0; t++) {
++			px4_usleep(1000);
++		}
++
++		const int left = _cmd_left.load();
++		_cmd_left.store(0);
++
++		if (left < 0) {
++			PX4_ERR("not sent: a motor is running (commands go to stopped motors only)");
++			return PX4_ERROR;
++		}
++
++		if (left > 0) {
++			PX4_ERR("not sent: no mixer updates");
++			return PX4_ERROR;
++		}
++
++		PX4_INFO("DShot command %u sent %d times to motors 0x%02x", (unsigned)command, repeat, (unsigned)mask);
++		return PX4_OK;
++	}
++
+ 	int print_status() override
+ 	{
+ 		perf_print_counter(_cycle_perf);
+@@ -177,8 +254,8 @@ public:
+ 
+ 			} else {
+ 				PX4_INFO("motor %u: DShot %4u, read back %4d", i + 1,
+-					 (unsigned)(_fcio.rd(nyx_fcio::dshot_tx(i)) & 0x7FF),
+-					 back ? (int)(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF) : -1);
++					 (unsigned)nyx_fcio::dshot_value(_fcio.rd(nyx_fcio::dshot_tx(i))),
++					 back ? (int)nyx_fcio::dshot_value(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i)) : -1);
+ 			}
+ 		}
+ 
+@@ -242,6 +319,11 @@ private:
+ 	uint8_t _pwm_mask{0};
+ 	uint16_t _pwm_dis[MAX_OUT] {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+ 
++	// the ESC command going out: its frame, motors, frames left (-1: refused, a motor running)
++	px4::atomic<uint32_t> _cmd_frame{0};
++	px4::atomic<uint32_t> _cmd_mask{0};
++	px4::atomic<int> _cmd_left{0};
++
+ 	perf_counter_t _cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
+ 	perf_counter_t _interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
+ 
+@@ -276,6 +358,80 @@ int NyxDShot::task_spawn(int argc, char *argv[])
+ 	return PX4_ERROR;
+ }
+ 
++int NyxDShot::custom_command(int argc, char *argv[])
++{
++	const char *verb = argv[0];
++	int motor = 0;		// 1..8, 0 all
++	int command = -1;
++	int repeat = -1;
++	int myoptind = 1;
++	int ch;
++	const char *myoptarg = nullptr;
++
++	while ((ch = px4_getopt(argc, argv, "m:c:r:", &myoptind, &myoptarg)) != EOF) {
++		switch (ch) {
++		case 'm':
++			motor = (int)strtol(myoptarg, nullptr, 10);
++			break;
++
++		case 'c':
++			command = (int)strtol(myoptarg, nullptr, 10);
++			break;
++
++		case 'r':
++			repeat = (int)strtol(myoptarg, nullptr, 10);
++			break;
++
++		default:
++			return print_usage("unrecognized flag");
++		}
++	}
++
++	// as PX4's dshot driver: BLHeli_S/BLHeli_32/Bluejay take direction 1/2 (7/8) and save (12)
++	// only after 6 of them in a row
++	struct Verb {
++		const char *name;
++		int command;
++		int repeat;
++	};
++
++	static constexpr Verb verbs[] = {
++		{"reverse", 8, 10}, {"normal", 7, 10}, {"save", 12, 10},
++		{"beep1", 1, 1}, {"beep2", 2, 1}, {"beep3", 3, 1}, {"beep4", 4, 1}, {"beep5", 5, 1},
++		{"cmd", -1, 10},
++	};
++
++	for (const Verb &v : verbs) {
++		if (strcmp(verb, v.name) != 0) {
++			continue;
++		}
++
++		const int c = v.command >= 0 ? v.command : command;
++		const int r = repeat > 0 ? repeat : v.repeat;
++
++		if (c < 1 || c > 47) {
++			return print_usage("a DShot command is 1..47 (-c)");
++		}
++
++		if (r < 1 || r > 100) {
++			return print_usage("repeats 1..100 (-r)");
++		}
++
++		if (motor < 0 || motor > (int)MAX_OUT) {
++			return print_usage("motor 1..8, 0 all (-m)");
++		}
++
++		if (!is_running()) {
++			PX4_ERR("not running");
++			return PX4_ERROR;
++		}
++
++		return get_instance()->send_command(c, motor == 0 ? 0xFFu : 1u << (motor - 1), r);
++	}
++
++	return print_usage("unknown command");
++}
++
+ int NyxDShot::print_usage(const char *reason)
+ {
+ 	if (reason) {
+@@ -287,10 +443,24 @@ int NyxDShot::print_usage(const char *reason)
+ ### Description
+ The motor outputs of the NyxHop board's PL (the nyx_fcio block): 4, or 8 from its version 3 (the
+ baseboard's CH1..8); each DShot, or PWM (NYX_PWM_OUTS).
++ESC commands go to stopped DShot motors only. To turn a motor the other way for good:
++reverse (or normal), then save, then power the ESC again.
+ )DESCR_STR");
+ 
+ 	PRINT_MODULE_USAGE_NAME("nyx_dshot", "driver");
+ 	PRINT_MODULE_USAGE_COMMAND("start");
++	PRINT_MODULE_USAGE_COMMAND_DESCR("reverse", "ESC spin direction 2 (DShot command 8)");
++	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 8, "Motor 1..8, 0 all", true);
++	PRINT_MODULE_USAGE_COMMAND_DESCR("normal", "ESC spin direction 1 (command 7)");
++	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 8, "Motor 1..8, 0 all", true);
++	PRINT_MODULE_USAGE_COMMAND_DESCR("save", "ESC saves its settings (command 12)");
++	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 8, "Motor 1..8, 0 all", true);
++	PRINT_MODULE_USAGE_COMMAND_DESCR("beep1", "ESC beacon 1 (beep2..beep5 the others)");
++	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 8, "Motor 1..8, 0 all", true);
++	PRINT_MODULE_USAGE_COMMAND_DESCR("cmd", "any DShot command");
++	PRINT_MODULE_USAGE_PARAM_INT('c', 0, 1, 47, "Command", false);
++	PRINT_MODULE_USAGE_PARAM_INT('r', 10, 1, 100, "Frames", true);
++	PRINT_MODULE_USAGE_PARAM_INT('m', 0, 0, 8, "Motor 1..8, 0 all", true);
+ 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
+ 	return 0;
+ }
+diff --git a/src/lib/nyx_fcio/nyx_fcio.hpp b/src/lib/nyx_fcio/nyx_fcio.hpp
+index 5dd6794..4fc392c 100644
+--- a/src/lib/nyx_fcio/nyx_fcio.hpp
++++ b/src/lib/nyx_fcio/nyx_fcio.hpp
+@@ -34,12 +34,12 @@ enum Reg : uint32_t {
+ 	SPI_XFERS    = 0x34,
+ 	RESETS       = 0x38,
+ 	DROPPED      = 0x3C,
+-	DSHOT_TX     = 0x40, // ..0x4C: [10:0] throttle, [11] telemetry
++	DSHOT_TX     = 0x40, // ..0x4C: the frame's 12 bits as they go out, [11] first: dshot_frame()
+ 	DSHOT_GO     = 0x50,
+ 	DSHOT_SENT   = 0x54,
+ 	DSHOT_WD     = 0x58, // ms without DSHOT_GO before the block sends throttle 0 itself (0 off)
+ 	DSHOT_FS     = 0x5C, // [15:0] failsafe trips, [31] failsafe now
+-	DSHOT_RX     = 0x60, // ..0x6C: [10:0] throttle, [11] telemetry, [31] a good frame seen
++	DSHOT_RX     = 0x60, // ..0x6C: [11:0] the 12 bits read back (dshot_throttle()), [31] a good frame seen
+ 	DSHOT_GOOD   = 0x70,
+ 	DSHOT_BAD    = 0x74,
+ 	DSHOT_BITPER = 0x78,
+@@ -61,6 +61,13 @@ static constexpr uint32_t dshot_tx(unsigned i) { return i < 4 ? DSHOT_TX + 4 * i
+ static constexpr uint32_t pwm_us(unsigned i) { return i < 4 ? PWM_US + 4 * i : PWM_US_HI + 4 * (i - 4); }
+ static constexpr uint32_t pwm_fs_us(unsigned i) { return i < 4 ? PWM_FS_US + 4 * i : PWM_FS_US_HI + 4 * (i - 4); }
+ 
++// A DShot frame's 12 bits in the order an ESC takes them: the 11 bit value (0 stop, 1..47 commands,
++// 48..2047 throttle), then the telemetry request (set with a command, as other flight controllers
++// do). The block sends DSHOT_TX[11:0] as it is, [11] first, and adds the CRC; its read-back
++// (DSHOT_RX) holds the 12 bits the same way.
++static constexpr uint32_t dshot_frame(uint32_t value, bool telemetry = false) { return (value & 0x7FF) << 1 | (telemetry ? 1u : 0u); }
++static constexpr uint32_t dshot_value(uint32_t frame) { return (frame >> 1) & 0x7FF; }
++
+ // the chip's scales in high-resolution FIFO packets (20 bit)
+ static constexpr float ACCEL_LSB_PER_G = 32768.f;
+ static constexpr float GYRO_LSB_PER_DPS = 262.f;
+diff --git a/src/modules/simulation/simulator_sih/sih.cpp b/src/modules/simulation/simulator_sih/sih.cpp
+index 3d0c15a..c376cba 100644
+--- a/src/modules/simulation/simulator_sih/sih.cpp
++++ b/src/modules/simulation/simulator_sih/sih.cpp
+@@ -686,7 +686,7 @@ void Sih::pl_read_motors(const float dt)
+ 
+ 		} else {
+ 			// DShot: 0 stop (and 1..47 commands), 48..2047 the throttle
+-			const uint32_t thr = _fcio.rd(nyx_fcio::DSHOT_RX + 4 * i) & 0x7FF;
++			const uint32_t thr = nyx_fcio::dshot_value(_fcio.rd(nyx_fcio::DSHOT_RX + 4 * i));
+ 			u_sp = thr >= 48 ? (thr - 48) / 1999.f : 0.f;
+ 		}
+ 
+-- 
+2.53.0.windows.2
+

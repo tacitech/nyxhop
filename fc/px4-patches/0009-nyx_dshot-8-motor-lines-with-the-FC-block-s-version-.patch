@@ -1,7 +1,7 @@
 From 8a38c8b29bbce580060e3e65d87174a917695fd1 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Mon, 9 Nov 2026 17:43:06 +0700
-Subject: [PATCH 09/12] nyx_dshot: 8 motor lines with the FC block's version 3
+Subject: [PATCH 09/13] nyx_dshot: 8 motor lines with the FC block's version 3
  (the NyxHop baseboard's CH1..8: NYX_PWM_OUTS 8 bits, NYX_PWM_MIN/MAX/DIS1..8,
  8 output channels); nyx_fcio.hpp: version 3 registers (lines 5..8, CAPS),
  lines(), hil(); the read-back only where the block has it (HIL); SIH_PL_IO

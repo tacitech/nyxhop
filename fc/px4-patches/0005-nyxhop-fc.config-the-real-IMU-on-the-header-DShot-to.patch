@@ -1,7 +1,7 @@
 From cd1bac948a17d28b6e02b3651841a8e2f5a48cfc Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 13:34:33 +0700
-Subject: [PATCH 05/12] nyxhop-fc.config: the real IMU on the header + DShot to
+Subject: [PATCH 05/13] nyxhop-fc.config: the real IMU on the header + DShot to
  the ESCs, no simulation (step 3)
 
 ---

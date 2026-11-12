@@ -2643,6 +2643,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 let gop_ms = if fps > 1.0 && gop > 0 { (gop as f32 / fps * 1000.0) as u32 } else { 0 };
                 t.push_str(&format!("video=pass\ncam_gop_ms={gop_ms}\n"));
             }
+            // what the ground may set here and what this end runs (the pilot app's Video and Link
+            // pages show it: the answer to a setting is this, not an acknowledgement)
+            t.push_str(&crate::remote_state(&shared));
             if !t.is_empty() {
                 frame_id = frame_id.wrapping_add(1);
                 blocks.extend(packetize(frame_id, SourceType::Info, t.as_bytes()));

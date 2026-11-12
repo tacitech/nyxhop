@@ -2,7 +2,7 @@
 //! (field order and CRC_EXTRA as in the common dialect; the tests hold bytes made by pymavlink),
 //! and the vehicle as they describe it.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 pub const GCS_SYS: u8 = 255;
@@ -32,6 +32,7 @@ fn crc_extra(id: u32) -> Option<u8> {
     Some(match id {
         0 => 50,    // HEARTBEAT
         1 => 124,   // SYS_STATUS
+        22 => 220,  // PARAM_VALUE
         24 => 24,   // GPS_RAW_INT
         30 => 39,   // ATTITUDE
         32 => 185,  // LOCAL_POSITION_NED
@@ -106,12 +107,66 @@ impl Encoder {
         p[8..16].copy_from_slice(&ts1.to_le_bytes());
         self.frame(111, 34, &p)
     }
+
+    /// PARAM_SET: `value` as it goes on the wire (param_wire), `ptype` MAV_PARAM_TYPE
+    pub fn param_set(&mut self, sys: u8, comp: u8, id: &str, value: f32, ptype: u8) -> Vec<u8> {
+        let mut p = [0u8; 23];
+        p[0..4].copy_from_slice(&value.to_le_bytes());
+        p[4] = sys;
+        p[5] = comp;
+        param_id(&mut p[6..22], id);
+        p[22] = ptype;
+        self.frame(23, 168, &p)
+    }
+
+    /// PARAM_REQUEST_READ by name (index -1): the answer is a PARAM_VALUE
+    pub fn param_request_read(&mut self, sys: u8, comp: u8, id: &str) -> Vec<u8> {
+        let mut p = [0u8; 20];
+        p[0..2].copy_from_slice(&(-1i16).to_le_bytes());
+        p[2] = sys;
+        p[3] = comp;
+        param_id(&mut p[4..20], id);
+        self.frame(20, 214, &p)
+    }
+}
+
+/// A parameter's name, 16 characters at most, zero-padded
+fn param_id(out: &mut [u8], id: &str) {
+    for (o, b) in out.iter_mut().zip(id.bytes()) {
+        *o = b;
+    }
+}
+
+/// MAV_PARAM_TYPE: the integer ones (1..=8) and REAL32 (a set goes with the type the flight
+/// controller told: the app names INT32 only in the tests)
+#[allow(dead_code)]
+pub const PARAM_INT32: u8 = 6;
+pub const PARAM_REAL32: u8 = 9;
+
+/// A parameter's number as it goes on the wire: PX4 sends an integer's bits in the float
+/// (bytewise), ArduPilot the integer cast to a float
+pub fn param_wire(ap: Autopilot, ptype: u8, n: f64) -> f32 {
+    if ap == Autopilot::Px4 && (1..=8).contains(&ptype) {
+        f32::from_bits(n.round() as i32 as u32)
+    } else {
+        n as f32
+    }
+}
+
+/// ... and the number a PARAM_VALUE carries
+pub fn param_num(ap: Autopilot, ptype: u8, wire: f32) -> f64 {
+    if ap == Autopilot::Px4 && (1..=8).contains(&ptype) {
+        f64::from(wire.to_bits() as i32)
+    } else {
+        f64::from(wire)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
     Heartbeat { custom_mode: u32, autopilot: u8, base_mode: u8 },
-    SysStatus { load: u16, voltage_mv: u16, remaining: i8 },
+    /// `health`: onboard_control_sensors_health (its PREARM_CHECK bit: it would arm now)
+    SysStatus { load: u16, voltage_mv: u16, remaining: i8, health: u32 },
     /// the receiver's fix (0, 1 none; 2 2D; 3 and up 3D), its satellites (255 = not told) and
     /// where it is, 1e-7 degrees
     GpsRaw { fix: u8, sats: u8, lat: i32, lon: i32 },
@@ -124,6 +179,8 @@ pub enum Msg {
     Home { lat: i32, lon: i32, alt_mm: i32 },
     ExtSys { landed: u8 },
     Text { severity: u8, text: String },
+    /// a parameter: its name, its value as on the wire (param_num), MAV_PARAM_TYPE
+    ParamValue { id: String, value: f32, ptype: u8 },
 }
 
 fn f32_at(p: &[u8], o: usize) -> f32 {
@@ -139,7 +196,12 @@ fn u16_at(p: &[u8], o: usize) -> u16 {
 fn decode(id: u32, p: &[u8]) -> Option<Msg> {
     Some(match id {
         0 => Msg::Heartbeat { custom_mode: u32::from_le_bytes(p[0..4].try_into().unwrap()), autopilot: p[5], base_mode: p[6] },
-        1 => Msg::SysStatus { load: u16_at(p, 12), voltage_mv: u16_at(p, 14), remaining: p[30] as i8 },
+        1 => Msg::SysStatus { load: u16_at(p, 12), voltage_mv: u16_at(p, 14), remaining: p[30] as i8, health: u32::from_le_bytes(p[8..12].try_into().unwrap()) },
+        22 => {
+            let t = &p[8..24];
+            let end = t.iter().position(|&b| b == 0).unwrap_or(t.len());
+            Msg::ParamValue { id: String::from_utf8_lossy(&t[..end]).into_owned(), value: f32_at(p, 0), ptype: p[24] }
+        }
         24 => Msg::GpsRaw { fix: p[28], sats: p[29], lat: i32_at(p, 8), lon: i32_at(p, 12) },
         30 => Msg::Attitude { roll: f32_at(p, 4), pitch: f32_at(p, 8), yaw: f32_at(p, 12) },
         32 => Msg::LocalPos { x: f32_at(p, 4), y: f32_at(p, 8), z: f32_at(p, 12), vx: f32_at(p, 16), vy: f32_at(p, 20), vz: f32_at(p, 24) },
@@ -303,7 +365,18 @@ pub struct Vehicle {
     /// where it armed: local, and on the globe if it knew
     pub takeoff: Option<(f32, f32)>,
     pub takeoff_ll: Option<(i32, i32)>,
+    /// the parameters it told (PARAM_VALUE): the value as on the wire and its MAV_PARAM_TYPE
+    pub params: HashMap<String, (f32, u8)>,
+    /// it would arm now (SYS_STATUS PREARM_CHECK healthy: PX4 for the mode it is in, ArduPilot its
+    /// pre-arm checks), once it told
+    pub prearm: Option<bool>,
+    /// the flight's clock: armed since, and how long the last flight was once disarmed
+    pub armed_since: Option<Instant>,
+    pub flown: Option<std::time::Duration>,
 }
+
+/// SYS_STATUS: MAV_SYS_STATUS_PREARM_CHECK
+const PREARM_CHECK: u32 = 0x1000_0000;
 
 /// A track's room: full, every other point goes and the spacing doubles, so a long flight stays
 /// whole, only coarser
@@ -462,6 +535,15 @@ impl Vehicle {
                         _ => None,
                     };
                 }
+                // the flight's clock (from the first heartbeat heard, if it was armed already)
+                if armed && self.armed_since.is_none() {
+                    self.armed_since = Some(Instant::now());
+                    self.flown = None;
+                } else if !armed {
+                    if let Some(at) = self.armed_since.take() {
+                        self.flown = Some(at.elapsed());
+                    }
+                }
                 self.last_hb = Some(Instant::now());
                 self.sys = sys;
                 self.comp = comp;
@@ -476,10 +558,11 @@ impl Vehicle {
                     self.sub_mode = ((custom_mode >> 24) & 0xFF) as u8;
                 }
             }
-            Msg::SysStatus { load, voltage_mv, remaining } => {
+            Msg::SysStatus { load, voltage_mv, remaining, health } => {
                 self.load = load as f32 / 10.0;
                 self.batt_v = voltage_mv as f32 / 1000.0;
                 self.batt_pct = remaining;
+                self.prearm = Some(health & PREARM_CHECK != 0);
             }
             Msg::Attitude { roll, pitch, yaw } => {
                 self.roll = roll;
@@ -540,8 +623,39 @@ impl Vehicle {
                     self.texts.pop_front();
                 }
             }
+            Msg::ParamValue { ref id, value, ptype } => {
+                self.params.insert(id.clone(), (value, ptype));
+            }
             _ => {}
         }
+    }
+
+    /// A parameter it told, as a number
+    pub fn param(&self, id: &str) -> Option<f64> {
+        self.params.get(id).map(|&(v, t)| param_num(self.autopilot, t, v))
+    }
+
+    /// The flight's time: this flight's while armed, else the last one's
+    pub fn flight_time(&self) -> Option<std::time::Duration> {
+        self.armed_since.map(|t| t.elapsed()).or(self.flown)
+    }
+
+    /// Off the ground (EXTENDED_SYS_STATE: 2 in the air, 3 taking off, 4 landing; not told: armed
+    /// and half a metre up)
+    pub fn in_air(&self) -> bool {
+        self.armed && (matches!(self.landed, 2..=4) || (self.landed == 0 && -self.z > 0.5))
+    }
+
+    /// Metres from home on the ground (DJI's D), on the globe: while it knows where it is there
+    /// and where home is (with no satellites its local frame drifts - 12/11 on the bench it read
+    /// 15 m standing still - so none)
+    pub fn home_dist(&self) -> Option<f32> {
+        let here = match self.place() {
+            Some((_, Place::Autopilot)) => Some((self.lat, self.lon)),
+            Some((_, Place::Receiver)) => self.gps_ll,
+            _ => None,
+        };
+        Some(ll_dist(self.home.or(self.takeoff_ll)?, here?))
     }
 }
 
@@ -551,6 +665,29 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    // the parameter messages, as pymavlink (2.4.50, common dialect) makes them
+    #[test]
+    fn parameters_as_pymavlink() {
+        let mut e = Encoder { seq: 7 };
+        let v = param_wire(Autopilot::Px4, PARAM_INT32, 6.0);
+        assert_eq!(e.param_set(1, 1, "NAV_RCL_ACT", v, PARAM_INT32), hex("fd17000007ffbe1700000600000001014e41565f52434c5f414354000000000006e993"));
+        assert_eq!(e.param_request_read(1, 1, "RTL_RETURN_ALT"), hex("fd12000008ffbe140000ffff010152544c5f52455455524e5f414c5409d0"));
+        let got = parse(&hex(concat!(
+            "fd1900000301011600000000f0410604050252544c5f52455455524e5f414c540000093707",
+            "fd19000004010116000002000000060456024e41565f52434c5f4143540000000000064c40"
+        )));
+        let mut veh = Vehicle::default();
+        for (s, c, m) in &got {
+            veh.update(*s, *c, m);
+        }
+        assert_eq!(got.len(), 2);
+        assert_eq!(veh.param("RTL_RETURN_ALT"), Some(30.0));
+        assert_eq!(veh.param("NAV_RCL_ACT"), Some(2.0));
+        // ArduPilot: the integer is the float itself
+        assert_eq!(param_wire(Autopilot::ArduPilot, 2, 5.0), 5.0);
+        assert_eq!(param_num(Autopilot::ArduPilot, 2, 5.0), 5.0);
     }
 
     // frames from pymavlink (common dialect), same fields and sequence numbers

@@ -256,6 +256,10 @@ fn read_side(shared: &Shared, mut stream: TcpStream, nack_tx: &Sender<u64>) {
                     crate::worker::far_cap_set(k);
                 }
             }
+            Ok(Msg::UserText { text }) if text.starts_with("!set ") => {
+                // a setting of this end from the ground (the pilot app): see remote_set
+                crate::remote_set(&shared, &text[5..]);
+            }
             Ok(Msg::UserText { text }) => {
                 nyx_common::logging::log(&format!("MSG received: {text}"));
                 let mut m = shared.msgs.lock().unwrap();
