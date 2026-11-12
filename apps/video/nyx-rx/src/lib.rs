@@ -1024,6 +1024,12 @@ fn udp_loop(
     }
 }
 
+/// Text up this link to the transmitting end, as the console's `say` sends it but kept out of
+/// the message log (NyxHop Pilot's aircraft settings).
+pub fn send_text(shared: &Shared, text: &str) {
+    send_msg(shared, &Msg::UserText { text: text.to_string() });
+}
+
 fn send_msg(shared: &Shared, msg: &Msg) {
     // v21.1: do NOT touch the socket here. demod_loop once blocked in a TCP write_msg (buffer full
     // / GUI holding the writer lock) and stalled the WHOLE pipeline for ~20 s (24/7 bench). Queue
