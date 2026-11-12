@@ -412,6 +412,10 @@ fn sim_flight(v: &mut Vehicle, t: f32, at: Option<(f64, f64)>) {
     tell(Msg::Heartbeat { custom_mode: 3 << 16, autopilot: 12, base_mode: if armed { 0x81 } else { 1 } });
     tell(Msg::SysStatus { load: 250, voltage_mv: (16_400.0 - t * 2.0).max(14_000.0) as u16, remaining: (95.0 - t / 12.0).max(20.0) as i8, health: 0x1000_0000 });
     tell(Msg::ExtSys { landed: if t < 2.5 { 1 } else { 2 } });
+    // (its speed limits as PX4 tells them: Normal's)
+    for (id, n) in Speed::Normal.params(Autopilot::Px4) {
+        tell(Msg::ParamValue { id: id.into(), value: n as f32, ptype: mav::PARAM_REAL32 });
+    }
     tell(Msg::Attitude { roll, pitch, yaw: (45.0 * th.cos()).atan2(70.0 * th.sin()) });
     tell(Msg::LocalPos { x: n, y: e, z: -h, vx: vn, vy: ve, vz: if (0.0..1.0).contains(&climb) { -6.0 } else { 0.0 } });
     if let Some((lat0, lon0)) = at {
@@ -733,6 +737,8 @@ struct Pilot {
     right: Vec2,
     /// the buttons being held (take off, land, return, the motors): since when
     holds: std::collections::HashMap<&'static str, Instant>,
+    /// --demo's banner on the HUD (off: --demo-quiet)
+    demo_tag: bool,
     takeoff_h: f32,
     /// the speed mode's limits put on the flight controller: last tried, how many times (it stops
     /// trying a few times over until the link or the mode changes)
@@ -894,6 +900,7 @@ impl Pilot {
             left: Vec2::ZERO,
             right: Vec2::ZERO,
             holds: std::collections::HashMap::new(),
+            demo_tag: !opts.flag("--demo-quiet"),
             takeoff_h: cfg.takeoff_h,
             speed_sync_at: Instant::now() - Duration::from_secs(60),
             speed_tries: 0,
@@ -1946,9 +1953,9 @@ impl eframe::App for Pilot {
                 over(&p, pos2(full.center().x, bar.bottom() + 106.0), Align2::CENTER_CENTER, t("Low battery: land now", "Pin yếu: hạ cánh ngay"), 17.0, RED, self.map_large);
             }
 
-            // --demo: what it is doing
+            // --demo: what it is doing (--demo-quiet: not said, a still for the docs)
             let step = self.link.demo_step.lock().unwrap().clone();
-            if !step.is_empty() {
+            if !step.is_empty() && self.demo_tag {
                 let r = Rect::from_center_size(pos2(full.center().x, bar.bottom() + 134.0), vec2(360.0, 30.0));
                 panel(&p, r);
                 shadow_text(&p, r.center(), Align2::CENTER_CENTER, &format!("DEMO · {step}"), FontId::proportional(14.0), ACCENT);
@@ -2134,25 +2141,190 @@ impl Drop for Pilot {
     }
 }
 
+impl Pilot {
+    /// A new GPU device: the textures of the old one (the video's, the map's tiles) are gone
+    fn gpu_reset(&mut self) {
+        self.tex = None;
+        self.tex_ver = u64::MAX;
+        self.map.tiles.gpu_reset();
+    }
+}
+
+// ---------------------------------------------------------------- the window and its GPU
+//
+// 12/11 the pilot app died (10:18, the aircraft on the bench, a cargo build busy) with the wgpu
+// panic "Texture with 'egui_texid_Managed(5)' label is invalid" in create_view - a LOST GPU
+// DEVICE, as nyxhop's ground screen on 29/10: after the loss every new texture is an invalid one
+// and the first use panics. As nyxhop: the device-lost callback or a panic from the GPU layer
+// closes the window and a new one with a new device opens on the same app; the link, the MAVLink
+// and the board threads never stop; any other panic stays fatal.
+
+std::thread_local! {
+    /// The file of this thread's last panic, to tell a GPU-layer panic from the rest.
+    static PANIC_FILE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn note_panic_file() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(l) = info.location() {
+            let _ = PANIC_FILE.try_with(|f| *f.borrow_mut() = l.file().to_string());
+        }
+        prev(info);
+    }));
+}
+
+/// Where the window was, to open the next one in its place.
+#[derive(Clone, Copy, Default)]
+struct WinPlace {
+    inner: Option<Rect>,
+    outer: Option<Rect>,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+impl WinPlace {
+    fn viewport(&self) -> egui::ViewportBuilder {
+        let mut b = egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("NyxHop Pilot");
+        if let Some(r) = self.inner {
+            b = b.with_inner_size(r.size());
+        }
+        if let Some(r) = self.outer {
+            b = b.with_position(r.min);
+        }
+        if self.maximized {
+            b = b.with_maximized(true);
+        }
+        if self.fullscreen {
+            b = b.with_fullscreen(true);
+        }
+        b
+    }
+}
+
+/// One window over the app, which outlives it.
+struct Window<'a> {
+    app: &'a mut Pilot,
+    place: &'a mut WinPlace,
+    lost: Arc<AtomicBool>,
+    /// this window closed itself for a new device
+    reopen: &'a mut bool,
+    /// NYX_GPU_TEST_LOSE: when to destroy the device
+    test_lose: Option<Instant>,
+}
+
+impl eframe::App for Window<'_> {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        root.ctx().input(|i| {
+            let v = i.viewport();
+            // a minimized window sits at -32000 on Windows
+            if v.minimized != Some(true) {
+                *self.place = WinPlace {
+                    inner: v.inner_rect,
+                    outer: v.outer_rect,
+                    maximized: v.maximized == Some(true),
+                    fullscreen: v.fullscreen == Some(true),
+                };
+            }
+        });
+        if self.lost.load(Ordering::Relaxed) {
+            if !*self.reopen {
+                *self.reopen = true;
+                root.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+        if self.test_lose.is_some_and(|t| Instant::now() >= t) {
+            self.test_lose = None;
+            if let Some(rs) = frame.wgpu_render_state() {
+                log("NYX_GPU_TEST_LOSE: destroying the GPU device");
+                rs.device.destroy();
+                self.app.gpu_reset();
+            }
+        }
+        eframe::App::ui(self.app, root, frame);
+    }
+}
+
 fn main() -> eframe::Result {
     logging::init("pilot");
+    note_panic_file();
     nyx_common::sys::keep_up();
     let opts = Opts::from_env();
     let board = opts.arg("--board", "192.168.0.11");
     let dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| ".".into());
     nyx_common::i18n::init(&dir);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("NyxHop Pilot"),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "NyxHop Pilot",
-        options,
-        Box::new(move |cc| {
-            nyx_common::ui::touch_style(&cc.egui_ctx);
-            Ok(Box::new(Pilot::new(&board, &opts, &dir)))
-        }),
-    )
+    let mut app = Pilot::new(&board, &opts, &dir);
+    let mut place = WinPlace::default();
+    // NYX_GPU_TEST_LOSE=<s>: <s> seconds after each window opens, its GPU device is destroyed
+    let test_lose = std::env::var("NYX_GPU_TEST_LOSE").ok().and_then(|v| v.trim().parse::<f32>().ok()).map(Duration::from_secs_f32);
+    // windows in a row that did not open (or died at once) since the GPU was lost; None until the first loss
+    let mut failed: Option<u32> = None;
+    loop {
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut reopen = false;
+        let opened = Instant::now();
+        let viewport = place.viewport();
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (app, place, reopen, lost) = (&mut app, &mut place, &mut reopen, lost.clone());
+            eframe::run_native(
+                "NyxHop Pilot",
+                eframe::NativeOptions { viewport, ..Default::default() },
+                Box::new(move |cc| {
+                    nyx_common::ui::touch_style(&cc.egui_ctx);
+                    if let Some(rs) = &cc.wgpu_render_state {
+                        let i = rs.adapter.get_info();
+                        log(&format!("gpu: {} ({:?}, {} {})", i.name, i.backend, i.driver, i.driver_info));
+                        let lost = lost.clone();
+                        rs.device.set_device_lost_callback(move |reason, msg| {
+                            log(&format!("gpu: device lost ({reason:?}) {msg}"));
+                            lost.store(true, Ordering::Relaxed);
+                        });
+                    }
+                    let test_lose = test_lose.map(|d| Instant::now() + d);
+                    Ok(Box::new(Window { app, place, lost, reopen, test_lose }))
+                }),
+            )
+        }));
+        let panic = match run {
+            Ok(Ok(())) if !reopen => return Ok(()),
+            Ok(Ok(())) => {
+                log("gpu: the device was lost: a new window on a new device");
+                None
+            }
+            Ok(Err(e)) => {
+                // the first window as before; after a loss the GPU may need a moment (a driver
+                // reset), so try for a minute
+                let Some(n) = failed.filter(|&n| n < 30) else { return Err(e) };
+                log(&format!("gpu: no window yet ({e}), trying again"));
+                failed = Some(n + 1);
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            Err(panic) => {
+                let file = PANIC_FILE.with_borrow(|f| f.clone());
+                if !file.contains("wgpu") {
+                    std::panic::resume_unwind(panic);
+                }
+                log(&format!("gpu: the GPU layer panicked ({file}): a new window on a new device"));
+                Some(panic)
+            }
+        };
+        // a window that dies at once counts as one that did not open
+        let n = if opened.elapsed() < Duration::from_secs(5) { failed.unwrap_or(0) + 1 } else { 0 };
+        if n > 30 {
+            log("gpu: no window lasted for a minute: giving up");
+            match panic {
+                Some(p) => std::panic::resume_unwind(p),
+                None => return Ok(()),
+            }
+        }
+        failed = Some(n);
+        app.gpu_reset();
+        if n > 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
 }
 
 #[cfg(test)]

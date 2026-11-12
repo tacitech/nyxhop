@@ -243,6 +243,19 @@ impl Tiles {
         Tiles { sh, rx, tex: HashMap::new(), frame: 0, credit, max_zoom: max_zoom.min(24) }
     }
 
+    /// A new GPU device (the window opened again after the old one was lost): every texture on the
+    /// old one is gone - the tiles in memory are read again (from the disk)
+    pub fn gpu_reset(&mut self) {
+        let gone: Vec<Key> = self.tex.drain().map(|(k, _)| k).collect();
+        let mut st = self.sh.st.lock().unwrap();
+        for k in &gone {
+            st.have.remove(k);
+        }
+        st.want.clear();
+        drop(st);
+        self.sh.cv.notify_all();
+    }
+
     /// The tile's texture, if it is in memory
     pub fn get(&mut self, k: Key) -> Option<egui::TextureId> {
         let frame = self.frame;

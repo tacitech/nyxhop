@@ -158,6 +158,10 @@ autopilot ports (telemetry, GPS, RC, CAN, I2C, SPI), eight PWM/DShot motor outpu
 port, Ethernet, USB-C and microSD, 100 × 62 mm. Its flight-controller image, the install script,
 the PX4 patches and the board's schematic are in [fc/](fc/).
 
+NyxHop Pilot flies it over the link: video, the flight data, a map and the sticks in one window.
+
+<img src="docs/img/nyxhop-pilot.jpg" width="760" alt="NyxHop Pilot in flight">
+
 An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. Range depends on
 the amplifiers and antennas at each end:
 

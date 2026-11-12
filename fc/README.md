@@ -26,13 +26,19 @@ Flashing the link again takes the flight controller off: run `install` once more
 
 NyxHop Pilot is the app for it: video, the flight data, a map and the sticks, all over the link.
 
+<img src="../docs/img/nyxhop-pilot.jpg" width="380" alt="NyxHop Pilot in flight"> <img src="../docs/img/nyxhop-pilot-map.jpg" width="380" alt="NyxHop Pilot with the map large">
+
     cargo build --release -p nyx-pilot
     target/release/nyxhop-pilot --board <ground board address>
 
-Arm by holding the arm button for a second. Arrow keys roll and pitch, W/S throttle, A/D yaw,
-T takes off, L lands, R returns home, H holds, M swaps the map and the video; a gamepad works too.
-The map is OpenStreetMap, cached on disk, so places you have looked at once still show without a
-network. Run it instead of the ground app, not beside it: both talk to the same board.
+The bar on top says whether it is ready to fly, and why not in the flight controller's words.
+Take off, land and return home are held for a second (or T, L, R held); Stop (H) acts at a touch.
+Cine, Normal and Sport (1, 2, 3) set how fast the sticks fly it. Arrow keys roll and pitch, W/S
+climb, A/D yaw, M swaps the map and the video; a gamepad works too. Settings holds the failsafe
+(return, land or hover when the signal is lost), the return height, the limits, the aircraft's
+camera and transmit power, and the link's own settings. The map is OpenStreetMap, cached on disk,
+so places you have looked at once still show without a network. Run it instead of the ground app,
+not beside it: both talk to the same board.
 
 ## What's here
 
