@@ -33,10 +33,17 @@ NyxHop Pilot is the app for it: video, the flight data, a map and the sticks, al
 
 The bar on top says whether it is ready to fly, and why not in the flight controller's words.
 Take off, land and return home are held for a second (or T, L, R held); Stop (H) acts at a touch.
-Cine, Normal and Sport (1, 2, 3) set how fast the sticks fly it. Arrow keys roll and pitch, W/S
-climb, A/D yaw, M swaps the map and the video; a gamepad works too. Settings holds the failsafe
-(return, land or hover when the signal is lost), the return height, the limits, the aircraft's
-camera and transmit power, and the link's own settings. The map is OpenStreetMap, cached on disk,
+The motors start and stop with the sticks, as on a camera drone: both sticks down and in (or
+out) for half a second starts them, the throttle held down for a second on the ground stops them.
+The flight mode follows what the aircraft can hold: position (GPS or an optical flow sensor),
+height only, or neither. Cine, Normal and Sport (1, 2, 3) set how fast the sticks fly it. Arrow
+keys roll and pitch, W/S climb, A/D yaw, M swaps the map and the video; an RC transmitter plugged
+in by USB as a joystick (EdgeTX) or a gamepad works too. Settings holds the failsafe (return, land
+or hover when the signal is lost), the return height, the limits, the aircraft's camera and
+transmit power, the link's own settings, and Sensors: how the board sits in the frame, the IMU,
+compass and level calibration, and what a downward range finder and an optical flow sensor read
+now. Such a sensor goes on TELEM1 at 115200 speaking MAVLink (a MicoAir MTF-01 set to Mav_PX4).
+The map is OpenStreetMap, cached on disk,
 so places you have looked at once still show without a network. Run it instead of the ground app,
 not beside it: both talk to the same board.
 

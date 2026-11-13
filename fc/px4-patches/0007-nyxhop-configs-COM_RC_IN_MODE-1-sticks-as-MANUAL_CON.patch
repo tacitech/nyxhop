@@ -1,7 +1,7 @@
 From 3b9e0d9f174f6bfff61786873eb1a30383d00db5 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 19:12:49 +0700
-Subject: [PATCH 07/13] nyxhop configs: COM_RC_IN_MODE 1 (sticks as
+Subject: [PATCH 07/15] nyxhop configs: COM_RC_IN_MODE 1 (sticks as
  MANUAL_CONTROL over the link, the pilot app)
 
 ---

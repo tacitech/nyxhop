@@ -1,0 +1,56 @@
+From c0abd2d97afd12e87c1b1f7c786fae387fa25006 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Thu, 12 Nov 2026 21:27:56 +0700
+Subject: [PATCH 15/15] nyxhop-bb.config: DShot300 by default (BLHeli_S ESCs
+ beeped as with no signal on DShot600 through the baseboard's level shifter,
+ quiet and spinning on 300); TELEM1 /dev/ttyS1 at 115200 for a MicoAir MTF-01
+ in Mav_PX4 (OPTICAL_FLOW_RAD + DISTANCE_SENSOR)
+
+---
+ boards/nyxhop/zynq/nyxhop-bb.config | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/boards/nyxhop/zynq/nyxhop-bb.config b/boards/nyxhop/zynq/nyxhop-bb.config
+index afd39bc..7bc5d9d 100644
+--- a/boards/nyxhop/zynq/nyxhop-bb.config
++++ b/boards/nyxhop/zynq/nyxhop-bb.config
+@@ -4,15 +4,17 @@
+ #   IMU      the ICM-42688-P on the board, /dev/spidev2.0 (the PL passes SPI1 to it from reset). It
+ #            sits on the board's underside (z reads -1 g level): roll 180 here; the yaw of its x/y is
+ #            to be checked by tilting the board (or set SENS_BOARD_ROT after QGC's level check).
+-#   motors   CH1..8 (nyx_dshot, DShot600 by default, NYX_PWM_OUTS for PWM ESCs); a quad X on CH1..4.
++#   motors   CH1..8 (nyx_dshot, DShot300 by default: BLHeli_S ESCs did not read DShot600 through the
++#            board's level shifter, beeping as with no signal; NYX_PWM_OUTS for PWM ESCs); a quad X on CH1..4.
+ #   GPS      GPS1 /dev/ttyPS1 (J_GPS1, the PS's UART0), GPS2 /dev/ttyS2 (J_GPS2).
+ #   compass, barometer   on the GPS modules or the I2C ports, whichever answer: /dev/i2c-11 (J_GPS1)
+ #            and /dev/i2c-12 (J_GPS2, J_I2C; the ADS1115 sits there too). The board has no barometer.
+ #   RC       /dev/ttyS0 (J_RC): CRSF / ELRS (crsf_rc). For SBUS: rc_input on it instead, the PL
+ #            inverting RC_RX (EMIO GPIO bit 62 = 1), and RC_TX_DIR (bit 57) left 0.
+ #   battery  the ADS1115's AIN0 = VBAT / 11 (battery_status): BAT1_V_DIV against a meter.
+-#   TELEM1   /dev/ttyS1: MAVLink at 57600 (a telemetry radio). The ground station's MAVLink goes over
+-#            the NyxHop link (UDP 14556/14557) as on the other configs.
++#   TELEM1   /dev/ttyS1: MAVLink at 115200 for a MicoAir MTF-01 (optical flow + range finder, its
++#            protocol set to Mav_PX4: OPTICAL_FLOW_RAD and DISTANCE_SENSOR). The ground station's
++#            MAVLink goes over the NyxHop link (UDP 14556/14557) as on the other configs.
+ # Not here yet: the IMU heater, the safety switch/LED, the buzzer (EMIO GPIO, no PX4 driver on Linux),
+ # DroneCAN (PX4's uavcan driver is NuttX only).
+ . px4-alias.sh
+@@ -49,7 +51,7 @@ param set-default NYX_DSHOT_FUNC1 101
+ param set-default NYX_DSHOT_FUNC2 102
+ param set-default NYX_DSHOT_FUNC3 103
+ param set-default NYX_DSHOT_FUNC4 104
+-param set-default NYX_DSHOT_RATE 600
++param set-default NYX_DSHOT_RATE 300
+ param set-default IMU_INTEG_RATE 250
+ # (as the other nyxhop configs: Linux's CPU/RAM load is not the NuttX one these checks are for)
+ param set-default COM_CPU_MAX -1
+@@ -87,5 +89,5 @@ nyx_dshot start
+ navigator start
+ 
+ mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
+-mavlink start -d /dev/ttyS1 -b 57600
++mavlink start -d /dev/ttyS1 -b 115200
+ mavlink boot_complete
+-- 
+2.53.0.windows.2
+

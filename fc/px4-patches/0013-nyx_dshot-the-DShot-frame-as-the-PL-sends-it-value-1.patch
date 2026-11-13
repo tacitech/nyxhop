@@ -1,7 +1,7 @@
 From ea79aa62d5f4f46626ec86838017b9728c53f5cf Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Thu, 12 Nov 2026 09:20:14 +0700
-Subject: [PATCH 13/13] nyx_dshot: the DShot frame as the PL sends it, (value
+Subject: [PATCH 13/15] nyx_dshot: the DShot frame as the PL sends it, (value
  << 1) | telemetry (11-bit value, then the telemetry bit; it went out as the
  value alone, every motor at half the throttle asked); ESC commands 'nyx_dshot
  reverse|normal|save|beep1..5|cmd -c N [-m motor] [-r repeats]' as PX4's own

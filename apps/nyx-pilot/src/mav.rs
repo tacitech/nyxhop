@@ -12,6 +12,7 @@ pub const MAV_CMD_NAV_RETURN_TO_LAUNCH: u16 = 20;
 pub const MAV_CMD_NAV_LAND: u16 = 21;
 pub const MAV_CMD_NAV_TAKEOFF: u16 = 22;
 pub const MAV_CMD_DO_SET_MODE: u16 = 176;
+pub const MAV_CMD_PREFLIGHT_CALIBRATION: u16 = 241;
 pub const MAV_CMD_COMPONENT_ARM_DISARM: u16 = 400;
 pub const MAV_CMD_SET_MESSAGE_INTERVAL: u16 = 511;
 
@@ -39,7 +40,10 @@ fn crc_extra(id: u32) -> Option<u8> {
         33 => 104,  // GLOBAL_POSITION_INT
         74 => 20,   // VFR_HUD
         77 => 143,  // COMMAND_ACK
+        106 => 138, // OPTICAL_FLOW_RAD
         111 => 34,  // TIMESYNC
+        132 => 85,  // DISTANCE_SENSOR
+        230 => 163, // ESTIMATOR_STATUS
         242 => 104, // HOME_POSITION
         245 => 130, // EXTENDED_SYS_STATE
         253 => 83,  // STATUSTEXT
@@ -170,7 +174,8 @@ pub enum Msg {
     /// the receiver's fix (0, 1 none; 2 2D; 3 and up 3D), its satellites (255 = not told) and
     /// where it is, 1e-7 degrees
     GpsRaw { fix: u8, sats: u8, lat: i32, lon: i32 },
-    Attitude { roll: f32, pitch: f32, yaw: f32 },
+    /// radians, and the yaw rate (rad/s, right +)
+    Attitude { roll: f32, pitch: f32, yaw: f32, yawspeed: f32 },
     LocalPos { x: f32, y: f32, z: f32, vx: f32, vy: f32, vz: f32 },
     GlobalPos { lat: i32, lon: i32, alt_mm: i32, rel_mm: i32 },
     VfrHud { groundspeed: f32, climb: f32, heading: i16, throttle: u16 },
@@ -178,6 +183,14 @@ pub enum Msg {
     Timesync { tc1: i64, ts1: i64 },
     Home { lat: i32, lon: i32, alt_mm: i32 },
     ExtSys { landed: u8 },
+    /// what its estimator knows (ESTIMATOR_STATUS flags: ESTIMATOR_POS_HORIZ_REL 8, _ABS 16,
+    /// POS_VERT_ABS 32, POS_VERT_AGL 64, VELOCITY_HORIZ 2, VELOCITY_VERT 4)
+    Estimator { flags: u16 },
+    /// a range finder (DISTANCE_SENSOR): centimetres, MAV_SENSOR_ORIENTATION (25: looking down)
+    Range { cm: u16, orientation: u8 },
+    /// an optical flow sensor (OPTICAL_FLOW_RAD): its quality 0..255 and the flow over the
+    /// integration time (rad about x, y; microseconds)
+    Flow { quality: u8, x: f32, y: f32, dt_us: u32 },
     Text { severity: u8, text: String },
     /// a parameter: its name, its value as on the wire (param_num), MAV_PARAM_TYPE
     ParamValue { id: String, value: f32, ptype: u8 },
@@ -203,7 +216,7 @@ fn decode(id: u32, p: &[u8]) -> Option<Msg> {
             Msg::ParamValue { id: String::from_utf8_lossy(&t[..end]).into_owned(), value: f32_at(p, 0), ptype: p[24] }
         }
         24 => Msg::GpsRaw { fix: p[28], sats: p[29], lat: i32_at(p, 8), lon: i32_at(p, 12) },
-        30 => Msg::Attitude { roll: f32_at(p, 4), pitch: f32_at(p, 8), yaw: f32_at(p, 12) },
+        30 => Msg::Attitude { roll: f32_at(p, 4), pitch: f32_at(p, 8), yaw: f32_at(p, 12), yawspeed: f32_at(p, 24) },
         32 => Msg::LocalPos { x: f32_at(p, 4), y: f32_at(p, 8), z: f32_at(p, 12), vx: f32_at(p, 16), vy: f32_at(p, 20), vz: f32_at(p, 24) },
         33 => Msg::GlobalPos { lat: i32_at(p, 4), lon: i32_at(p, 8), alt_mm: i32_at(p, 12), rel_mm: i32_at(p, 16) },
         74 => Msg::VfrHud { groundspeed: f32_at(p, 4), climb: f32_at(p, 12), heading: u16_at(p, 16) as i16, throttle: u16_at(p, 18) },
@@ -214,6 +227,9 @@ fn decode(id: u32, p: &[u8]) -> Option<Msg> {
         },
         242 => Msg::Home { lat: i32_at(p, 0), lon: i32_at(p, 4), alt_mm: i32_at(p, 8) },
         245 => Msg::ExtSys { landed: p[1] },
+        230 => Msg::Estimator { flags: u16_at(p, 40) },
+        132 => Msg::Range { cm: u16_at(p, 8), orientation: p[12] },
+        106 => Msg::Flow { quality: p[43], x: f32_at(p, 12), y: f32_at(p, 16), dt_us: u32::from_le_bytes(p[8..12].try_into().unwrap()) },
         253 => {
             let t = &p[1..51];
             let end = t.iter().position(|&b| b == 0).unwrap_or(t.len());
@@ -309,6 +325,62 @@ pub enum Place {
 }
 
 /// The vehicle as its messages tell it
+/// A sensor calibration on the flight controller as its STATUSTEXT lines tell it (PX4's "[cal] ..."
+/// as QGroundControl reads them): what runs, how far, the sides of the vehicle still to put down
+/// and those done, the one being measured, and how the last one ended
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Cal {
+    /// running: gyro, accel, mag, level (as PX4 names it)
+    pub what: Option<String>,
+    pub line: String,
+    pub progress: u8,
+    pub pending: Vec<String>,
+    pub done_sides: Vec<String>,
+    pub current: Option<String>,
+    /// the last one's end: Ok(what) or Err(why)
+    pub result: Option<Result<String, String>>,
+    /// one more for every line (something new to look at)
+    pub seq: u32,
+}
+
+impl Cal {
+    pub fn feed(&mut self, text: &str) {
+        let s = text.trim_start_matches("[cal]").trim();
+        let seq = self.seq + 1;
+        if let Some(r) = s.strip_prefix("calibration started:") {
+            // "2 gyro": the protocol's version, then what
+            *self = Cal { what: r.split_whitespace().last().map(String::from), ..Default::default() };
+        } else if let Some(r) = s.strip_prefix("calibration done:") {
+            (self.what, self.progress, self.current) = (None, 100, None);
+            self.result = Some(Ok(r.trim().to_string()));
+        } else if let Some(r) = s.strip_prefix("calibration failed:") {
+            (self.what, self.current) = (None, None);
+            self.result = Some(Err(r.trim().to_string()));
+        } else if s.starts_with("calibration cancelled") {
+            (self.what, self.current) = (None, None);
+            self.result = Some(Err("cancelled".to_string()));
+        } else if let Some(r) = s.strip_prefix("progress") {
+            let n: String = r.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = n.parse::<u8>() {
+                self.progress = n.min(100);
+            }
+        } else if let Some(r) = s.strip_prefix("pending:") {
+            self.pending = r.split_whitespace().map(String::from).collect();
+        } else if let Some(side) = s.strip_suffix("orientation detected") {
+            self.current = Some(side.trim().to_string());
+        } else if let Some((side, _)) = s.split_once(" side done") {
+            let side = side.trim().to_string();
+            self.pending.retain(|p| *p != side);
+            if !self.done_sides.contains(&side) {
+                self.done_sides.push(side);
+            }
+            self.current = None;
+        }
+        self.line = s.to_string();
+        self.seq = seq;
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Vehicle {
     pub last_hb: Option<Instant>,
@@ -322,6 +394,8 @@ pub struct Vehicle {
     pub roll: f32,
     pub pitch: f32,
     pub yaw: f32,
+    /// rad/s, right +
+    pub yaw_rate: f32,
     pub x: f32,
     pub y: f32,
     pub z: f32,
@@ -351,11 +425,19 @@ pub struct Vehicle {
     pub batt_v: f32,
     pub batt_pct: i8,
     pub landed: u8,
+    /// its estimator's flags (ESTIMATOR_STATUS) and when they came
+    pub est: Option<(Instant, u16)>,
+    /// the range finder looking down (metres) and the optical flow (quality, rad/s x, y), as
+    /// they came last (Settings > Sensors shows them)
+    pub range: Option<(Instant, f32)>,
+    pub flow: Option<(Instant, u8, f32, f32)>,
     /// the throttle it flies with, % (VFR_HUD)
     pub throttle_pct: u16,
     pub rtt_ms: Option<f32>,
     pub rate: f32,
     pub texts: VecDeque<(Instant, u8, String)>,
+    /// a sensor calibration, as it goes
+    pub cal: Cal,
     /// the flight's track, from where it armed: local (north, east in metres) and on the globe
     /// (1e-7 degrees)
     pub track: VecDeque<(f32, f32)>,
@@ -473,6 +555,26 @@ impl Vehicle {
         }
     }
 
+    /// The mode to fly in now, picked as DJI picks P or ATTI (not the pilot): Position while its
+    /// estimator holds a position and a height (satellites, or the optical flow and its range),
+    /// Altitude while it holds a height alone, else Stabilized - the throttle the pilot's. None:
+    /// its estimator has not told (ESTIMATOR_STATUS: PX4)
+    pub fn best_mode(&self) -> Option<FlightMode> {
+        let (at, f) = self.est?;
+        if at.elapsed().as_secs_f32() > 3.0 {
+            return None;
+        }
+        let height = f & (32 | 64) != 0;
+        let position = f & (8 | 16) != 0 && f & 2 != 0;
+        Some(if position && height {
+            FlightMode::Position
+        } else if height {
+            FlightMode::Altitude
+        } else {
+            FlightMode::Stabilized
+        })
+    }
+
     /// The pilot's mode the vehicle is in, if it is one of them
     pub fn flight_mode(&self) -> Option<FlightMode> {
         Some(match (self.autopilot, self.main_mode, self.sub_mode) {
@@ -564,10 +666,11 @@ impl Vehicle {
                 self.batt_pct = remaining;
                 self.prearm = Some(health & PREARM_CHECK != 0);
             }
-            Msg::Attitude { roll, pitch, yaw } => {
+            Msg::Attitude { roll, pitch, yaw, yawspeed } => {
                 self.roll = roll;
                 self.pitch = pitch;
                 self.yaw = yaw;
+                self.yaw_rate = yawspeed;
             }
             Msg::LocalPos { x, y, z, vx, vy, vz } => {
                 (self.x, self.y, self.z, self.vx, self.vy, self.vz) = (x, y, z, vx, vy, vz);
@@ -616,8 +719,22 @@ impl Vehicle {
                 }
             }
             Msg::ExtSys { landed } => self.landed = landed,
+            Msg::Estimator { flags } => self.est = Some((Instant::now(), flags)),
+            Msg::Range { cm, orientation } => {
+                if orientation == 25 {
+                    self.range = Some((Instant::now(), f32::from(cm) / 100.0));
+                }
+            }
+            Msg::Flow { quality, x, y, dt_us } => {
+                let dt = dt_us as f32 * 1e-6;
+                let (fx, fy) = if dt > 0.0 { (x / dt, y / dt) } else { (0.0, 0.0) };
+                self.flow = Some((Instant::now(), quality, fx, fy));
+            }
             Msg::VfrHud { throttle, .. } => self.throttle_pct = throttle,
             Msg::Text { severity, ref text } => {
+                if text.starts_with("[cal]") {
+                    self.cal.feed(text);
+                }
                 self.texts.push_back((Instant::now(), severity, text.clone()));
                 if self.texts.len() > 6 {
                     self.texts.pop_front();
@@ -667,6 +784,38 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
+    // a calibration as PX4 tells it, line by line
+    #[test]
+    fn a_calibration_followed() {
+        let mut c = Cal::default();
+        for l in ["[cal] calibration started: 2 accel", "[cal] pending: back front left right up down", "[cal] down orientation detected", "[cal] progress <17>", "[cal] down side done, rotate to a different side", "[cal] pending: back front left right up"] {
+            c.feed(l);
+        }
+        assert_eq!(c.what.as_deref(), Some("accel"));
+        assert_eq!((c.progress, c.done_sides.clone(), c.pending.len(), c.current.clone()), (17, vec!["down".to_string()], 5, None));
+        c.feed("[cal] calibration done: accel");
+        assert_eq!((c.what.clone(), c.result.clone()), (None, Some(Ok("accel".to_string()))));
+        c.feed("[cal] calibration started: 2 mag");
+        assert_eq!((c.what.as_deref(), c.result.clone(), c.done_sides.len()), (Some("mag"), None, 0));
+        c.feed("[cal] calibration failed: timeout: no motion");
+        assert_eq!(c.result, Some(Err("timeout: no motion".to_string())));
+        assert_eq!(c.seq, 9);
+    }
+
+    // what its estimator holds (ESTIMATOR_STATUS as pymavlink makes it), and the mode DJI's way
+    // would fly with it
+    #[test]
+    fn the_mode_as_dji_picks_it() {
+        let f = hex("fd290000000101e6000040e2010000000000cdcccc3dcdcc4c3e9a99993ecdcccc3e0000003f9a99193f3333333fcdcc4c3f4b9d5f");
+        assert_eq!(parse(&f), vec![(1, 1, Msg::Estimator { flags: 75 })]);
+        let mut v = Vehicle::default();
+        assert_eq!(v.best_mode(), None);
+        for (flags, mode) in [(1, FlightMode::Stabilized), (1 | 32, FlightMode::Altitude), (1 | 2 | 8 | 64, FlightMode::Position), (1 | 2 | 16 | 32, FlightMode::Position), (1 | 2 | 8, FlightMode::Stabilized)] {
+            v.est = Some((Instant::now(), flags));
+            assert_eq!(v.best_mode(), Some(mode), "flags {flags}");
+        }
+    }
+
     // the parameter messages, as pymavlink (2.4.50, common dialect) makes them
     #[test]
     fn parameters_as_pymavlink() {
@@ -710,8 +859,9 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].0, 1);
         match m[0].2 {
-            Msg::Attitude { roll, pitch, yaw } => {
-                assert!((roll - 0.1).abs() < 1e-6 && (pitch + 0.2).abs() < 1e-6 && (yaw - 1.5).abs() < 1e-6)
+            Msg::Attitude { roll, pitch, yaw, yawspeed } => {
+                assert!((roll - 0.1).abs() < 1e-6 && (pitch + 0.2).abs() < 1e-6 && (yaw - 1.5).abs() < 1e-6);
+                assert!((yawspeed - 0.03).abs() < 1e-6)
             }
             ref o => panic!("{o:?}"),
         }

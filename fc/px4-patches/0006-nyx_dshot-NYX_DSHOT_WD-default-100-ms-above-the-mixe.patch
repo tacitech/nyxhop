@@ -1,7 +1,7 @@
 From 305de97a7143c048ce14194b893f32c0fae2a1b3 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 14:12:56 +0700
-Subject: [PATCH 06/13] nyx_dshot: NYX_DSHOT_WD (default 100 ms, above the
+Subject: [PATCH 06/15] nyx_dshot: NYX_DSHOT_WD (default 100 ms, above the
  mixer's 50 ms backup schedule) written to the PL
 
 ---

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.13
+
+* NyxHop Pilot: flies with an RC transmitter plugged in by USB as a joystick (EdgeTX) or a
+  gamepad. The motors start and stop with the sticks as on a camera drone, and the flight mode
+  follows what the aircraft can hold: position, height only, or neither.
+* NyxHop Pilot: Settings > Sensors: how the board sits in the frame, IMU, compass and level
+  calibration, and live readings of a downward range finder and an optical flow sensor.
+* NyxHop board (`fc/`): DShot300 by default, which BLHeli_S ESCs read reliably on the board, and
+  TELEM1 at 115200 for an optical flow sensor speaking MAVLink. Run `fc/install.py install` again.
+  The link and its boards are unchanged.
+
 ## 2.0.12
 
 * ADRV9364: next to a busy WiFi channel the link no longer narrows to 2.5 MHz and stays there. It

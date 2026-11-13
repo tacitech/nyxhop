@@ -26,6 +26,9 @@ nyx-proto = { path = "../../../link/nyx-proto" }
 # only; the phone camera feeds the same slot from cam.rs), no PC modulator; the IP camera
 # (RTSP, pure Rust) comes along.
 nyx-tx = { path = "../nyx-tx", default-features = false, features = ["gui", "rtsp"] }
+# "Fly" on the start screen: the pilot app (video, the flight controller over MAVLink, a map, the
+# sticks two fingers at once)
+nyx-pilot = { path = "../../nyx-pilot" }
 log = "0.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

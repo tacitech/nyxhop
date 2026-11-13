@@ -3,16 +3,16 @@ name = "nyx-pilot"
 version = "0.1.0"
 edition = "2024"
 
+# the app is the library (the phone's APK, nyx-mobile, hosts it too); the program its PC window
+[lib]
+name = "nyx_pilot"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nyxhop-pilot"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.35.0", default-features = false, features = [
-    "accesskit",
-    "default_fonts",
-    "wgpu",
-] }
 egui = "0.35.0"
 gilrs = "0.11"
 # the map's tiles: decoded (the same build of image as nyx-common's), fetched over HTTPS
@@ -20,6 +20,22 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 nyx-common = { path = "../../link/nyx-common" }
 nyx-rx = { path = "../video/nyx-rx" }
+
+# the PC window with wgpu (its device lost and found again, main.rs); on the phone the app is a
+# library inside nyx-mobile, which renders with glow through the NativeActivity
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "android-native-activity",
+] }
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true }

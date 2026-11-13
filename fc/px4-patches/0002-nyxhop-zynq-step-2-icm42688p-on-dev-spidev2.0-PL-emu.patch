@@ -1,7 +1,7 @@
 From 2e43c10effec226acbc8eeff0a92417078b7463e Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 12:12:45 +0700
-Subject: [PATCH 02/13] nyxhop/zynq step 2: icm42688p on /dev/spidev2.0
+Subject: [PATCH 02/15] nyxhop/zynq step 2: icm42688p on /dev/spidev2.0
  (PL-emulated chip), nyx_dshot (DShot out from the PL), SIH_PL_IO (SIH reads
  the PL's DShot decoder, writes accel/gyro into the PL), nyxhop-hil.config,
  SPI1 overlay

@@ -2853,6 +2853,7 @@ dependencies = [
  "ndk-sys",
  "nyx-common",
  "nyx-link",
+ "nyx-pilot",
  "nyx-proto",
  "nyx-tx",
  "winit",

@@ -1,7 +1,7 @@
 From db723a1075a1ab9c4426e56557e966327af6f188 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 18 Oct 2026 13:34:11 +0700
-Subject: [PATCH 04/13] nyx_dshot: throttle 0 on exit, failsafe status;
+Subject: [PATCH 04/15] nyx_dshot: throttle 0 on exit, failsafe status;
  nyx_fcio.hpp: CTRL bits, DSHOT_WD/DSHOT_FS
 
 ---

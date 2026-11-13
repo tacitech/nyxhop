@@ -1,7 +1,7 @@
 From 07890e1e2e50787ebf052653f90328b074e21af9 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Mon, 9 Nov 2026 17:43:06 +0700
-Subject: [PATCH 10/13] posix SerialImpl: a rate termios has no Bxxx for (CRSF
+Subject: [PATCH 10/15] posix SerialImpl: a rate termios has no Bxxx for (CRSF
  420000) set through termios2/BOTHER on Linux instead of failing in
  cfsetispeed
 

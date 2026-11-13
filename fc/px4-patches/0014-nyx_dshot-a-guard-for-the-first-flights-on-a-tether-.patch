@@ -1,0 +1,283 @@
+From 4b511e33f9cdcd4a52b73003b7d95db8f7b5ed54 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Thu, 12 Nov 2026 21:27:56 +0700
+Subject: [PATCH 14/15] nyx_dshot: a guard for the first flights on a tether
+ (NYX_GRD_TILT, NYX_GRD_YAWR, NYX_GRD_HGT by a downward distance sensor, for
+ NYX_GRD_T): past a limit every motor stops at once and PX4 is told to disarm
+ (forced, in the air too), the motors held stopped until disarmed; all 0 by
+ default (off); 'nyx_dshot status' prints it
+
+---
+ src/drivers/nyx_dshot/module.yaml   |  53 ++++++++++
+ src/drivers/nyx_dshot/nyx_dshot.cpp | 147 +++++++++++++++++++++++++++-
+ 2 files changed, 198 insertions(+), 2 deletions(-)
+
+diff --git a/src/drivers/nyx_dshot/module.yaml b/src/drivers/nyx_dshot/module.yaml
+index 765db08..13bf2f2 100644
+--- a/src/drivers/nyx_dshot/module.yaml
++++ b/src/drivers/nyx_dshot/module.yaml
+@@ -43,6 +43,59 @@ parameters:
+             decimal: 3
+             increment: 0.005
+             default: 0.055
++    - group: Guard
++      definitions:
++        NYX_GRD_TILT:
++            description:
++                short: NyxHop guard - tilt limit
++                long: |
++                    Armed and tilted further than this from upright for NYX_GRD_T, every motor
++                    stops at once and PX4 is disarmed (forced, in the air too). For the first
++                    flights on a tether. 0 turns it off.
++            type: float
++            unit: deg
++            min: 0
++            max: 180
++            decimal: 0
++            default: 0
++        NYX_GRD_YAWR:
++            description:
++                short: NyxHop guard - yaw rate limit
++                long: |
++                    Armed and yawing faster than this for NYX_GRD_T (a motor or a propeller the
++                    wrong way round spins the whole aircraft), every motor stops at once and PX4
++                    is disarmed. 0 turns it off.
++            type: float
++            unit: deg/s
++            min: 0
++            max: 2000
++            decimal: 0
++            default: 0
++        NYX_GRD_HGT:
++            description:
++                short: NyxHop guard - height limit
++                long: |
++                    Armed and higher than this over the ground, by a downward distance sensor,
++                    for NYX_GRD_T, every motor stops at once and PX4 is disarmed. Without such a
++                    sensor it does nothing. 0 turns it off.
++            type: float
++            unit: m
++            min: 0
++            max: 100
++            decimal: 1
++            default: 0
++        NYX_GRD_T:
++            description:
++                short: NyxHop guard - time past a limit
++                long: |
++                    How long a limit of the guard must be passed, without a break, before it
++                    stops the motors.
++            type: float
++            unit: s
++            min: 0.05
++            max: 3
++            decimal: 2
++            default: 0.3
+     - group: PWM Outputs
+       definitions:
+         NYX_PWM_OUTS:
+diff --git a/src/drivers/nyx_dshot/nyx_dshot.cpp b/src/drivers/nyx_dshot/nyx_dshot.cpp
+index a4f8f10..57781b2 100644
+--- a/src/drivers/nyx_dshot/nyx_dshot.cpp
++++ b/src/drivers/nyx_dshot/nyx_dshot.cpp
+@@ -18,6 +18,11 @@
+  * If this stops writing (PX4 dead or stuck) the block itself stops the motors after NYX_DSHOT_WD
+  * ms (100 by default: above the mixer's own 50 ms backup schedule, which is all it runs on before
+  * the controllers publish): throttle 0 on DShot, the disarmed pulse on PWM.
++ *
++ * The guard (NYX_GRD_*, for the first flights on a tether): armed and tilted past NYX_GRD_TILT,
++ * yawing faster than NYX_GRD_YAWR or higher than NYX_GRD_HGT (a downward distance sensor) for
++ * NYX_GRD_T, every motor stops here at once and PX4 is told to disarm (forced: in the air too).
++ * The motors stay stopped until PX4 is disarmed. Every limit 0 (the default): no guard.
+  */
+ 
+ #include <drivers/drv_hrt.h>
+@@ -34,8 +39,18 @@
+ #include <px4_platform_common/time.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <uORB/Publication.hpp>
++#include <uORB/Subscription.hpp>
+ #include <uORB/SubscriptionInterval.hpp>
++#include <uORB/topics/distance_sensor.h>
+ #include <uORB/topics/parameter_update.h>
++#include <uORB/topics/vehicle_angular_velocity.h>
++#include <uORB/topics/vehicle_attitude.h>
++#include <uORB/topics/vehicle_command.h>
++#include <uORB/topics/vehicle_status.h>
++#include <systemlib/mavlink_log.h>
++#include <math.h>
++#include <stdio.h>
+ 
+ using namespace time_literals;
+ 
+@@ -150,9 +165,11 @@ public:
+ 		}
+ 
+ 		const uint32_t cmd_frame = _cmd_frame.load();
++		// the guard tripped: every motor stopped, whatever the mixer says
++		const bool guarded = guard();
+ 
+ 		for (unsigned i = 0; i < _n_out; i++) {
+-			const uint16_t o = i < num_outputs ? outputs[i] : 0;
++			const uint16_t o = guarded ? 0 : (i < num_outputs ? outputs[i] : 0);
+ 			const bool stop = o == 0 || o == UINT16_MAX;
+ 
+ 			if (is_pwm(i)) {
+@@ -259,11 +276,121 @@ public:
+ 			}
+ 		}
+ 
++		PX4_INFO("guard: tilt %.0f deg, yaw rate %.0f deg/s, height %.1f m (0 = off), for %.2f s; %s",
++			 (double)_param_grd_tilt.get(), (double)_param_grd_yawr.get(), (double)_param_grd_hgt.get(),
++			 (double)_param_grd_t.get(), _tripped ? "TRIPPED: motors stopped until disarmed" : "not tripped");
+ 		_mixing_output.printStatus();
+ 		return 0;
+ 	}
+ 
+ private:
++	/** time over a limit: true once it has been over it for `hold` without a break */
++	static bool over_for(bool over, hrt_abstime &since, hrt_abstime now, hrt_abstime hold)
++	{
++		if (!over) {
++			since = 0;
++			return false;
++		}
++
++		if (since == 0) {
++			since = now;
++		}
++
++		return now - since >= hold;
++	}
++
++	/** the guard (NYX_GRD_*): true while the motors are to stay stopped */
++	bool guard()
++	{
++		vehicle_status_s st;
++
++		if (_status_sub.update(&st)) {
++			_armed = st.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
++		}
++
++		if (!_armed) {
++			_tripped = false;
++			_since_tilt = _since_yaw = _since_hgt = 0;
++			return false;
++		}
++
++		if (_tripped) {
++			// (PX4 told again now and then, until it is disarmed)
++			if (hrt_elapsed_time(&_disarm_sent) > 500_ms) {
++				disarm();
++			}
++
++			return true;
++		}
++
++		const float lim_tilt = _param_grd_tilt.get();
++		const float lim_yaw = _param_grd_yawr.get();
++		const float lim_hgt = _param_grd_hgt.get();
++
++		if (lim_tilt <= 0.f && lim_yaw <= 0.f && lim_hgt <= 0.f) {
++			return false;
++		}
++
++		const hrt_abstime now = hrt_absolute_time();
++		const hrt_abstime hold = (hrt_abstime)(math::constrain(_param_grd_t.get(), 0.05f, 3.f) * 1e6f);
++		char why[64] {};
++
++		vehicle_attitude_s att;
++
++		if (lim_tilt > 0.f && _att_sub.copy(&att) && now - att.timestamp < 500_ms) {
++			// the angle off upright: the body z axis against the vertical, R33 = 1 - 2 (x^2 + y^2)
++			const float r33 = 1.f - 2.f * (att.q[1] * att.q[1] + att.q[2] * att.q[2]);
++			const float tilt = math::degrees(acosf(math::constrain(r33, -1.f, 1.f)));
++
++			if (over_for(tilt > lim_tilt, _since_tilt, now, hold)) {
++				snprintf(why, sizeof(why), "tilt %.0f deg past %.0f", (double)tilt, (double)lim_tilt);
++			}
++		}
++
++		vehicle_angular_velocity_s av;
++
++		if (!why[0] && lim_yaw > 0.f && _av_sub.copy(&av) && now - av.timestamp < 500_ms) {
++			const float yaw = fabsf(math::degrees(av.xyz[2]));
++
++			if (over_for(yaw > lim_yaw, _since_yaw, now, hold)) {
++				snprintf(why, sizeof(why), "yaw rate %.0f deg/s past %.0f", (double)yaw, (double)lim_yaw);
++			}
++		}
++
++		distance_sensor_s ds;
++
++		if (!why[0] && lim_hgt > 0.f && _ds_sub.copy(&ds) && now - ds.timestamp < 500_ms
++		    && ds.orientation == distance_sensor_s::ROTATION_DOWNWARD_FACING) {
++			if (over_for(ds.current_distance > lim_hgt, _since_hgt, now, hold)) {
++				snprintf(why, sizeof(why), "height %.1f m past %.1f", (double)ds.current_distance, (double)lim_hgt);
++			}
++		}
++
++		if (why[0]) {
++			_tripped = true;
++			PX4_WARN("guard: %s - motors off", why);
++			mavlink_log_critical(&_mavlink_log_pub, "Guard: %s - motors off", why);
++			disarm();
++		}
++
++		return _tripped;
++	}
++
++	/** PX4 disarmed, forced (21196: in the air too) */
++	void disarm()
++	{
++		vehicle_command_s c{};
++		c.command = vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM;
++		c.param1 = 0.f;
++		c.param2 = 21196.f;
++		c.target_system = 0;
++		c.target_component = 0;
++		c.from_external = false;
++		c.timestamp = hrt_absolute_time();
++		_cmd_pub.publish(c);
++		_disarm_sent = c.timestamp;
++	}
++
+ 	static constexpr unsigned MAX_OUT = 8;
+ 	static constexpr uint16_t DSHOT_MAX = 1999;
+ 	static constexpr uint32_t PWM_MAX_US = 2200;
+@@ -314,6 +441,18 @@ private:
+ 
+ 	MixingOutput _mixing_output{"NYX_DSHOT", MAX_OUT, *this, MixingOutput::SchedulingPolicy::Auto, false, false};
+ 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
++
++	// the guard: what it reads, its state, how it disarms
++	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
++	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
++	uORB::Subscription _av_sub{ORB_ID(vehicle_angular_velocity)};
++	uORB::Subscription _ds_sub{ORB_ID(distance_sensor)};
++	uORB::Publication<vehicle_command_s> _cmd_pub{ORB_ID(vehicle_command)};
++	orb_advert_t _mavlink_log_pub{nullptr};
++	bool _armed{false};
++	bool _tripped{false};
++	hrt_abstime _since_tilt{0}, _since_yaw{0}, _since_hgt{0}, _disarm_sent{0};
++
+ 	nyx_fcio::Map _fcio;
+ 	unsigned _n_out{4};
+ 	uint8_t _pwm_mask{0};
+@@ -332,7 +471,11 @@ private:
+ 		(ParamInt<px4::params::NYX_DSHOT_WD>) _param_wd,
+ 		(ParamFloat<px4::params::NYX_DSHOT_MIN>) _param_dshot_min,
+ 		(ParamInt<px4::params::NYX_PWM_OUTS>) _param_pwm_outs,
+-		(ParamInt<px4::params::NYX_PWM_RATE>) _param_pwm_rate
++		(ParamInt<px4::params::NYX_PWM_RATE>) _param_pwm_rate,
++		(ParamFloat<px4::params::NYX_GRD_TILT>) _param_grd_tilt,
++		(ParamFloat<px4::params::NYX_GRD_YAWR>) _param_grd_yawr,
++		(ParamFloat<px4::params::NYX_GRD_HGT>) _param_grd_hgt,
++		(ParamFloat<px4::params::NYX_GRD_T>) _param_grd_t
+ 	)
+ };
+ 
+-- 
+2.53.0.windows.2
+

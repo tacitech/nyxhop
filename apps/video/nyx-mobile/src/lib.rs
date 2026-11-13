@@ -74,6 +74,8 @@ pub struct MobileCfg {
     /// the camera capture size (the encoder's own resolution is set in the drawer)
     pub cap_w: usize,
     pub cap_h: usize,
+    /// the ground end flown from here: the pilot app's screen (the start screen's "Fly")
+    pub pilot: bool,
 }
 
 impl Default for MobileCfg {
@@ -84,6 +86,7 @@ impl Default for MobileCfg {
             set_role: true,
             source: "phone".into(),
             rtsp: String::new(),
+            pilot: false,
             cap_w: 640,
             cap_h: 480,
         }
@@ -123,6 +126,7 @@ impl MobileCfg {
                     "board" => c.board = v.to_string(),
                     "mode" => c.mode = Role::from_word(v),
                     "set_role" => c.set_role = v != "0",
+                    "pilot" => c.pilot = v == "1",
                     "source" => c.source = v.to_ascii_lowercase(),
                     "rtsp" => c.rtsp = v.to_string(),
                     "capture" => {
@@ -145,10 +149,11 @@ impl MobileCfg {
 
     pub fn save(&self) {
         let text = format!(
-            "# NyxHop on this phone: the last choice (the app rewrites this file)\nboard {}\nmode {}\nset_role {}\nsource {}\nrtsp {}\ncapture {}x{}\n",
+            "# NyxHop on this phone: the last choice (the app rewrites this file)\nboard {}\nmode {}\nset_role {}\npilot {}\nsource {}\nrtsp {}\ncapture {}x{}\n",
             self.board.trim(),
             self.mode.map_or("", |r| r.board_role()),
             u8::from(self.set_role),
+            u8::from(self.pilot),
             self.source,
             self.rtsp,
             self.cap_w,
@@ -800,6 +805,8 @@ enum Mode {
     Choose,
     Rx(RxApp, Arc<Shared>),
     Tx(nyx_tx::TxApp, Arc<nyx_tx::Shared>),
+    /// the ground end with the pilot app's screen (nyx_pilot): video, the flight, the sticks
+    Pilot(Box<nyx_pilot::Pilot>),
 }
 
 /// The window: the start screen, then the chosen end's screen; follows the board.
@@ -817,7 +824,10 @@ impl Host {
         if let Some(b) = board_override {
             cfg.board = b;
         }
-        let chooser = Chooser::new(cfg.board.clone(), cfg.set_role, t("this phone", "điện thoại này"));
+        let mut chooser = Chooser::new(cfg.board.clone(), cfg.set_role, t("this phone", "điện thoại này"));
+        // the third choice: fly the aircraft from here (the pilot app)
+        chooser.pilot_option = true;
+        chooser.pilot = cfg.pilot;
         // The wired network, for every socket of this process (the role poll, the video, the
         // console): bound as soon as a cable is there, checked again every few seconds so
         // plugging it in later works too. Binding is process-wide and sticks.
@@ -836,6 +846,8 @@ impl Host {
         match std::mem::replace(&mut self.mode, Mode::Choose) {
             Mode::Rx(_, sh) => sh.stop.store(true, Ordering::Relaxed),
             Mode::Tx(_, sh) => nyx_tx::shutdown(&sh),
+            // (dropped: its link and MAVLink threads end)
+            Mode::Pilot(_) => {}
             Mode::Choose => {}
         }
         self.chooser.leave();
@@ -847,6 +859,11 @@ impl Host {
         let channel = format!("{board}:{}", role.port());
         log(&format!("{}: channel {channel}", role.label()));
         self.mode = match role {
+            Role::Ground if self.chooser.pilot => {
+                // embedded: no console or web ports on the phone, MAVLink on ports of its own
+                let opts = Opts::from_list(["--embedded"]);
+                Mode::Pilot(Box::new(nyx_pilot::Pilot::new(&board, &opts, std::path::Path::new(FILES_DIR))))
+            }
             Role::Ground => {
                 let sh = Shared::new(channel);
                 spawn_net(sh.clone());
@@ -913,10 +930,17 @@ impl eframe::App for Host {
         match &mut self.mode {
             Mode::Rx(app, _) => app.ui(root, frame),
             Mode::Tx(app, _) => app.ui(root, frame),
+            Mode::Pilot(app) => {
+                eframe::App::ui(app.as_mut(), root, frame);
+                if app.leave_asked() {
+                    self.shutdown_mode();
+                }
+            }
             Mode::Choose => match self.chooser.ui(root) {
                 Some(Event::Chosen(role)) => {
                     self.cfg.board = self.chooser.board.trim().to_string();
                     self.cfg.set_role = self.chooser.set_role;
+                    self.cfg.pilot = self.chooser.pilot;
                     self.cfg.mode = Some(role);
                     self.cfg.save();
                 }

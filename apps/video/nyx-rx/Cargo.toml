@@ -7,16 +7,28 @@ edition = "2024"
 default = []
 
 [dependencies]
-eframe = { version = "0.35.0", default-features = false, features = [
-    "accesskit",
-    "default_fonts",
-    "wgpu", # v40.21: OpenGL (glow) crashed in Intel's igxelpgicd64.dll - 5 times in 6 days (3/9)
-] }
 egui = "0.35.0"
 num-complex = { workspace = true }
 nyx-link = { path = "../../../link/nyx-link" }
 nyx-proto = { path = "../../../link/nyx-proto" }
 nyx-common = { path = "../../../link/nyx-common" }
+
+# The PC window renders with wgpu (v40.21: OpenGL (glow) crashed in Intel's igxelpgicd64.dll - 5
+# times in 6 days, 3/9). On the phone the crate is a library (the pilot app inside nyx-mobile),
+# which renders with glow through the NativeActivity.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "android-native-activity",
+] }
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true }

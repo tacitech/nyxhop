@@ -145,6 +145,11 @@ pub struct Chooser {
     busy: Arc<AtomicBool>,
     /// the end whose screen the host shows, once it hosts one
     hosted: Option<Role>,
+    /// a third choice beside the two ends, when the host has it (the phone's app): flying the
+    /// aircraft (the pilot app) - the ground end with the pilot app's screen; and whether it
+    /// was the one picked
+    pub pilot_option: bool,
+    pub pilot: bool,
 }
 
 impl Chooser {
@@ -158,6 +163,8 @@ impl Chooser {
             prep: Arc::new(Mutex::new(Prep::default())),
             busy: Arc::new(AtomicBool::new(false)),
             hosted: None,
+            pilot_option: false,
+            pilot: false,
         };
         c.spawn_role_poll();
         c
@@ -406,10 +413,24 @@ impl Chooser {
                     let btn = egui::Button::new(if suggested { text.color(th::GOOD) } else { text }).min_size(big);
                     if ui.add_enabled(!busy, btn).clicked() {
                         chosen = Some(role);
+                        self.pilot = false;
                     }
                     ui.add_space(8.0);
                 }
             });
+            if self.pilot_option {
+                let device = self.device;
+                let sub = crate::tf!("{device} flies the aircraft: video, map and sticks", "{device} lái máy bay: hình, bản đồ, cần lái");
+                let suggested = board_role.as_deref() == Some(Role::Ground.board_role());
+                let text = egui::RichText::new(format!("{}
+{sub}", t("Fly", "Điều khiển bay"))).size(17.0);
+                let btn = egui::Button::new(if suggested { text.color(th::GOOD) } else { text }).min_size(egui::vec2(ui.available_width(), 72.0));
+                if ui.add_enabled(!busy, btn).clicked() {
+                    chosen = Some(Role::Ground);
+                    self.pilot = true;
+                }
+                ui.add_space(8.0);
+            }
             if let Some(role) = chosen {
                 event = Some(Event::Chosen(role));
                 self.start(role);

@@ -1,7 +1,7 @@
 From 8580af0c86d1fe74f24a82398a73bee23ab92ef6 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Mon, 9 Nov 2026 17:43:06 +0700
-Subject: [PATCH 11/13] nyxhop/zynq: the NyxHop baseboard v0.2
+Subject: [PATCH 11/15] nyxhop/zynq: the NyxHop baseboard v0.2
  (nyxhop-bb.config): the board's ICM-42688-P (roll 180), CH1..8, GPS1 ttyPS1 +
  GPS2 ttyS2, CRSF on ttyS0, ADS1115 battery (AIN0 VBAT/11, battery_status),
  compass/baro probed on the two external I2C (buses 11/12, links made to the
