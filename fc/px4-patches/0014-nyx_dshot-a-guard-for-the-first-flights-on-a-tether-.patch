@@ -1,7 +1,7 @@
 From 4b511e33f9cdcd4a52b73003b7d95db8f7b5ed54 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Thu, 12 Nov 2026 21:27:56 +0700
-Subject: [PATCH 14/15] nyx_dshot: a guard for the first flights on a tether
+Subject: [PATCH 14/18] nyx_dshot: a guard for the first flights on a tether
  (NYX_GRD_TILT, NYX_GRD_YAWR, NYX_GRD_HGT by a downward distance sensor, for
  NYX_GRD_T): past a limit every motor stops at once and PX4 is told to disarm
  (forced, in the air too), the motors held stopped until disarmed; all 0 by

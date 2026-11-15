@@ -1,0 +1,40 @@
+From f3881f8ac3cda94e7ba36053cd8b7663c31ae584 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sun, 15 Nov 2026 21:52:54 +0700
+Subject: [PATCH 18/18] nyxhop-bb.config: the IMU pitch 180 (was roll 180), so
+ the board's front is its Ethernet/USB edge: the Mark4 build has that edge at
+ the nose and flies with SENS_BOARD_ROT 0 (tilted by hand: roll 180 alone had
+ the nose at the opposite edge)
+
+---
+ boards/nyxhop/zynq/nyxhop-bb.config | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/boards/nyxhop/zynq/nyxhop-bb.config b/boards/nyxhop/zynq/nyxhop-bb.config
+index 76c203f..b1299bc 100644
+--- a/boards/nyxhop/zynq/nyxhop-bb.config
++++ b/boards/nyxhop/zynq/nyxhop-bb.config
+@@ -2,8 +2,9 @@
+ # NyxHop Zynq on the NyxHop baseboard v0.2: the FC I/O v2 image (nyx_fcio version 3 with HIL 0)
+ # and its device tree overlays:
+ #   IMU      the ICM-42688-P on the board, /dev/spidev2.0 (the PL passes SPI1 to it from reset). It
+-#            sits on the board's underside (z reads -1 g level): roll 180 here; the yaw of its x/y is
+-#            to be checked by tilting the board (or set SENS_BOARD_ROT after QGC's level check).
++#            sits on the board's underside (z reads -1 g level): pitch 180 here, so the board's front
++#            is its Ethernet/USB edge (the Mark4 build, tilted by hand: SENS_BOARD_ROT 0 with that edge
++#            at the nose; roll 180 alone had the front at the opposite edge).
+ #   motors   CH1..8 (nyx_dshot, DShot300 by default: BLHeli_S ESCs did not read DShot600 through the
+ #            board's level shifter, beeping as with no signal; NYX_PWM_OUTS for PWM ESCs); a quad X on CH1..4.
+ #   GPS      GPS1 /dev/ttyPS1 (J_GPS1, the PS's UART0), GPS2 /dev/ttyS2 (J_GPS2).
+@@ -65,7 +66,7 @@ param set-default BAT1_V_DIV 11
+ param set-default BAT1_N_CELLS 4
+ 
+ dataman start -f dataman
+-icm42688p -s -b 2 -R 8 start
++icm42688p -s -b 2 -R 12 start
+ gps start -d /dev/ttyPS1 -e /dev/ttyS2
+ crsf_rc start -d /dev/ttyS0
+ ads1115 start -X -b 12
+-- 
+2.53.0.windows.2
+

@@ -33,6 +33,8 @@ PX4 = HOME + "/px4"
 RECORD = PX4 + "/installed.md5"
 UNIT = "/etc/systemd/system/px4.service"
 DROPIN = "/etc/systemd/system/nyx-ipcam.service.d/px4-tlm.conf"
+# the board's Ethernet jack given to the camera (the camera app finds and sets up the camera there)
+CAMPORT = "/etc/systemd/system/nyx-ipcam.service.d/camport.conf"
 # the files the image replaces on the board; each one's old version is kept as <name>.pre-fc
 REPLACED = [
     ("BOOT.BIN", "/boot/BOOT.BIN"),
@@ -314,10 +316,13 @@ def install(a):
     b.put(p.files["px4.service"], UNIT)
     b.sh(f"mkdir -p {os.path.dirname(DROPIN)}")
     b.put(p.files["px4-tlm.conf"], DROPIN)
+    if "camport.conf" in p.files:
+        b.put(p.files["camport.conf"], CAMPORT)
     out = b.sh("systemctl daemon-reload && systemctl enable px4 2>&1 && sync && echo done")
     if not out.endswith("done"):
         sys.exit(f"enabling px4.service failed: {out}")
-    print("  px4.service enabled; the camera app hands the link's MAVLink to PX4")
+    print("  px4.service enabled; the camera app hands the link's MAVLink to PX4"
+          + ("; the Ethernet jack is the camera's" if "camport.conf" in p.files else ""))
 
     b = reboot(b)
     if b is None:
@@ -348,8 +353,12 @@ def uninstall(a):
     if not b.ok(f"test -e {UNIT} -o -e {PX4}/fc-start.sh -o -e {RECORD}"):
         sys.exit(f"{host}: the flight controller is not installed")
     print(f"{host}: removing the flight controller")
-    b.sh(f"systemctl disable --now px4 2>/dev/null; rm -f {UNIT} {DROPIN}; "
-         f"rmdir {os.path.dirname(DROPIN)} 2>/dev/null; systemctl daemon-reload")
+    # (the camera app wrote "denyinterfaces eth0" for dhcpcd when it took the jack: the jack is the
+    # board's own Ethernet again from the next boot)
+    b.sh(f"systemctl disable --now px4 2>/dev/null; rm -f {UNIT} {DROPIN} {CAMPORT}; "
+         f"rmdir {os.path.dirname(DROPIN)} 2>/dev/null; "
+         "sed -i '/is the camera port (nyx-ipcam)/d; /^denyinterfaces eth0$/d' /etc/dhcpcd.conf; "
+         "systemctl daemon-reload; systemctl restart nyx-ipcam 2>/dev/null")
     print("  PX4 stopped, px4.service removed, the camera app as it was")
     ours = {tuple(l.split()) for l in b.sh(f"cat {RECORD} 2>/dev/null").splitlines() if len(l.split()) == 2}
     for name, path in REPLACED:

@@ -1,0 +1,275 @@
+From 8cae6c2377f0a464812c72ec34b3f25608ad1412 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sat, 14 Nov 2026 19:50:31 +0700
+Subject: [PATCH 17/18] nyx_power: system_power for the NyxHop baseboard from
+ its ADS1115 (AIN3 = 5V_PER / 2 through R43/R44 10k / 10k as voltage5v_v, the
+ battery input AIN0 / 11 as brick 1 from 5 V, usb_connected 0), started in
+ nyxhop-bb.config after battery_status; Linux has no board_adc, so commander's
+ power check failed 'system power unavailable' and CBRK_SUPPLY_CHK had to be
+ set
+
+---
+ boards/nyxhop/zynq/default.px4board   |   1 +
+ boards/nyxhop/zynq/nyxhop-bb.config   |   3 +
+ boards/nyxhop/zynq/src/board_config.h |   7 +-
+ src/drivers/nyx_power/CMakeLists.txt  |   8 ++
+ src/drivers/nyx_power/Kconfig         |   6 +
+ src/drivers/nyx_power/nyx_power.cpp   | 165 ++++++++++++++++++++++++++
+ 6 files changed, 189 insertions(+), 1 deletion(-)
+ create mode 100644 src/drivers/nyx_power/CMakeLists.txt
+ create mode 100644 src/drivers/nyx_power/Kconfig
+ create mode 100644 src/drivers/nyx_power/nyx_power.cpp
+
+diff --git a/boards/nyxhop/zynq/default.px4board b/boards/nyxhop/zynq/default.px4board
+index 256151b..5f9d946 100644
+--- a/boards/nyxhop/zynq/default.px4board
++++ b/boards/nyxhop/zynq/default.px4board
+@@ -14,6 +14,7 @@ CONFIG_DRIVERS_MAGNETOMETER_HMC5883=y
+ CONFIG_DRIVERS_MAGNETOMETER_ISENTEK_IST8310=y
+ CONFIG_DRIVERS_MAGNETOMETER_QMC5883L=y
+ CONFIG_DRIVERS_NYX_DSHOT=y
++CONFIG_DRIVERS_NYX_POWER=y
+ CONFIG_DRIVERS_RC_CRSF_RC=y
+ CONFIG_DRIVERS_RC_INPUT=y
+ CONFIG_MODULES_ATTITUDE_ESTIMATOR_Q=y
+diff --git a/boards/nyxhop/zynq/nyxhop-bb.config b/boards/nyxhop/zynq/nyxhop-bb.config
+index 7bc5d9d..76c203f 100644
+--- a/boards/nyxhop/zynq/nyxhop-bb.config
++++ b/boards/nyxhop/zynq/nyxhop-bb.config
+@@ -12,6 +12,8 @@
+ #   RC       /dev/ttyS0 (J_RC): CRSF / ELRS (crsf_rc). For SBUS: rc_input on it instead, the PL
+ #            inverting RC_RX (EMIO GPIO bit 62 = 1), and RC_TX_DIR (bit 57) left 0.
+ #   battery  the ADS1115's AIN0 = VBAT / 11 (battery_status): BAT1_V_DIV against a meter.
++#   power    the ADS1115's AIN3 = 5V_PER / 2 and AIN0 (nyx_power): system_power for commander's
++#            power check (4.7..5.4 V, the battery as brick 1), so CBRK_SUPPLY_CHK stays 0.
+ #   TELEM1   /dev/ttyS1: MAVLink at 115200 for a MicoAir MTF-01 (optical flow + range finder, its
+ #            protocol set to Mav_PX4: OPTICAL_FLOW_RAD and DISTANCE_SENSOR). The ground station's
+ #            MAVLink goes over the NyxHop link (UDP 14556/14557) as on the other configs.
+@@ -68,6 +70,7 @@ gps start -d /dev/ttyPS1 -e /dev/ttyS2
+ crsf_rc start -d /dev/ttyS0
+ ads1115 start -X -b 12
+ battery_status start
++nyx_power start
+ for b in 11 12
+ do
+ 	ist8310 -X -b $b start
+diff --git a/boards/nyxhop/zynq/src/board_config.h b/boards/nyxhop/zynq/src/board_config.h
+index a7ab2ab..46e4e45 100644
+--- a/boards/nyxhop/zynq/src/board_config.h
++++ b/boards/nyxhop/zynq/src/board_config.h
+@@ -20,9 +20,14 @@
+ // SPI
+ #define CONFIG_SPI 1
+ 
+-// the baseboard's ADS1115: AIN0 VBAT / 11 (100k / 10k), AIN1 an ESC's current output
++// the baseboard's ADS1115 (U16): AIN0 VBAT / 11 (R41/R42 100k / 10k), AIN1 an ESC's current output,
++// AIN2 RSSI, AIN3 5V_PER / 2 (R43/R44 10k / 10k: the 5 V of the ports, the 3V3 and the sensors' 3V3).
++// nyx_power publishes system_power from AIN3 and AIN0.
+ #define ADC_BATTERY_VOLTAGE_CHANNEL	0
+ #define ADC_BATTERY_CURRENT_CHANNEL	-1
++#define ADC_BATTERY_VOLTAGE_DIV		11.0f
++#define ADC_5V_RAIL_SENSE		3
++#define ADC_5V_RAIL_DIV			2.0f
+ 
+ #include <system_config.h>
+ #include <px4_platform_common/board_common.h>
+diff --git a/src/drivers/nyx_power/CMakeLists.txt b/src/drivers/nyx_power/CMakeLists.txt
+new file mode 100644
+index 0000000..305f77e
+--- /dev/null
++++ b/src/drivers/nyx_power/CMakeLists.txt
+@@ -0,0 +1,8 @@
++px4_add_module(
++	MODULE drivers__nyx_power
++	MAIN nyx_power
++	SRCS
++		nyx_power.cpp
++	DEPENDS
++		px4_work_queue
++	)
+diff --git a/src/drivers/nyx_power/Kconfig b/src/drivers/nyx_power/Kconfig
+new file mode 100644
+index 0000000..8c0d8e5
+--- /dev/null
++++ b/src/drivers/nyx_power/Kconfig
+@@ -0,0 +1,6 @@
++menuconfig DRIVERS_NYX_POWER
++	bool "nyx_power"
++	default n
++	depends on PLATFORM_POSIX
++	---help---
++		system_power for the NyxHop baseboard from its ADS1115 (5V_PER, battery input)
+diff --git a/src/drivers/nyx_power/nyx_power.cpp b/src/drivers/nyx_power/nyx_power.cpp
+new file mode 100644
+index 0000000..e1b2128
+--- /dev/null
++++ b/src/drivers/nyx_power/nyx_power.cpp
+@@ -0,0 +1,165 @@
++/**
++ * @file nyx_power.cpp
++ *
++ * system_power for the NyxHop baseboard. On Linux there is no board_adc to publish it, so commander's
++ * power check failed "system power unavailable" (CBRK_SUPPLY_CHK had to be set). This takes the
++ * ADS1115's adc_report (the ads1115 driver, a full report every 50 ms) and publishes, on each one:
++ *   voltage5v_v   AIN3 x 2: 5V_PER (R43/R44 10k / 10k), the 5 V of the ports, the 3V3 and the
++ *                 sensors' 3V3; commander wants it in 4.7..5.4 V
++ *   brick_valid   bit 0 while +VBAT (AIN0 x 11, R41/R42 100k / 10k) is at least 5 V: the battery
++ *                 input feeding the board, which runs from nothing else (both bucks take +VBAT and
++ *                 stop under 5.39 V); COM_POWER_COUNT 1 needs it
++ *   usb_connected 0 (no USB powers the board, so commander checks the rail)
++ * Without the ADS1115 nothing is published and commander keeps failing the check, as it should.
++ * Channels and dividers: board_config.h.
++ */
++
++#include <board_config.h>
++#include <drivers/drv_adc.h>
++#include <drivers/drv_hrt.h>
++#include <drivers/drv_sensor.h>
++#include <lib/drivers/device/Device.hpp>
++#include <px4_platform_common/log.h>
++#include <px4_platform_common/module.h>
++#include <px4_platform_common/px4_work_queue/WorkItem.hpp>
++#include <uORB/Publication.hpp>
++#include <uORB/SubscriptionCallback.hpp>
++#include <uORB/topics/adc_report.h>
++#include <uORB/topics/system_power.h>
++#include <math.h>
++
++class NyxPower : public ModuleBase<NyxPower>, public px4::WorkItem
++{
++public:
++	NyxPower() : WorkItem(MODULE_NAME, px4::wq_configurations::lp_default) {}
++	~NyxPower() override = default;
++
++	static int task_spawn(int argc, char *argv[]);
++	static int custom_command(int argc, char *argv[]) { return print_usage("unknown command"); }
++	static int print_usage(const char *reason = nullptr);
++
++	bool init() { return _adc_report_sub.registerCallback(); }
++
++	int print_status() override
++	{
++		PX4_INFO("5V_PER %.3f V, VBAT %.2f V, brick %s, %u published, last %.1f s ago",
++			 (double)_v5, (double)_vbat, _brick ? "valid" : "NOT valid", _count,
++			 _count ? (double)(hrt_elapsed_time(&_last) * 1e-6f) : -1.0);
++		return 0;
++	}
++
++private:
++	static constexpr float VBAT_VALID = 5.0f;
++
++	void Run() override
++	{
++		if (should_exit()) {
++			_adc_report_sub.unregisterCallback();
++			exit_and_cleanup();
++			return;
++		}
++
++		adc_report_s adc;
++
++		if (!_adc_report_sub.update(&adc)) {
++			return;
++		}
++
++		// the ADS1115's report only: another ADC's channel 3 is not this rail
++		device::Device::DeviceId id{};
++		id.devid = adc.device_id;
++
++		if (id.devid_s.devtype != DRV_ADC_DEVTYPE_ADS1115 || adc.resolution == 0) {
++			return;
++		}
++
++		float v5 = NAN;
++		float vbat = NAN;
++
++		for (unsigned i = 0; i < PX4_MAX_ADC_CHANNELS; i++) {
++			const float v = adc.raw_data[i] * adc.v_ref / adc.resolution;
++
++			if (adc.channel_id[i] == ADC_5V_RAIL_SENSE) {
++				v5 = v * ADC_5V_RAIL_DIV;
++
++			} else if (adc.channel_id[i] == ADC_BATTERY_VOLTAGE_CHANNEL) {
++				vbat = v * ADC_BATTERY_VOLTAGE_DIV;
++			}
++		}
++
++		if (!PX4_ISFINITE(v5)) {
++			return;
++		}
++
++		_v5 = v5;
++		_vbat = vbat;
++		_brick = PX4_ISFINITE(vbat) && vbat >= VBAT_VALID;
++
++		system_power_s sp{};
++		sp.voltage5v_v = v5;
++		sp.brick_valid = _brick ? system_power_s::BRICK1_VALID_MASK : 0;
++		sp.usb_connected = 0;
++		sp.timestamp = hrt_absolute_time();
++		_system_power_pub.publish(sp);
++
++		_last = sp.timestamp;
++		_count++;
++	}
++
++	uORB::SubscriptionCallbackWorkItem _adc_report_sub{this, ORB_ID(adc_report)};
++	uORB::Publication<system_power_s> _system_power_pub{ORB_ID(system_power)};
++
++	float _v5{NAN};
++	float _vbat{NAN};
++	bool _brick{false};
++	unsigned _count{0};
++	hrt_abstime _last{0};
++};
++
++int NyxPower::task_spawn(int argc, char *argv[])
++{
++	NyxPower *instance = new NyxPower();
++
++	if (instance) {
++		_object.store(instance);
++		_task_id = task_id_is_work_queue;
++
++		if (instance->init()) {
++			return PX4_OK;
++		}
++
++		PX4_ERR("adc_report callback failed");
++
++	} else {
++		PX4_ERR("alloc failed");
++	}
++
++	delete instance;
++	_object.store(nullptr);
++	_task_id = -1;
++	return PX4_ERROR;
++}
++
++int NyxPower::print_usage(const char *reason)
++{
++	if (reason) {
++		PX4_WARN("%s\n", reason);
++	}
++
++	PRINT_MODULE_DESCRIPTION(
++		R"DESCR_STR(
++### Description
++system_power for the NyxHop baseboard from the ADS1115 (ads1115 driver): the 5V_PER rail (AIN3 / 2)
++and the battery input (AIN0 / 11) as brick 1. Start it after ads1115.
++)DESCR_STR");
++
++	PRINT_MODULE_USAGE_NAME("nyx_power", "driver");
++	PRINT_MODULE_USAGE_COMMAND("start");
++	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
++	return 0;
++}
++
++extern "C" __EXPORT int nyx_power_main(int argc, char *argv[])
++{
++	return NyxPower::main(argc, argv);
++}
+-- 
+2.53.0.windows.2
+

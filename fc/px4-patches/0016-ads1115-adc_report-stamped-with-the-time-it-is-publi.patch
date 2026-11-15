@@ -1,0 +1,25 @@
+From 5fc299be27f0e3a41f52825de2620ba07dd18e01 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Sat, 14 Nov 2026 19:50:30 +0700
+Subject: [PATCH 16/18] ads1115: adc_report stamped with the time it is
+ published (it went out with timestamp 0)
+
+---
+ src/drivers/adc/ads1115/ads1115_main.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/drivers/adc/ads1115/ads1115_main.cpp b/src/drivers/adc/ads1115/ads1115_main.cpp
+index 1967b58..9338c2a 100644
+--- a/src/drivers/adc/ads1115/ads1115_main.cpp
++++ b/src/drivers/adc/ads1115/ads1115_main.cpp
+@@ -111,6 +111,7 @@ void ADS1115::RunImpl()
+ 
+ 		if (_channel_cycle_mask == 0b1111) {
+ 			_channel_cycle_mask = 0;
++			_adc_report.timestamp = hrt_absolute_time();
+ 			_to_adc_report.publish(_adc_report);
+ 		}
+ 
+-- 
+2.53.0.windows.2
+

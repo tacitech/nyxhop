@@ -6,16 +6,22 @@
 //! decoded or encoded here: the board's two A9 cores stay with the radio.
 //!
 //! It runs on every board whatever its role and follows the daemon (`role` on :7202):
-//!   * receiving end (`rx`), or no camera configured: standby, no camera pulled, port 7010 free;
+//!   * receiving end (`rx`), or the camera switched off: standby, no camera pulled, port 7010 free;
 //!   * transmitting end with a camera that sends pictures: it takes port 7010 and sends;
-//!   * transmitting end, camera silent for 5 s: port 7010 is left to a PC app (nyxhop Aircraft).
+//!   * transmitting end with a flight controller's MAVLink coming in (--tlm-in), camera or not: it
+//!     keeps port 7010 and the MAVLink goes on its own (14/11: with no camera the port was given up
+//!     and PX4 lost the link);
+//!   * transmitting end, camera silent for 5 s and no MAVLink: port 7010 is left to a PC app.
+//!
+//! With --camport <interface> (or NYX_CAMPORT) that Ethernet port is the camera's: it gets its own
+//! subnet and DHCP, and the camera plugged into it is found and set up over ONVIF (camport.rs).
 //!
 //! Control: the console on :7201 (`get`, `stats`, `set rtsp <url>`, `set source rtsp|pattern`,
 //! `save`), used by the PC window nyx-ipcam-ctl.
 //!
 //! Options (all have board defaults): --rtsp <url> (first start, before anything is saved),
-//! --config, --save-hook <shell command, {path} = the file>, --role-console, and nyx_tx::setup's
-//! --channel, --ctl, --tlm-in, --tlm-out.
+//! --config, --save-hook <shell command, {path} = the file>, --role-console, --camport <interface>
+//! (default: NYX_CAMPORT, else none), and nyx_tx::setup's --channel, --ctl, --tlm-in, --tlm-out.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -28,6 +34,9 @@ use nyx_common::logging::{self, log};
 use nyx_common::source::SourceKind;
 use nyx_tx::Shared;
 
+#[cfg(target_os = "linux")]
+mod camport;
+
 const DEFAULTS: &[(&str, &str)] = &[
     ("--channel", "127.0.0.1:7010"),
     ("--ctl", "0.0.0.0:7201"),
@@ -38,7 +47,8 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("--tlm-out", "0"),
 ];
 
-/// A camera that sent nothing for this long gives the transmit port back.
+/// A camera that sent nothing for this long (and MAVLink that stopped as long) gives the transmit
+/// port back.
 const CAMERA_SILENT: Duration = Duration::from_secs(5);
 
 fn main() {
@@ -84,6 +94,13 @@ fn main() {
             cfg,
             if fresh { "none yet" } else { "loaded" },
         ));
+    }
+    let camport = opts.arg("--camport", &std::env::var("NYX_CAMPORT").unwrap_or_default());
+    if !camport.is_empty() && camport != "off" && camport != "0" {
+        #[cfg(target_os = "linux")]
+        camport::spawn(shared.clone(), camport);
+        #[cfg(not(target_os = "linux"))]
+        log(&format!("ipcam: --camport {camport} needs Linux; ignored"));
     }
     let console = opts.arg("--role-console", "127.0.0.1:7202");
     let sh = shared.clone();
@@ -141,10 +158,20 @@ fn board_role(console: &str) -> Option<String> {
 /// drops, narrowed slowly while it stays nearly empty. What cannot go then waits here, and frames
 /// that get too old are dropped whole, up to the next key frame (worker.rs, pass_next).
 fn pace(shared: &Shared, console: &str) {
-    // about the daemon's own spacing of conv frames (3 ms): costs nothing while the air keeps up
+    // branch A: about the daemon's own spacing of conv frames (3 ms): costs nothing while the air
+    // keeps up
     const FLOOR_MIN_US: u64 = 2_800;
     const FLOOR_MAX_US: u64 = 12_000;
+    // Branch B (ofdm64): a block is one packet of 0.4-1.4 ms and the daemon's queue holds 250 ms
+    // of air (hundreds of packets), so there is no floor - blocks go back to back at the air's own
+    // pace, as from the PC app - and only blocks the daemon drops widen the spacing, up to
+    // B_FLOOR_MAX_US. 14/11: the branch-A floor (2.8 ms a block, widened to 12 ms whenever 16
+    // frames waited, a fraction of B's queue) held a 1080p camera to 1-2 pictures a second as
+    // soon as something moved in front of it.
+    const B_FLOOR_START_US: u64 = 400;
+    const B_FLOOR_MAX_US: u64 = 3_000;
     let mut floor = FLOOR_MIN_US;
+    let mut was_b = false;
     let mut last_drop: Option<u64> = None;
     let mut logged = (FLOOR_MIN_US, Instant::now());
     while !shared.stop.load(Ordering::Relaxed) {
@@ -158,7 +185,23 @@ fn pace(shared: &Shared, console: &str) {
         let (Some(depth), Some(drop)) = (num("txq_frames"), num("txq_drop")) else { continue };
         let dropped = last_drop.is_some_and(|d| drop > d);
         last_drop = Some(drop);
-        if dropped || depth >= 16 {
+        let b = nyx_tx::phy64();
+        if b != was_b {
+            was_b = b;
+            floor = if b { 0 } else { FLOOR_MIN_US };
+            log(&format!("ipcam: air frame spacing {}", if b { "at the air's own pace (branch B)" } else { "2.8 ms (conv frames)" }));
+            logged = (floor, Instant::now());
+        }
+        if b {
+            if dropped {
+                floor = (floor.max(B_FLOOR_START_US) * 5 / 4).min(B_FLOOR_MAX_US);
+            } else if depth <= 4 {
+                floor = floor * 9 / 10;
+                if floor < B_FLOOR_START_US {
+                    floor = 0;
+                }
+            }
+        } else if dropped || depth >= 16 {
             floor = (floor * 5 / 4).min(FLOOR_MAX_US);
         } else if depth <= 4 {
             floor = (floor * 98 / 100).max(FLOOR_MIN_US);
@@ -181,6 +224,8 @@ fn watch(shared: &Shared, console: &str) {
     let mut role = String::from("unknown");
     let mut last_frames = shared.rtsp.frames_total.load(Ordering::Relaxed);
     let mut last_frame_at: Option<Instant> = None;
+    let mut last_tlm = shared.tlm_in_n.load(Ordering::Relaxed);
+    let mut last_tlm_at: Option<Instant> = None;
     let mut note = String::new();
     let mut last_poll = Instant::now() - Duration::from_secs(10);
     while !shared.stop.load(Ordering::Relaxed) {
@@ -196,6 +241,11 @@ fn watch(shared: &Shared, console: &str) {
         if n != last_frames {
             last_frames = n;
             last_frame_at = Some(Instant::now());
+        }
+        let t = shared.tlm_in_n.load(Ordering::Relaxed);
+        if t != last_tlm {
+            last_tlm = t;
+            last_tlm_at = Some(Instant::now());
         }
         let (source, url_set) = {
             let c = shared.config.lock().unwrap();
@@ -214,15 +264,18 @@ fn watch(shared: &Shared, console: &str) {
                 let _ = nyx_tx::save_config(shared);
             }
         }
-        let standby = role != "tx" || source != SourceKind::Rtsp || !url_set;
+        // (no camera URL is not standby: the worker still carries a flight controller's MAVLink,
+        // and the camera port fills the URL in when a camera turns up)
+        let standby = role != "tx" || source != SourceKind::Rtsp;
         let live = last_frame_at.is_some_and(|t| t.elapsed() < CAMERA_SILENT);
+        let fc = last_tlm_at.is_some_and(|t| t.elapsed() < CAMERA_SILENT);
         if shared.standby.load(Ordering::Relaxed) != standby {
             shared.standby.store(standby, Ordering::Relaxed);
             if standby {
                 last_frame_at = None;
             }
         }
-        let port_off = standby || !live;
+        let port_off = standby || !(live || fc);
         if shared.port_off.load(Ordering::Relaxed) != port_off {
             nyx_tx::set_port_off(shared, port_off);
         }
@@ -230,12 +283,15 @@ fn watch(shared: &Shared, console: &str) {
             format!("standby: the board is the {} end", if role == "rx" { "receiving" } else { "unknown" })
         } else if source != SourceKind::Rtsp {
             "standby: the camera is switched off (source is not rtsp)".to_string()
-        } else if !url_set {
-            "standby: no camera URL".to_string()
-        } else if !live {
-            "waiting for the camera; the transmit port is free for a PC app".to_string()
-        } else {
+        } else if live {
             "sending the camera".to_string()
+        } else if fc {
+            if url_set { "waiting for the camera; sending the flight controller's MAVLink" } else { "no camera; sending the flight controller's MAVLink" }
+                .to_string()
+        } else if !url_set {
+            "no camera URL; the transmit port is free for a PC app".to_string()
+        } else {
+            "waiting for the camera; the transmit port is free for a PC app".to_string()
         };
         if now != note {
             log(&format!("ipcam: {now}"));

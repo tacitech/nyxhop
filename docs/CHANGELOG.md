@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.14
+
+* Aircraft camera: plug an IP camera into the NyxHop board's Ethernet jack and it just works. The
+  board gives the camera an address (or finds the one it has), sets it to H.264 over ONVIF and
+  takes its stream; NyxHop Pilot asks for the camera's login only if it needs one.
+* Aircraft camera: telemetry and the sticks keep going with no camera plugged in, and video from
+  an IP camera no longer stutters when there is motion in the picture.
+* NyxHop Pilot: a PS4 gamepad flies it all: the D-pad and the face buttons move like the sticks,
+  slowly; R2 and L2 climb and descend as you squeeze them; PS takes off, the touchpad lands and
+  OPTIONS returns home (each held a second), SHARE hovers, and L1 + R1 together stop the motors at
+  once. The buttons on the screen show which.
+* NyxHop Pilot: calibration shows every side to put the aircraft on as a picture, and goes from
+  one step to the next without stalling. The flight controller's long messages show whole, and
+  after landing it is ready to take off again.
+* NyxHop board (`fc/`): the board's front is its Ethernet/USB edge, and its Ethernet jack is the
+  camera's. Run `fc/install.py install` again, then check Settings > Sensors in NyxHop Pilot.
+* Update the camera program on the aircraft (`deploy/ipcam`). The link and its boards are
+  unchanged.
+
 ## 2.0.13
 
 * NyxHop Pilot: flies with an RC transmitter plugged in by USB as a joystick (EdgeTX) or a

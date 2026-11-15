@@ -22,6 +22,11 @@ station, and the board's licence covers the flight controller too. `status` show
 `uninstall` puts the board back as it was and keeps PX4's parameters unless you add `--all`.
 Flashing the link again takes the flight controller off: run `install` once more after it.
 
+The board's Ethernet jack is the camera's from then on: plug an IP camera in and the board finds it
+and sets it up for the link, with nothing to type. A camera whose factory password was changed
+asks for it on NyxHop Pilot's video page. A computer plugged into the jack instead gets an address
+and finds the board at 172.31.77.1.
+
 ## Fly
 
 NyxHop Pilot is the app for it: video, the flight data, a map and the sticks, all over the link.

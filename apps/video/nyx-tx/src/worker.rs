@@ -307,6 +307,9 @@ const PASS_MAX_LAG: Duration = Duration::from_millis(400);
 const CAM_HEADROOM: f32 = 0.6;
 /// ...and never below this (kbit/s): a camera starved further gives nothing worth seeing.
 const CAM_MIN_KBPS: u32 = 250;
+/// A camera that gave no frame for this long is gone or stalled: a flight controller's MAVLink
+/// then goes in frames of its own instead of waiting to ride the camera's.
+const SIDE_AFTER: Duration = Duration::from_millis(200);
 
 /// State of the pass-through reader (`pass_next`).
 struct PassState {
@@ -769,6 +772,9 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
     let mut cam_tick = Instant::now();
     let mut cam_up_since: Option<Instant> = None;
     let mut cam_late0: u64 = 0;
+    // when the camera last gave a frame (a flight controller's MAVLink rides its frames while
+    // it sends, see SIDE_AFTER)
+    let mut last_cam_au = Instant::now() - Duration::from_secs(10);
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -1922,9 +1928,14 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
             said_acquiring = true;
             log("worker: first iteration — acquiring source");
         }
+        // a flight controller's datagram sent on its own, with no camera frame to ride on
+        let mut side_only: Option<Vec<u8>> = None;
         let pass_au: Option<RtspAu> = if pass {
             match pass_next(&shared.rtsp, &mut pst) {
-                Some(au) => Some(au),
+                Some(au) => {
+                    last_cam_au = Instant::now();
+                    Some(au)
+                }
                 None => {
                     // No camera frame due yet: answer NACKs now rather than after the next
                     // frame (17/9 on air: retransmissions came back 54-223 ms after the loss,
@@ -1934,7 +1945,25 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                     if cfg.txconv {
                         answer_conv_nacks!(cfg, pass);
                     }
-                    continue;
+                    // MAVLink waiting and no picture coming: it goes now, as frames of its own.
+                    // It used to ride camera frames only, so with no camera (or one gone) PX4's
+                    // MAVLink sat in the queue until it overflowed and the link carried no control
+                    // (14/11). While the camera sends it still rides the camera's frames: sent on
+                    // its own each datagram took a frame with parity, three packets for one
+                    // (14/11 under WiFi: the picture stalled for seconds).
+                    let first = if last_cam_au.elapsed() < SIDE_AFTER {
+                        None
+                    } else {
+                        let mut q = shared.tlm_tx_q.lock().unwrap();
+                        if q.is_empty() { None } else { Some(q.remove(0)) }
+                    };
+                    match first {
+                        Some(d) => {
+                            side_only = Some(d);
+                            None
+                        }
+                        None => continue,
+                    }
                 }
             }
         } else {
@@ -2004,7 +2033,11 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
         if video_frame.is_some() && frame_id % 8 == 0 {
             log(&format!("G2G in id={frame_id}"));
         }
-        let (src_type, app_data, preview) = if let Some(au) = pass_au {
+        // (no parity for it: a datagram is one block, ARQ repairs it as it did riding a picture)
+        let side_frame = side_only.is_some();
+        let (src_type, app_data, preview) = if let Some(d) = side_only.take() {
+            (SourceType::Data, d, None)
+        } else if let Some(au) = pass_au {
             pass_fps_roll.push(1);
             pass_byte_roll.push(au.data.len());
             // The receiver asks for a key frame after a loss; the camera sends one when it
@@ -2522,7 +2555,7 @@ fn run(shared: Arc<Shared>, net: Arc<Net>) {
                 // more), the first the XOR as ever
                 let seg_eff = if seg >= nyx_link::SEG_PAYLOAD - 2 { nyx_link::SEG_PAYLOAD } else { seg.max(1) };
                 n_data = app_data.len().div_ceil(seg_eff).max(1);
-                fec_k = if !cfg.fec {
+                fec_k = if !cfg.fec || side_frame {
                     0
                 } else if crate::phy64() && cfg.fec_rs {
                     // branch B: the ofdm64 PHY carries 3-10x what the picture needs, so every

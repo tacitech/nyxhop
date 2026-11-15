@@ -735,6 +735,27 @@ pub mod rtsp {
         }
     }
 
+    /// `%XX` back to the byte (a user name or password taken from a URL).
+    fn pct_decode(s: &str) -> String {
+        let b = s.as_bytes();
+        let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%'
+                && i + 2 < b.len()
+                && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+            {
+                out.push(h << 4 | l);
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     /// The URL without its password, for the log and the screen.
     fn redact(url: &str) -> String {
         match url::Url::parse(url) {
@@ -856,9 +877,10 @@ pub mod rtsp {
         let creds = if url.username().is_empty() {
             None
         } else {
+            // (the URL keeps them percent-encoded: a password with '@' or ':' is written %40, %3A)
             let c = Credentials {
-                username: url.username().to_string(),
-                password: url.password().unwrap_or("").to_string(),
+                username: pct_decode(url.username()),
+                password: pct_decode(url.password().unwrap_or("")),
             };
             let _ = url.set_username("");
             let _ = url.set_password(None);
@@ -868,23 +890,46 @@ pub mod rtsp {
             .creds(creds)
             .user_agent("nyxhop".to_owned())
             .session_group(Arc::new(SessionGroup::default()));
-        let mut session = retina::client::Session::describe(url, opts).await.map_err(|e| e.to_string())?;
+        // Every step of the handshake within STEP: a camera that changes its address (or restarts) in
+        // the middle of one leaves a connection that never answers, and with no limit this thread
+        // waited on it for ever and never saw the new URL (14/11: two hours on the camera's old address
+        // while the camera port had saved its DHCP one).
+        const STEP: Duration = Duration::from_secs(8);
+        let late = |what: &str| format!("{what}: no answer within {} s", STEP.as_secs());
+        let mut session = tokio::time::timeout(STEP, retina::client::Session::describe(url, opts))
+            .await
+            .map_err(|_| late("DESCRIBE"))?
+            .map_err(|e| e.to_string())?;
         let vi = session
             .streams()
             .iter()
             .position(|s| s.media() == "video" && s.encoding_name().eq_ignore_ascii_case("h264"))
-            .ok_or_else(|| "no H.264 video track".to_string())?;
+            .ok_or_else(|| {
+                // say what it does send: the board's camera port (nyx-ipcam) sets an H.265 camera
+                // back to H.264 over ONVIF, and this line is how the log tells why
+                let v: Vec<String> = session
+                    .streams()
+                    .iter()
+                    .filter(|s| s.media() == "video")
+                    .map(|s| s.encoding_name().to_ascii_uppercase())
+                    .collect();
+                if v.is_empty() {
+                    "no video track".to_string()
+                } else {
+                    format!("no H.264 video track (the camera sends {})", v.join(", "))
+                }
+            })?;
         let mut sps_pps = match session.streams()[vi].parameters() {
             Some(ParametersRef::Video(v)) => avcc_to_annex_b(v.extra_data()),
             _ => Vec::new(),
         };
-        session
-            .setup(vi, SetupOptions::default().transport(Transport::Tcp(Default::default())))
+        tokio::time::timeout(STEP, session.setup(vi, SetupOptions::default().transport(Transport::Tcp(Default::default()))))
             .await
+            .map_err(|_| late("SETUP"))?
             .map_err(|e| e.to_string())?;
-        let session = session
-            .play(PlayOptions::default())
+        let session = tokio::time::timeout(STEP, session.play(PlayOptions::default()))
             .await
+            .map_err(|_| late("PLAY"))?
             .map_err(|e| e.to_string())?;
         let mut demuxed = session.demuxed().map_err(|e| e.to_string())?;
         let mut dec = VideoDecoder::new();

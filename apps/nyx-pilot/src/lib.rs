@@ -131,6 +131,258 @@ fn side_name(side: &str) -> &'static str {
     }
 }
 
+/// The same, short, under its picture
+fn side_short(side: &str) -> &'static str {
+    match side {
+        "down" => t("Level", "Bằng"),
+        "up" => t("Upside down", "Lật ngửa"),
+        "left" => t("Left side down", "Cạnh trái xuống"),
+        "right" => t("Right side down", "Cạnh phải xuống"),
+        "front" => t("Nose down", "Mũi xuống"),
+        "back" => t("Tail down", "Đuôi xuống"),
+        _ => "?",
+    }
+}
+
+/// Where a side of the six stands in a calibration
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SideState {
+    Done,
+    Measuring,
+    /// the one the words above it ask for
+    Next,
+    ToDo,
+    Off,
+}
+
+/// One of the six sides as a picture: the aircraft as it should rest on the ground line - seen
+/// from its right side for level, upside down, nose down and tail down; from behind (its left on
+/// the left) for a side down - the nose red, the propellers on its top in blue; framed by how far
+/// that side is (green done, amber the one to do now). `spin`: the compass's, held so and turned
+/// round about the vertical (a ring with an arrow round it), not kept still as for the accelerometer
+fn side_card(ui: &mut egui::Ui, side: &str, st: SideState, spin: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(116.0, 122.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    let card = rect.shrink(2.0);
+    let (edge, w) = match st {
+        SideState::Done => (th::GOOD, 2.0),
+        SideState::Measuring => (th::WARN, 3.0),
+        SideState::Next => (th::WARN, 2.0),
+        _ => (th::LINE, 1.0),
+    };
+    p.rect_filled(card, 8.0, th::PANEL);
+    p.rect_stroke(card, 8.0, Stroke::new(w, edge), egui::StrokeKind::Inside);
+    let ground = card.top() + 76.0;
+    p.line_segment([pos2(card.left() + 10.0, ground), pos2(card.right() - 10.0, ground)], Stroke::new(1.5, th::DIM));
+    for i in 0..6 {
+        let x = card.left() + 20.0 + i as f32 * 15.0;
+        p.line_segment([pos2(x, ground + 1.0), pos2(x - 6.0, ground + 7.0)], Stroke::new(1.0, th::LINE));
+    }
+    // (seen from behind, upside down, turned clockwise on the screen in degrees)
+    let (rear, flip, turn) = match side {
+        "up" => (false, true, 0.0f32),
+        "front" => (false, false, 90.0),
+        "back" => (false, false, -90.0),
+        "left" => (true, false, -90.0),
+        "right" => (true, false, 90.0),
+        _ => (false, false, 0.0),
+    };
+    let body = if st == SideState::Done { th::GOOD.gamma_multiply(0.8) } else { th::TXT };
+    let prop = Stroke::new(2.5, th::CYAN);
+    let thin = Stroke::new(2.0, body);
+    // the aircraft in its own frame (x to its nose, or to its right seen from behind; y down)
+    let mut polys: Vec<(Vec<Vec2>, Color32)> = Vec::new();
+    let mut lines: Vec<(Vec2, Vec2, Stroke)> = Vec::new();
+    let mut marks: Vec<(Vec2, &str)> = Vec::new();
+    let rect4 = |x0: f32, y0: f32, x1: f32, y1: f32| vec![vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)];
+    if rear {
+        polys.push((rect4(-7.0, -5.0, 7.0, 5.0), body));
+        lines.push((vec2(-25.0, 0.0), vec2(25.0, 0.0), thin));
+        for x in [-25.0f32, 25.0] {
+            polys.push((rect4(x - 2.5, -8.0, x + 2.5, -1.0), body));
+            lines.push((vec2(x - 11.0, -9.5), vec2(x + 11.0, -9.5), prop));
+        }
+        lines.push((vec2(-6.0, 5.0), vec2(-9.0, 13.0), thin));
+        lines.push((vec2(6.0, 5.0), vec2(9.0, 13.0), thin));
+        marks.push((vec2(-25.0, 0.0), t("L", "T")));
+        marks.push((vec2(25.0, 0.0), t("R", "P")));
+    } else {
+        polys.push((rect4(-21.0, -4.0, 19.0, 4.0), body));
+        polys.push((vec![vec2(19.0, -6.0), vec2(29.0, 0.0), vec2(19.0, 6.0)], th::BAD));
+        for x in [-15.0f32, 13.0] {
+            polys.push((rect4(x - 2.5, -9.0, x + 2.5, -4.0), body));
+            lines.push((vec2(x - 11.0, -10.5), vec2(x + 11.0, -10.5), prop));
+        }
+        lines.push((vec2(-11.0, 4.0), vec2(-14.0, 12.0), thin));
+        lines.push((vec2(9.0, 4.0), vec2(12.0, 12.0), thin));
+    }
+    let (sn, cs) = turn.to_radians().sin_cos();
+    let tf = |q: Vec2| {
+        let q = if flip { vec2(q.x, -q.y) } else { q };
+        vec2(q.x * cs - q.y * sn, q.x * sn + q.y * cs)
+    };
+    // resting on the ground line, in the middle of the card
+    let (mut x0, mut x1, mut y1) = (f32::MAX, f32::MIN, f32::MIN);
+    for q in polys.iter().flat_map(|(v, _)| v.iter().copied()).chain(lines.iter().flat_map(|l| [l.0, l.1])).map(tf) {
+        x0 = x0.min(q.x);
+        x1 = x1.max(q.x);
+        y1 = y1.max(q.y);
+    }
+    let o = pos2(card.center().x - (x0 + x1) / 2.0, ground - 1.5 - y1);
+    for (v, col) in polys {
+        p.add(egui::Shape::convex_polygon(v.into_iter().map(|q| o + tf(q)).collect(), col, Stroke::NONE));
+    }
+    for (a, b, sk) in lines {
+        p.line_segment([o + tf(a), o + tf(b)], sk);
+    }
+    // the compass: a flat ring (a level circle seen from the side) round the aircraft's middle,
+    // its arrow showing the way round
+    if spin && st != SideState::Done && st != SideState::Off {
+        let c = pos2(card.center().x, o.y + (y1 - 1.5) / 2.0 - 2.0);
+        let (rx, ry) = (44.0f32, 9.0f32);
+        let col = if st == SideState::ToDo { th::DIM } else { th::WARN };
+        let n = 28;
+        let pts: Vec<Pos2> = (0..=n)
+            .map(|i| {
+                let a = 0.25 * std::f32::consts::PI + i as f32 / n as f32 * 1.6 * std::f32::consts::PI;
+                pos2(c.x + rx * a.cos(), c.y + ry * a.sin())
+            })
+            .collect();
+        let tip = pts[n];
+        let before = pts[n - 2];
+        p.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
+        let d = (tip - before).normalized();
+        let side_v = vec2(-d.y, d.x);
+        p.add(egui::Shape::convex_polygon(vec![tip + d * 7.0, tip + side_v * 4.5, tip - side_v * 4.5], col, Stroke::NONE));
+    }
+    // the arms' letters beside their motors, on the side away from the propellers
+    for (q, m) in marks {
+        p.text(o + tf(q) + vec2(if turn < 0.0 { 14.0 } else { -14.0 }, 0.0), Align2::CENTER_CENTER, m, FontId::proportional(12.0), th::DIM);
+    }
+    p.text(pos2(card.center().x, ground + 18.0), Align2::CENTER_CENTER, side_short(side), FontId::proportional(13.0), th::TXT);
+    let (word, col) = match st {
+        SideState::Done => (t("done", "xong"), th::GOOD),
+        SideState::Measuring if spin => (t("turn it round and round", "xoay vòng tròn"), th::WARN),
+        SideState::Measuring => (t("measuring - keep still", "đang đo - giữ yên"), th::WARN),
+        SideState::Next if spin => (t("hold it so, turn it", "cầm như hình, xoay"), th::WARN),
+        SideState::Next => (t("put it so", "đặt như hình"), th::WARN),
+        SideState::ToDo => (t("to do", "chưa"), th::DIM),
+        SideState::Off => ("", th::DIM),
+    };
+    p.text(pos2(card.center().x, ground + 34.0), Align2::CENTER_CENTER, word, FontId::proportional(11.5), col);
+}
+
+/// A gamepad's flight buttons as they stand (a PS4's): held a second as the screen's buttons are -
+/// PS take off, the touchpad (its biggest button) land, OPTIONS return home - and SHARE pressed,
+/// hover. (Its face buttons and D-pad are sticks, see gamepad.)
+#[derive(Clone, Copy, Default)]
+struct PadButtons {
+    takeoff: bool,
+    land: bool,
+    home: bool,
+    hover: bool,
+}
+
+/// A PlayStation button, drawn as on the pad (the font has no such signs; SHARE and OPTIONS are
+/// words on it too)
+#[derive(Clone, Copy)]
+enum PadIcon {
+    Triangle,
+    Circle,
+    Square,
+    Cross,
+    Ps,
+    Touchpad,
+    Options,
+    Share,
+}
+
+/// A held button moves its stick this far (before the app's expo and the flight controller's dead
+/// band and expo: about a third of the mode's speed comes out)
+const BTN_STICK: f32 = 0.7;
+
+/// What a big button says on its second line besides "hold": nothing, a key, or a pad button
+#[derive(Clone, Copy)]
+enum Hint<'a> {
+    None,
+    Text(&'a str),
+    Pad(PadIcon),
+}
+
+/// A pad button's sign from `x0` on the line at `y`, `r` the face signs' half size: its width
+/// (drawn only when `draw`)
+fn pad_icon(p: &egui::Painter, x0: f32, y: f32, r: f32, icon: PadIcon, draw: bool) -> f32 {
+    let word = |w: &str| {
+        let g = p.layout_no_wrap(w.to_string(), FontId::proportional(9.5), Color32::from_white_alpha(220));
+        let width = g.size().x;
+        if draw {
+            p.galley(pos2(x0, y - g.size().y / 2.0), g, Color32::from_white_alpha(220));
+        }
+        width
+    };
+    match icon {
+        PadIcon::Ps => return word("PS"),
+        PadIcon::Options => return word("OPTIONS"),
+        PadIcon::Share => return word("SHARE"),
+        PadIcon::Touchpad => {
+            if draw {
+                let rr = Rect::from_min_size(pos2(x0, y - r * 0.9), vec2(r * 3.4, r * 1.8));
+                p.rect_stroke(rr, 2.5, Stroke::new(1.6, Color32::from_white_alpha(220)), egui::StrokeKind::Middle);
+            }
+            return r * 3.4;
+        }
+        _ => {}
+    }
+    if !draw {
+        return 2.0 * r;
+    }
+    let c = pos2(x0 + r, y);
+    let w = 1.8;
+    match icon {
+        PadIcon::Triangle => {
+            let col = Color32::from_rgb(70, 220, 170);
+            let pts = vec![c + vec2(0.0, -r), c + vec2(r * 0.95, r * 0.7), c + vec2(-r * 0.95, r * 0.7)];
+            p.add(egui::Shape::closed_line(pts, Stroke::new(w, col)));
+        }
+        PadIcon::Circle => {
+            p.circle_stroke(c, r * 0.9, Stroke::new(w, Color32::from_rgb(255, 105, 105)));
+        }
+        PadIcon::Square => {
+            let rr = Rect::from_center_size(c, vec2(r * 1.6, r * 1.6));
+            p.rect_stroke(rr, 0.0, Stroke::new(w, Color32::from_rgb(235, 140, 215)), egui::StrokeKind::Middle);
+        }
+        PadIcon::Cross => {
+            let col = Color32::from_rgb(120, 170, 255);
+            let k = r * 0.8;
+            p.line_segment([c + vec2(-k, -k), c + vec2(k, k)], Stroke::new(w, col));
+            p.line_segment([c + vec2(-k, k), c + vec2(k, -k)], Stroke::new(w, col));
+        }
+        _ => {}
+    }
+    2.0 * r
+}
+
+/// Under the on-screen sticks, what on the pad moves them too: the D-pad (left), the face buttons
+/// in their diamond (right), each centred at `c`
+fn dpad_icon(p: &egui::Painter, c: Pos2) {
+    let col = Color32::from_white_alpha(200);
+    for d in [vec2(0.0, -1.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(1.0, 0.0)] {
+        let arm = Rect::from_center_size(c + d * 6.0, if d.x == 0.0 { vec2(5.0, 7.0) } else { vec2(7.0, 5.0) });
+        p.rect_stroke(arm, 1.0, Stroke::new(1.3, col), egui::StrokeKind::Middle);
+    }
+}
+
+fn face_icons(p: &egui::Painter, c: Pos2) {
+    let r = 4.0;
+    for (d, i) in [(vec2(0.0, -9.0), PadIcon::Triangle), (vec2(9.0, 0.0), PadIcon::Circle), (vec2(0.0, 9.0), PadIcon::Cross), (vec2(-9.0, 0.0), PadIcon::Square)] {
+        let at = c + d;
+        pad_icon(p, at.x - r, at.y, r, i, true);
+    }
+}
+
+/// How often a calibration step asked is sent again until the flight controller starts it
+const CAL_RESEND: Duration = Duration::from_millis(1500);
+
 /// How the board sits on the frame (SENS_BOARD_ROT): turned about the vertical, or upside down
 const BOARD_ROT: [(&str, &str, f64); 5] = [("0°", "0°", 0.0), ("90°", "90°", 2.0), ("180°", "180°", 4.0), ("270°", "270°", 6.0), ("Upside down", "Lật ngược", 8.0)];
 
@@ -686,6 +938,8 @@ fn link_thread(link: Arc<Link>, cmds: Receiver<Cmd>, up: String, down: String) {
     // parameters to set whose type PX4 has not told yet: asked for first, set once it tells
     // (PX4 takes PARAM_SET's four bytes as its own type: an integer's bits as a float are junk)
     let mut pending_sets: Vec<(&'static str, f64, Instant)> = Vec::new();
+    // a long STATUSTEXT's chunks so far, by its id
+    let mut text_parts: std::collections::HashMap<u16, String> = std::collections::HashMap::new();
     let (mut n_msgs, mut t_rate) = (0u32, t0);
     // Stabilized: the throttle is the thrust, not "hold the height", so a stick that springs back
     // to the middle would leave half thrust on (and PX4 refuses to arm: "high throttle"). There
@@ -717,6 +971,23 @@ fn link_thread(link: Arc<Link>, cmds: Receiver<Cmd>, up: String, down: String) {
                     }
                     continue;
                 }
+                // a long STATUSTEXT in chunks (PX4: "Arming denied: Resolve system health
+                // failures first" came as two, the screen showed its tail "t"): whole once its
+                // last, shorter chunk has come
+                let m = match m {
+                    Msg::Text { severity, text, id } if id != 0 => {
+                        if text_parts.len() > 8 {
+                            text_parts.clear();
+                        }
+                        let part: &mut String = text_parts.entry(id).or_default();
+                        part.push_str(&text);
+                        if text.len() >= 50 {
+                            continue;
+                        }
+                        Msg::Text { severity, text: text_parts.remove(&id).unwrap_or_default(), id: 0 }
+                    }
+                    m => m,
+                };
                 if let Msg::Text { ref text, .. } = m {
                     log(&format!("autopilot: {text}"));
                 }
@@ -815,8 +1086,13 @@ fn link_thread(link: Arc<Link>, cmds: Receiver<Cmd>, up: String, down: String) {
             let v = link.veh.lock().unwrap();
             (v.armed, v.flight_mode(), v.best_mode())
         };
+        let heard_mode = link.veh.lock().unwrap().main_mode != 0;
         let flyable = |m: Option<FlightMode>| matches!(m, Some(FlightMode::Position | FlightMode::Altitude | FlightMode::Stabilized));
-        let want = if auto && flyable(cur) && flyable(best) && cur != best { best } else { None };
+        // (also on the ground in one of the autopilot's own modes - Hold or Land after a
+        // landing, which wants a position and so refuses to arm indoors - unless a takeoff is
+        // on its way: ArduPilot's goes through GUIDED before it arms)
+        let parked = !armed && cur.is_none() && heard_mode && arm_at.is_none() && takeoff_at.is_none();
+        let want = if auto && (flyable(cur) || parked) && flyable(best) && cur != best { best } else { None };
         if let Some(b) = want {
             if !armed && now - t_auto >= Duration::from_secs(2) {
                 t_auto = now;
@@ -949,6 +1225,14 @@ pub struct Pilot {
     tex_ver: u64,
     gilrs: Option<gilrs::Gilrs>,
     pad_name: Option<String>,
+    /// a gamepad's L1 and R1 held together (the emergency stop sent once for it)
+    pad_kill: bool,
+    /// its flight buttons now, SHARE a frame before (hover goes on the press), and its touchpad
+    /// held (a PS4's touchpad click has no name in the pad's map: its press and release come as
+    /// an unnamed button)
+    pad_btn: PadButtons,
+    pad_share: bool,
+    pad_touch: bool,
     /// an RC transmitter plugged in (rc.rs), when it was last looked for, and what it read last
     /// (roll, pitch, throttle, yaw: Settings > Control shows them)
     rc: Option<rc::Rc>,
@@ -970,6 +1254,10 @@ pub struct Pilot {
     cal_queue: Vec<CalKind>,
     cal_seq: u32,
     cal_asked: Option<(CalKind, Instant)>,
+    /// when the step asked is (re)sent: PX4 turns a calibration down while it is still closing
+    /// the one before (its "done" line comes out before its worker is free), so the next step
+    /// goes a moment after that line, and again until its first line comes
+    cal_send_at: Option<Instant>,
     cal_note: Option<(bool, String)>,
     thr_low_since: Option<Instant>,
     thr_up_since_arm: bool,
@@ -1027,6 +1315,22 @@ pub struct Pilot {
     air_session: u32,
     air_n: u32,
     air_asked: std::collections::HashMap<&'static str, (String, Instant)>,
+    /// the aircraft camera's login as typed, sent up when Use is pressed (`camlogin`)
+    cam_user: String,
+    cam_pass: String,
+}
+
+/// A user name or password as one word for the link (`!set` takes a value without spaces).
+fn pct(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b) {
+            o.push(b as char);
+        } else {
+            o.push_str(&format!("%{b:02X}"));
+        }
+    }
+    o
 }
 
 impl Pilot {
@@ -1035,7 +1339,7 @@ impl Pilot {
     fn air_set(&mut self, key: &'static str, val: String) {
         self.air_n += 1;
         nyx_rx::send_text(&self.rx, &format!("!set {}:{} {key} {val}", self.air_session, self.air_n));
-        log(&format!("pilot: aircraft {key} = {val} asked"));
+        log(&format!("pilot: aircraft {key} = {} asked", if key == "camlogin" { "(hidden)" } else { val.as_str() }));
         self.air_asked.insert(key, (val, Instant::now()));
     }
 
@@ -1151,6 +1455,10 @@ impl Pilot {
             tex_ver: u64::MAX,
             gilrs,
             pad_name: None,
+            pad_kill: false,
+            pad_btn: PadButtons::default(),
+            pad_share: false,
+            pad_touch: false,
             rc: None,
             rc_seek: Instant::now() - Duration::from_secs(10),
             rc_seen: None,
@@ -1162,6 +1470,7 @@ impl Pilot {
             cal_queue: Vec::new(),
             cal_seq: 0,
             cal_asked: None,
+            cal_send_at: None,
             cal_note: None,
             thr_low_since: None,
             thr_up_since_arm: false,
@@ -1207,6 +1516,8 @@ impl Pilot {
             air_session: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| (d.as_millis() % 1_000_000_000) as u32),
             air_n: 0,
             air_asked: std::collections::HashMap::new(),
+            cam_user: "admin".into(),
+            cam_pass: String::new(),
         }
     }
 
@@ -1667,7 +1978,17 @@ impl Pilot {
                 return;
             }
             match &self.pad_name {
-                Some(n) => th::kv(ui, t("Connected", "Đã nối"), n),
+                Some(n) => {
+                    th::kv(ui, t("Connected", "Đã nối"), n);
+                    th::kv(ui, t("Emergency stop", "Dừng khẩn cấp"), t("L1 + R1 together: the motors off at once", "L1 + R1 cùng lúc: tắt motor ngay"));
+                    th::kv(ui, t("Take off", "Cất cánh"), t("PS, held a second", "PS, giữ một giây"));
+                    th::kv(ui, t("Land", "Hạ cánh"), t("touchpad (press it), held a second", "touchpad (bấm xuống), giữ một giây"));
+                    th::kv(ui, t("Return home", "Về nhà"), t("OPTIONS, held a second", "OPTIONS, giữ một giây"));
+                    th::kv(ui, t("Hover", "Đứng yên"), "SHARE");
+                    th::kv(ui, t("Slow, as the left stick", "Chậm, như cần trái"), t("D-pad", "D-pad (phím mũi tên)"));
+                    th::kv(ui, t("Slow, as the right stick", "Chậm, như cần phải"), t("triangle, cross, square, circle", "tam giác, X, vuông, tròn"));
+                    th::kv(ui, t("Up, down (as squeezed)", "Lên, xuống (theo lực bóp)"), "R2, L2");
+                }
                 None => {
                     ui.label(
                         egui::RichText::new(t(
@@ -1689,6 +2010,8 @@ impl Pilot {
                 ("R", "return home (held a second)", "về nhà (giữ một giây)"),
                 ("H", "stop and hover", "dừng, đứng yên"),
                 ("Space", "emergency stop (when shown)", "dừng khẩn cấp (khi nút đang hiện)"),
+                ("L1 + R1", "gamepad: emergency stop, always", "tay cầm: dừng khẩn cấp, lúc nào cũng có"),
+                ("Gamepad", "PS take off, touchpad land, OPTIONS return home (each held a second), SHARE hover; D-pad and face buttons the sticks slowly, R2/L2 up/down", "PS cất cánh, touchpad hạ cánh, OPTIONS về nhà (giữ một giây), SHARE đứng yên; D-pad và tam giác/X/vuông/tròn như cần (chậm), R2/L2 lên/xuống"),
                 ("1 2 3", "Cine, Normal, Sport", "Cine, Normal, Sport"),
                 ("4 5", "Altitude (ATTI), Stabilized", "giữ độ cao (ATTI), cân bằng"),
                 ("M", "map large or small", "phóng to hoặc thu nhỏ bản đồ"),
@@ -1756,6 +2079,34 @@ impl Pilot {
             // a camera passed through as it sends (an IP camera): its own size and rate, and the
             // bitrate it is taken to; else the aircraft encodes the picture itself
             let pass = self.air_value(&air, "pass").as_deref() == Some("1") && src == "rtsp";
+            // the aircraft board's camera port (a camera plugged into its Ethernet is found and set
+            // up there): what it is doing, and the camera's login when the camera refuses the ones
+            // the board tries
+            let port = air.get("air_camport").cloned().unwrap_or_default();
+            if src == "rtsp" && !port.is_empty() {
+                let (what, col) = match port.as_str() {
+                    "ready" => (t("Found and set up", "Đã nhận và cài xong"), th::GOOD),
+                    "setup" => (t("Setting the camera up...", "Đang cài camera..."), th::TXT),
+                    "none" => (t("No camera on the Ethernet port", "Chưa thấy camera ở cổng Ethernet"), th::WARN),
+                    "login" => (t("The camera needs its user name and password", "Camera cần tên đăng nhập và mật khẩu"), th::WARN),
+                    _ => (t("This camera does not set itself up", "Camera này không tự cài được"), th::BAD),
+                };
+                th::row(ui, t("Camera", "Camera"), |ui| {
+                    ui.label(egui::RichText::new(what).color(col));
+                });
+                if port == "login" {
+                    th::row(ui, t("User name", "Tên đăng nhập"), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.cam_user).desired_width(180.0));
+                    });
+                    th::row(ui, t("Password", "Mật khẩu"), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.cam_pass).password(true).desired_width(180.0));
+                        if ui.add(egui::Button::new(t("Use", "Dùng")).min_size(vec2(80.0, 32.0))).clicked() && !self.cam_user.is_empty() {
+                            let v = format!("{}:{}", pct(&self.cam_user), pct(&self.cam_pass));
+                            self.air_set("camlogin", v);
+                        }
+                    });
+                }
+            }
             if pass {
                 let cam = |k: &str| air.get(k).cloned().unwrap_or_else(|| "—".into());
                 th::kv(ui, t("Camera picture", "Hình của camera"), &format!("{}  ·  {} fps  ·  {} kbit/s", cam("air_cam_res").replace('x', " × "), cam("air_cam_fps"), cam("air_cam_kbps")));
@@ -1885,7 +2236,8 @@ impl Pilot {
     /// fill grows meanwhile), by the pointer or by its key; `hold` false: a touch acts (the stop).
     /// True when it acts.
     #[allow(clippy::too_many_arguments)]
-    fn big_button(&mut self, ui: &egui::Ui, r: Rect, id: &'static str, label: &str, fill: Color32, hold: bool, key_down: bool, key_pressed: bool) -> bool {
+    /// `hint`: what does it besides a touch (the gamepad's button, or the key), on its second line
+    fn big_button(&mut self, ui: &egui::Ui, r: Rect, id: &'static str, label: &str, hint: Hint, fill: Color32, hold: bool, key_down: bool, key_pressed: bool) -> bool {
         let resp = ui.interact(r, ui.id().with(id), egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
         let p = ui.painter();
         let down = resp.is_pointer_button_down_on() || key_down;
@@ -1902,9 +2254,29 @@ impl Pilot {
         } else {
             resp.clicked() || key_pressed
         };
-        p.text(r.center() - vec2(0.0, if hold { 6.0 } else { 0.0 }), Align2::CENTER_CENTER, label, FontId::proportional(16.0), WHITE);
-        if hold {
-            p.text(r.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, t("hold", "giữ"), FontId::proportional(10.5), Color32::from_white_alpha(170));
+        // the second line: "hold" and/or the key in words, then the pad button drawn after them
+        let (words, icon) = match hint {
+            Hint::None => (if hold { t("hold", "giữ").to_string() } else { String::new() }, None),
+            Hint::Text(k) if hold => (format!("{} · {k}", t("hold", "giữ")), None),
+            Hint::Text(k) => (k.to_string(), None),
+            Hint::Pad(i) if hold => (format!("{} ·", t("hold", "giữ")), Some(i)),
+            Hint::Pad(i) => (String::new(), Some(i)),
+        };
+        let two = !words.is_empty() || icon.is_some();
+        p.text(r.center() - vec2(0.0, if two { 6.0 } else { 0.0 }), Align2::CENTER_CENTER, label, FontId::proportional(16.0), WHITE);
+        if two {
+            let y = r.bottom() - 11.0;
+            let dim = Color32::from_white_alpha(170);
+            let g = p.layout_no_wrap(words, FontId::proportional(10.5), dim);
+            let (ir, gap) = (5.5, if g.size().x > 0.0 { 5.0 } else { 0.0 });
+            let iw = icon.map_or(0.0, |i| pad_icon(p, 0.0, y, ir, i, false));
+            let total = g.size().x + if icon.is_some() { gap + iw } else { 0.0 };
+            let x0 = r.center().x - total / 2.0;
+            let gw = g.size().x;
+            p.galley(pos2(x0, y - g.size().y / 2.0), g, dim);
+            if let Some(i) = icon {
+                pad_icon(p, x0 + gw + gap, y, ir, i, true);
+            }
         }
         fired
     }
@@ -1981,6 +2353,7 @@ impl Pilot {
     /// The gamepad (or RC transmitter) in mode 2: left stick yaw and throttle, right stick roll
     /// and pitch
     fn gamepad(&mut self) -> Option<Sticks> {
+        self.pad_btn = PadButtons::default();
         // an RC transmitter first (read as it is held, rc.rs); looked for every 2 s while none
         if self.rc.is_none() && self.rc_seek.elapsed() >= Duration::from_secs(2) {
             self.rc_seek = Instant::now();
@@ -2014,9 +2387,50 @@ impl Pilot {
         }
         self.link.rc_thr.store(false, Ordering::Relaxed);
         let g = self.gilrs.as_mut()?;
-        while g.next_event().is_some() {}
+        while let Some(e) = g.next_event() {
+            match e.event {
+                gilrs::EventType::ButtonPressed(b, code) => {
+                    log(&format!("pilot: gamepad button {b:?} ({code})"));
+                    if matches!(b, gilrs::Button::Unknown | gilrs::Button::C | gilrs::Button::Z) {
+                        self.pad_touch = true;
+                    }
+                }
+                gilrs::EventType::ButtonReleased(gilrs::Button::Unknown | gilrs::Button::C | gilrs::Button::Z, _) => self.pad_touch = false,
+                gilrs::EventType::Disconnected => self.pad_touch = false,
+                _ => {}
+            }
+        }
         let (_, pad) = g.gamepads().find(|(_, p)| p.is_connected())?;
         self.pad_name = Some(pad.name().to_string());
+        // the emergency stop: L1 and R1 together (two fingers at once, not a slip), whether
+        // the one on the screen is shown or not - the motors off at once, sent on the press
+        let kill = pad.is_pressed(gilrs::Button::LeftTrigger) && pad.is_pressed(gilrs::Button::RightTrigger);
+        if kill && !self.pad_kill {
+            log("pilot: gamepad L1 + R1 - emergency stop");
+            let _ = self.cmds.send(Cmd::Kill);
+        }
+        self.pad_kill = kill;
+        use gilrs::Button;
+        let share = pad.is_pressed(Button::Select);
+        self.pad_btn = PadButtons {
+            takeoff: pad.is_pressed(Button::Mode),
+            land: self.pad_touch,
+            home: pad.is_pressed(Button::Start),
+            hover: share && !self.pad_share,
+        };
+        self.pad_share = share;
+        // the D-pad as the left stick and the face buttons as the right one, held = the stick
+        // that far (BTN_STICK); the triggers the throttle as they are squeezed (R2 up, L2 down: a
+        // long travel, finer than a short stick); whichever goes further wins on each axis
+        let btn = |plus: Button, minus: Button| {
+            (if pad.is_pressed(plus) { BTN_STICK } else { 0.0 }) - (if pad.is_pressed(minus) { BTN_STICK } else { 0.0 })
+        };
+        let dpad = vec2(btn(Button::DPadRight, Button::DPadLeft), btn(Button::DPadUp, Button::DPadDown));
+        let face = vec2(btn(Button::East, Button::West), btn(Button::North, Button::South));
+        let trig = |b: Button| pad.button_data(b).map_or(0.0, |d| d.value());
+        let squeeze = trig(Button::RightTrigger2) - trig(Button::LeftTrigger2);
+        let squeeze = if squeeze.abs() < 0.05 { 0.0 } else { squeeze };
+        let further = |a: f32, b: f32| if b.abs() > a.abs() { b } else { a };
         use gilrs::Axis;
         // a gamepad's short sticks shake a little under the thumb: a dead band (the rest scaled
         // back to full) and a 60 ms smoothing, so what goes up - the throttle a rate in
@@ -2025,11 +2439,16 @@ impl Pilot {
             let a = v.abs();
             if a < PAD_DZ { 0.0 } else { v.signum() * ((a - PAD_DZ) / (1.0 - PAD_DZ)).min(1.0) }
         };
-        let raw = sticks_of(
-            self.cfg.stick_mode,
+        let (l, r) = (
             vec2(dz(pad.value(Axis::LeftStickX)), dz(pad.value(Axis::LeftStickY))),
             vec2(dz(pad.value(Axis::RightStickX)), dz(pad.value(Axis::RightStickY))),
         );
+        let mut raw = sticks_of(
+            self.cfg.stick_mode,
+            vec2(further(l.x, dpad.x), further(l.y, dpad.y)),
+            vec2(further(r.x, face.x), further(r.y, face.y)),
+        );
+        raw.throttle = further(raw.throttle, squeeze);
         let now = Instant::now();
         let dt = (now - self.pad_t).as_secs_f32().min(0.1);
         self.pad_t = now;
@@ -2505,22 +2924,27 @@ impl eframe::App for Pilot {
             let at = |i: usize, gap: f32| Rect::from_min_size(pos2(col_x, bar.bottom() + 16.0 + i as f32 * (bh + 10.0) + gap), vec2(bw, bh));
             let blue = Color32::from_rgb(36, 104, 196);
             let dark = Color32::from_rgba_unmultiplied(28, 39, 51, 235);
+            // (a gamepad's buttons as the keys: PS, the touchpad, OPTIONS held, SHARE pressed; each
+            // button says which - the gamepad's when one is in, else the key)
+            let pb = self.pad_btn;
+            let pad = self.rc_seen.is_none() && self.pad_name.is_some();
+            let hint = |icon: PadIcon, key: &'static str| if pad { Hint::Pad(icon) } else { Hint::Text(key) };
             if v.in_air() {
-                if self.big_button(ui, at(0, 0.0), "land", t("Land", "Hạ cánh"), dark, true, key_down(egui::Key::L), false) {
+                if self.big_button(ui, at(0, 0.0), "land", t("Land", "Hạ cánh"), hint(PadIcon::Touchpad, "L"), dark, true, key_down(egui::Key::L) || pb.land, false) {
                     let _ = self.cmds.send(Cmd::Land);
                 }
-            } else if self.big_button(ui, at(0, 0.0), "takeoff", t("Take off", "Cất cánh"), blue, true, key_down(egui::Key::T), false) {
+            } else if self.big_button(ui, at(0, 0.0), "takeoff", t("Take off", "Cất cánh"), hint(PadIcon::Ps, "T"), blue, true, key_down(egui::Key::T) || pb.takeoff, false) {
                 let _ = self.cmds.send(Cmd::Takeoff(self.takeoff_h));
             }
-            if self.big_button(ui, at(1, 0.0), "return", t("Return home", "Về nhà"), dark, true, key_down(egui::Key::R), false) {
+            if self.big_button(ui, at(1, 0.0), "return", t("Return home", "Về nhà"), hint(PadIcon::Options, "R"), dark, true, key_down(egui::Key::R) || pb.home, false) {
                 let _ = self.cmds.send(Cmd::Return);
             }
-            let stop_key = !typing && ctx.input(|i| i.key_pressed(egui::Key::H));
-            if self.big_button(ui, at(2, 0.0), "stop", t("Hover", "Đứng yên"), dark, false, false, stop_key) {
+            let stop_key = (!typing && ctx.input(|i| i.key_pressed(egui::Key::H))) || pb.hover;
+            if self.big_button(ui, at(2, 0.0), "stop", t("Hover", "Đứng yên"), hint(PadIcon::Share, "H"), dark, false, false, stop_key) {
                 let _ = self.cmds.send(Cmd::Mode(FlightMode::Hold));
             }
             let (ml, mf) = if v.armed { (t("Motors off", "Tắt motor"), Color32::from_rgb(140, 40, 36)) } else { (t("Motors on", "Bật motor"), dark) };
-            if self.big_button(ui, at(3, 14.0), "motors", ml, mf, true, false, false) {
+            if self.big_button(ui, at(3, 14.0), "motors", ml, Hint::None, mf, true, false, false) {
                 // an RC transmitter's throttle up: not armed (it would leap) - at the bottom in a
                 // manual-thrust mode (the middle, its stick springing back: the held throttle
                 // starts at 0 and the stick moves it), at most the middle (hold the height) in the
@@ -2541,9 +2965,20 @@ impl eframe::App for Pilot {
             if self.cfg.estop {
                 let kill_key = !typing && ctx.input(|i| i.key_pressed(egui::Key::Space));
                 let r = Rect::from_min_size(at(4, 30.0).min, vec2(bw, bh + 14.0));
-                if self.big_button(ui, r, "estop", t("EMERGENCY\nSTOP", "DỪNG\nKHẨN CẤP"), Color32::from_rgb(205, 28, 28), false, false, kill_key) {
+                if self.big_button(ui, r, "estop", t("EMERGENCY\nSTOP", "DỪNG\nKHẨN CẤP"), Hint::Text(if pad { "L1 + R1" } else { "Space" }), Color32::from_rgb(205, 28, 28), false, false, kill_key) {
                     let _ = self.cmds.send(Cmd::Kill);
                 }
+            } else if pad {
+                // the button hidden, the gamepad's stop still there: said where it would be
+                let r = at(4, 22.0);
+                shadow_text(
+                    &p,
+                    pos2(r.left() + 4.0, r.top() + 8.0),
+                    Align2::LEFT_CENTER,
+                    t("L1 + R1: emergency stop", "L1 + R1: dừng khẩn cấp"),
+                    FontId::proportional(12.5),
+                    Color32::from_rgb(255, 120, 110),
+                );
             }
 
             // the sticks (what each moves: the stick mode, Settings > Control); smaller on a
@@ -2588,6 +3023,12 @@ impl eframe::App for Pilot {
             }
             stick(ui, lc, sr, &mut self.left, self.shown.0, "L", self.fingers[0].is_some());
             name(lc, ln);
+            // a gamepad in: what on it moves each stick too
+            if self.rc_seen.is_none() && self.pad_name.is_some() {
+                let wide = |s: &str| p.layout_no_wrap(s.to_string(), FontId::proportional(12.0), MUTED).size().x;
+                dpad_icon(&p, lc + vec2(-wide(ln) / 2.0 - 18.0, sr + 14.0));
+                face_icons(&p, rc + vec2(-wide(rn) / 2.0 - 22.0, sr + 14.0));
+            }
             // Stabilized: the throttle held (it stays where the stick left it), over its stick
             if let Some(l) = *self.link.thr.lock().unwrap() {
                 let at = if self.cfg.stick_mode == 2 { lc } else { rc } - vec2(0.0, sr + 18.0);
@@ -2740,6 +3181,7 @@ impl Pilot {
         self.cal_queue = rest.to_vec();
         self.cal_note = None;
         self.cal_asked = Some((first, Instant::now()));
+        self.cal_send_at = Some(Instant::now() + CAL_RESEND);
         let _ = self.cmds.send(Cmd::Calibrate(Some(first)));
     }
 
@@ -2748,12 +3190,13 @@ impl Pilot {
             self.cal_seq = v.cal.seq;
             if v.cal.what.is_some() {
                 self.cal_asked = None;
+                self.cal_send_at = None;
             } else if let Some(r) = &v.cal.result {
                 match r {
                     Ok(_) if !self.cal_queue.is_empty() => {
                         let next = self.cal_queue.remove(0);
                         self.cal_asked = Some((next, Instant::now()));
-                        let _ = self.cmds.send(Cmd::Calibrate(Some(next)));
+                        self.cal_send_at = Some(Instant::now() + CAL_RESEND);
                     }
                     Ok(what) => {
                         self.cal_asked = None;
@@ -2767,9 +3210,17 @@ impl Pilot {
                 }
             }
         }
-        // asked, and nothing came back in 5 s: it was not taken (armed, busy, not PX4)
-        if self.cal_asked.is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(5)) {
+        if let (Some((k, _)), Some(at)) = (self.cal_asked, self.cal_send_at) {
+            if Instant::now() >= at {
+                self.cal_send_at = Some(Instant::now() + CAL_RESEND);
+                let _ = self.cmds.send(Cmd::Calibrate(Some(k)));
+            }
+        }
+        // asked, sent again and again, and nothing came back in 10 s: it was not taken (armed,
+        // not PX4)
+        if self.cal_asked.is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(10)) {
             self.cal_asked = None;
+            self.cal_send_at = None;
             self.cal_queue.clear();
             self.cal_note = Some((false, t("The flight controller did not start it (motors on, or another calibration running?)", "Bộ điều khiển bay không bắt đầu (motor đang bật, hoặc đang hiệu chuẩn khác?)").to_string()));
         }
@@ -2844,6 +3295,7 @@ impl Pilot {
                 if busy && ui.add(egui::Button::new(t("Cancel", "Huỷ")).min_size(vec2(100.0, 40.0))).clicked() {
                     self.cal_queue.clear();
                     self.cal_asked = None;
+                    self.cal_send_at = None;
                     let _ = self.cmds.send(Cmd::Calibrate(None));
                 }
             });
@@ -2877,19 +3329,38 @@ impl Pilot {
                 };
                 ui.label(egui::RichText::new(what_to_do).strong().color(th::WARN));
                 if matches!(kind, Some(CalKind::Accel | CalKind::Mag)) {
-                    let all = ["down", "up", "left", "right", "front", "back"];
-                    for side in all {
-                        let state = if v.cal.done_sides.iter().any(|d| d == side) {
-                            t("done", "xong")
-                        } else if v.cal.current.as_deref() == Some(side) {
-                            t("measuring", "đang đo")
-                        } else if v.cal.pending.iter().any(|p| p == side) {
-                            t("to do", "chưa")
+                    ui.label(
+                        egui::RichText::new(if kind == Some(CalKind::Mag) {
+                            t(
+                                "Any order. Hold it as a picture shows and turn it slowly round about the vertical, a full turn or more, till that picture turns green; then the next.",
+                                "Mặt nào trước cũng được. Cầm máy như một hình rồi xoay chậm quanh trục thẳng đứng, một vòng trở lên, tới khi hình đó viền xanh; rồi sang hình khác.",
+                            )
                         } else {
-                            "—"
-                        };
-                        th::kv(ui, side_name(side), state);
-                    }
+                            t(
+                                "Any order. Prop it against a box if it will not stand; from one side to the next within a minute and a half.",
+                                "Mặt nào trước cũng được. Không tự đứng được thì tựa vào hộp; chuyển sang mặt kế trong vòng một phút rưỡi.",
+                            )
+                        })
+                        .small()
+                        .color(th::DIM),
+                    );
+                    let all = ["down", "up", "left", "right", "front", "back"];
+                    ui.horizontal_wrapped(|ui| {
+                        for side in all {
+                            let st = if v.cal.done_sides.iter().any(|d| d == side) {
+                                SideState::Done
+                            } else if v.cal.current.as_deref() == Some(side) {
+                                SideState::Measuring
+                            } else if v.cal.current.is_none() && v.cal.pending.first().map(String::as_str) == Some(side) {
+                                SideState::Next
+                            } else if v.cal.pending.iter().any(|p| p == side) {
+                                SideState::ToDo
+                            } else {
+                                SideState::Off
+                            };
+                            side_card(ui, side, st, kind == Some(CalKind::Mag));
+                        }
+                    });
                 }
                 ui.label(egui::RichText::new(&v.cal.line).small().color(th::DIM));
             }
@@ -3039,7 +3510,7 @@ mod tests {
         let mut v = Vehicle::default();
         sim_flight(&mut v, 1.0, None);
         v.update(1, 1, &Msg::SysStatus { load: 0, voltage_mv: 16_000, remaining: 90, health: 0 });
-        v.update(1, 1, &Msg::Text { severity: 4, text: "Preflight Fail: Accel Sensor 0 missing".into() });
+        v.update(1, 1, &Msg::Text { severity: 4, text: "Preflight Fail: Accel Sensor 0 missing".into(), id: 0 });
         let (s, c) = flight_status(&v, true);
         assert!(s.contains("Accel Sensor 0 missing") && c == RED, "{s}");
         // (no satellites: no D, its local frame drifts)

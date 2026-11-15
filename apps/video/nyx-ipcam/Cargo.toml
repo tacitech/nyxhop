@@ -10,3 +10,7 @@ edition = "2024"
 [dependencies]
 nyx-common = { path = "../../../link/nyx-common", default-features = false }
 nyx-tx = { path = "../nyx-tx", default-features = false, features = ["rtsp-client", "onvif"] }
+
+# the camera port (camport.rs): SO_BINDTODEVICE for its DHCP server, a raw ARP socket
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

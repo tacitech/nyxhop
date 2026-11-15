@@ -408,7 +408,8 @@ fn random_bytes(n: usize) -> Vec<u8> {
 // ------------------------------------------------------------------ client --
 
 const NS: &str = "xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\" \
-xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" xmlns:tt=\"http://www.onvif.org/ver10/schema\"";
+xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" xmlns:tr2=\"http://www.onvif.org/ver20/media/wsdl\" \
+xmlns:tt=\"http://www.onvif.org/ver10/schema\"";
 
 /// The H.264 encoder configuration of one profile, kept as the camera wrote it so a change of the
 /// bitrate sends everything else back unchanged.
@@ -501,12 +502,17 @@ pub struct Camera {
     pub config: EncoderConfig,
     /// the bitrate limits the camera accepts (kbit/s), when it says
     pub range: Option<(u32, u32)>,
+    /// Media2 (ver20) when the camera has it: the bitrate is set there, with the configuration as
+    /// Media2 reads it. An XM camera's Media (ver10) says Main where Media2 says Baseline, and a
+    /// change written back through ver10 would carry that.
+    media2: String,
+    enc2: Option<Enc2>,
 }
 
 impl Camera {
-    /// Find the camera's media service and the profile whose stream is `rtsp_url` (the profile
-    /// with the same path and query, else the one of the same picture size, else the first).
-    pub fn connect(device_url: &str, user: &str, pass: &str, rtsp_url: &str, dims: (u32, u32)) -> Result<Camera, String> {
+    /// A camera to call, signed with its own clock: a WS-Security timestamp off by more than a few
+    /// seconds is refused, and a camera without NTP keeps whatever time it booted with.
+    fn session(device_url: &str, user: &str, pass: &str) -> Camera {
         let mut cam = Camera {
             media: device_url.to_string(),
             user: user.to_string(),
@@ -516,9 +522,10 @@ impl Camera {
             profile: String::new(),
             config: EncoderConfig::default(),
             range: None,
+            media2: String::new(),
+            enc2: None,
         };
-        // the camera's clock (no authentication needed): a WS-Security timestamp off by more than a
-        // few seconds is refused
+        // (no authentication needed for the clock)
         if let Ok(r) = cam.call(device_url, "http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", "<tds:GetSystemDateAndTime/>", false)
             && let Some(utc) = find(&r, "UTCDateTime")
         {
@@ -530,6 +537,13 @@ impl Camera {
                 cam.clock_offset = days_from_civil(y, mo, da) * 86_400 + h * 3600 + mi * 60 + se - unix_now();
             }
         }
+        cam
+    }
+
+    /// Find the camera's media service and the profile whose stream is `rtsp_url` (the profile
+    /// with the same path and query, else the one of the same picture size, else the first).
+    pub fn connect(device_url: &str, user: &str, pass: &str, rtsp_url: &str, dims: (u32, u32)) -> Result<Camera, String> {
+        let mut cam = Camera::session(device_url, user, pass);
         let caps = cam.call(
             device_url,
             "http://www.onvif.org/ver10/device/wsdl/GetCapabilities",
@@ -538,6 +552,16 @@ impl Camera {
         )?;
         if let Some(x) = find(&caps, "Media").and_then(|m| text(m, "XAddr")) {
             cam.media = same_host(device_url, &x);
+        }
+        if let Ok(r) = cam.call(
+            device_url,
+            "http://www.onvif.org/ver10/device/wsdl/GetServices",
+            "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>",
+            true,
+        ) && let Some((_, s)) = elements(&r, "Service").into_iter().find(|(_, s)| text(s, "Namespace").as_deref() == Some(MEDIA2))
+            && let Some(x) = text(s, "XAddr")
+        {
+            cam.media2 = same_host(device_url, &x);
         }
         let media = cam.media.clone();
         let profiles = cam.call(&media, "http://www.onvif.org/ver10/media/wsdl/GetProfiles", "<trt:GetProfiles/>", true)?;
@@ -595,6 +619,24 @@ impl Camera {
 
     /// Read the encoder configuration again (another client may have changed it).
     pub fn refresh(&mut self) -> Result<(), String> {
+        if !self.media2.is_empty() {
+            let m2 = self.media2.clone();
+            match self.call(&m2, &format!("{MEDIA2}/GetVideoEncoderConfigurations"), "<tr2:GetVideoEncoderConfigurations/>", true) {
+                Ok(r) => {
+                    if let Some(e) = Enc2::all(&r).into_iter().find(|e| e.token == self.config.token) {
+                        self.config.encoding = e.encoding.clone();
+                        (self.config.width, self.config.height) = (e.w, e.h);
+                        self.config.bitrate_kbps = e.bitrate.parse::<f32>().map_or(self.config.bitrate_kbps, |v| v as u32);
+                        self.enc2 = Some(e);
+                        return Ok(());
+                    }
+                    // (not the same tokens in both services: ver10 it is)
+                    self.media2.clear();
+                    self.enc2 = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         let body = format!(
             "<trt:GetVideoEncoderConfiguration><trt:ConfigurationToken>{}</trt:ConfigurationToken></trt:GetVideoEncoderConfiguration>",
             escape(&self.config.token)
@@ -612,6 +654,19 @@ impl Camera {
             Some((lo, hi)) => kbps.clamp(lo, hi.max(lo)),
             None => kbps,
         };
+        if let Some(mut e) = self.enc2.clone() {
+            e.bitrate = kbps.to_string();
+            let m2 = self.media2.clone();
+            self.call(
+                &m2,
+                &format!("{MEDIA2}/SetVideoEncoderConfiguration"),
+                &format!("<tr2:SetVideoEncoderConfiguration>{}</tr2:SetVideoEncoderConfiguration>", e.to_xml()),
+                true,
+            )?;
+            self.enc2 = Some(e);
+            self.config.bitrate_kbps = kbps;
+            return Ok(kbps);
+        }
         let mut cfg = self.config.clone();
         cfg.bitrate_kbps = kbps;
         let body = format!(
@@ -705,8 +760,472 @@ pub fn device_for(rtsp_url: &str, explicit: &str) -> Option<(String, String, Str
     } else {
         explicit.trim().to_string()
     };
-    let dec = |s: &str| s.replace("%40", "@").replace("%3A", ":").replace("%3a", ":");
-    Some((device, dec(user), dec(pass)))
+    Some((device, pct_decode(user), pct_decode(pass)))
+}
+
+/// `%XX` back to the byte (a user name or password taken from a URL).
+pub fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let hexd = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hexd(b[i + 1]), hexd(b[i + 2]))
+        {
+            out.push(h << 4 | l);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A user name or password made safe for the user-info part of a URL.
+pub fn pct_encode(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b) {
+            o.push(b as char);
+        } else {
+            o.push_str(&format!("%{b:02X}"));
+        }
+    }
+    o
+}
+
+// -------------------------------------------------------------- auto setup --
+//
+// The board's camera port (nyx-ipcam, 14/11): a camera plugged into it is found and made ready for
+// the link without anyone typing a URL. Its device service comes from a WS-Discovery probe (or the
+// usual ports), the factory logins are tried, the main stream is set to what the link carries best
+// (H.264 Baseline: no B-frames, so no reordering delay; at most 1920x1080; a key frame every
+// second, which is what a lost frame costs in pass-through) and its RTSP address is read back.
+// Cheap cameras stream H.265 out of the box while their Media (ver10) service still says H.264 (an
+// XM GK7205 on 14/11); Media2 (ver20) tells the truth, so it is used when the camera has it.
+
+/// The logins cameras leave the factory with, tried after the one the user gave. Kept short: some
+/// cameras lock the account after a few refusals.
+pub const FACTORY_LOGINS: &[(&str, &str)] = &[("admin", ""), ("admin", "admin"), ("admin", "12345"), ("admin", "123456"), ("root", "")];
+
+/// How an `auto_setup` error begins when the camera refused every login tried (the user's is
+/// needed then).
+pub const LOGIN_REFUSED: &str = "login refused";
+
+/// The largest picture the link is given (every frame is decoded on the ground; more only costs bits).
+const AUTO_MAX: (u32, u32) = (1920, 1080);
+
+const MEDIA1: &str = "http://www.onvif.org/ver10/media/wsdl";
+const MEDIA2: &str = "http://www.onvif.org/ver20/media/wsdl";
+
+/// A camera made ready by `auto_setup`.
+#[derive(Clone, Debug, Default)]
+pub struct AutoCam {
+    pub device: String,
+    pub user: String,
+    pub pass: String,
+    /// the main stream's RTSP address, the login in it
+    pub rtsp: String,
+    pub model: String,
+    /// what was changed on the camera ("" = it was ready)
+    pub changed: String,
+}
+
+fn uuid() -> String {
+    let h = hex(&random_bytes(16));
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// A WS-Discovery probe sent straight to one address (UDP 3702): the service addresses it gives.
+pub fn probe(ip: std::net::Ipv4Addr, wait: Duration) -> Vec<String> {
+    let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") else { return Vec::new() };
+    let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
+    let msg = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><e:Envelope xmlns:e=\"http://www.w3.org/2003/05/soap-envelope\" \
+         xmlns:w=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:d=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" \
+         xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\"><e:Header><w:MessageID>uuid:{}</w:MessageID>\
+         <w:To e:mustUnderstand=\"true\">urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>\
+         <w:Action e:mustUnderstand=\"true\">http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>\
+         </e:Header><e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body></e:Envelope>",
+        uuid()
+    );
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 16384];
+    let t0 = Instant::now();
+    let mut sent = 0u32;
+    while t0.elapsed() < wait && out.is_empty() {
+        // twice, half the wait apart (UDP)
+        if sent < 2 && t0.elapsed() >= wait / 2 * sent {
+            let _ = s.send_to(msg.as_bytes(), (ip, 3702));
+            sent += 1;
+        }
+        if let Ok((n, from)) = s.recv_from(&mut buf)
+            && from.ip() == std::net::IpAddr::V4(ip)
+            && let Some(x) = text(&String::from_utf8_lossy(&buf[..n]), "XAddrs")
+        {
+            out.extend(x.split_whitespace().filter(|a| a.starts_with("http://")).map(str::to_string));
+        }
+    }
+    out
+}
+
+/// The camera's device service: what WS-Discovery says, else the usual addresses; the first one
+/// that answers GetSystemDateAndTime (no login needed for it).
+fn find_device(ip: std::net::Ipv4Addr) -> Option<String> {
+    let base = format!("http://{ip}/");
+    let mut cands: Vec<String> = probe(ip, Duration::from_millis(1500)).iter().map(|x| same_host(&base, x)).collect();
+    for p in [80u16, 8899, 8000, 8080, 2020] {
+        let c = format!("http://{ip}:{p}/onvif/device_service");
+        if !cands.contains(&c) {
+            cands.push(c);
+        }
+    }
+    let env = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><s:Envelope {NS}><s:Header/><s:Body><tds:GetSystemDateAndTime/></s:Body></s:Envelope>"
+    );
+    cands.into_iter().find(|c| {
+        parse_http(c)
+            .ok()
+            .and_then(|u| http_post(&u, "http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", &env, None).ok())
+            .is_some_and(|r| r.body.contains("SystemDateAndTime"))
+    })
+}
+
+/// A refusal of the login (rather than a camera that cannot do something).
+fn refused_login(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.contains("401") || l.contains("auth") || l.contains("password") || l.contains("not permitted")
+}
+
+/// `uri` on the address we reach the camera at (cameras with a second interface report another),
+/// its port and path kept, any login in it dropped.
+fn on_host(uri: &str, ip: std::net::Ipv4Addr) -> String {
+    let Some((scheme, rest)) = uri.split_once("://") else { return uri.to_string() };
+    let (auth, path) = rest.find('/').map_or((rest, ""), |p| rest.split_at(p));
+    let hostport = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    match hostport.rsplit_once(':').map(|(_, p)| p).filter(|p| p.parse::<u16>().is_ok()) {
+        Some(p) => format!("{scheme}://{ip}:{p}{path}"),
+        None => format!("{scheme}://{ip}{path}"),
+    }
+}
+
+/// An RTSP address with the login in it (no password: the user name alone).
+pub fn with_login(uri: &str, user: &str, pass: &str) -> String {
+    let Some((scheme, rest)) = uri.split_once("://") else { return uri.to_string() };
+    let (auth, path) = rest.find('/').map_or((rest, ""), |p| rest.split_at(p));
+    let host = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    match (user.is_empty(), pass.is_empty()) {
+        (true, _) => format!("{scheme}://{host}{path}"),
+        (false, true) => format!("{scheme}://{}@{host}{path}", pct_encode(user)),
+        (false, false) => format!("{scheme}://{}:{}@{host}{path}", pct_encode(user), pct_encode(pass)),
+    }
+}
+
+/// Find the camera at `ip`, log in (the user's login first, then the factory ones), set its main
+/// stream for the link and read back its RTSP address.
+pub fn auto_setup(ip: std::net::Ipv4Addr, login: Option<(&str, &str)>) -> Result<AutoCam, String> {
+    let device =
+        find_device(ip).ok_or_else(|| "no ONVIF service answers (WS-Discovery, ports 80, 8899, 8000, 8080, 2020)".to_string())?;
+    let mut logins: Vec<(String, String)> = Vec::new();
+    if let Some((u, p)) = login
+        && !u.is_empty()
+    {
+        logins.push((u.to_string(), p.to_string()));
+    }
+    for (u, p) in FACTORY_LOGINS {
+        if !logins.iter().any(|(a, b)| a == u && b == p) {
+            logins.push((u.to_string(), p.to_string()));
+        }
+    }
+    let mut refused = String::new();
+    for (user, pass) in logins {
+        let mut cam = Camera::session(&device, &user, &pass);
+        match cam.make_ready(&device, ip) {
+            Ok(mut a) => {
+                // An XM camera keeps what ONVIF set in RAM until it restarts on its own terms: power it off
+                // and it is back at its factory H.265 (14/11). A soft restart writes it down (proved over a
+                // power cut), so after a change the camera is restarted once (~20 s); from then on it starts
+                // the way the link wants it and needs nothing.
+                if !a.changed.is_empty() {
+                    let ok = cam.call(&device, "http://www.onvif.org/ver10/device/wsdl/SystemReboot", "<tds:SystemReboot/>", true).is_ok();
+                    a.changed.push_str(if ok { "; camera restarted to keep it" } else { "; the camera refused a restart (it may lose this when powered off)" });
+                }
+                a.rtsp = with_login(&a.rtsp, &user, &pass);
+                a.device = device;
+                a.user = user;
+                a.pass = pass;
+                return Ok(a);
+            }
+            Err(e) if refused_login(&e) => refused = e,
+            Err(e) => return Err(format!("{e} ({device})")),
+        }
+    }
+    Err(format!("{LOGIN_REFUSED}: the camera takes none of the logins tried ({refused}); its user and password are needed"))
+}
+
+/// A Media2 (ver20) video encoder configuration, kept as the camera wrote it so a change sends
+/// everything else back unchanged.
+#[derive(Clone, Debug, Default)]
+struct Enc2 {
+    token: String,
+    name: String,
+    use_count: String,
+    encoding: String,
+    w: u32,
+    h: u32,
+    fps: String,
+    bitrate: String,
+    cbr: String,
+    quality: String,
+    gov: Option<u32>,
+    profile: Option<String>,
+    multicast: Option<String>,
+}
+
+impl Enc2 {
+    fn parse(attrs: &str, xml: &str) -> Enc2 {
+        let rate = elements(xml, "RateControl").into_iter().next();
+        let res = find(xml, "Resolution").unwrap_or("");
+        Enc2 {
+            token: attr(attrs, "token").unwrap_or("").to_string(),
+            name: text(xml, "Name").unwrap_or_default(),
+            use_count: text(xml, "UseCount").unwrap_or_else(|| "1".into()),
+            encoding: text(xml, "Encoding").unwrap_or_default(),
+            w: text(res, "Width").and_then(|v| v.parse().ok()).unwrap_or(0),
+            h: text(res, "Height").and_then(|v| v.parse().ok()).unwrap_or(0),
+            fps: rate.and_then(|(_, i)| text(i, "FrameRateLimit")).unwrap_or_else(|| "25".into()),
+            bitrate: rate.and_then(|(_, i)| text(i, "BitrateLimit")).unwrap_or_else(|| "2048".into()),
+            cbr: rate.and_then(|(a, _)| attr(a, "ConstantBitRate")).unwrap_or("false").to_string(),
+            quality: text(xml, "Quality").unwrap_or_else(|| "4".into()),
+            gov: attr(attrs, "GovLength").and_then(|v| v.parse().ok()),
+            profile: attr(attrs, "Profile").map(str::to_string),
+            multicast: find(xml, "Multicast").map(str::to_string),
+        }
+    }
+
+    /// Every configuration in a GetVideoEncoderConfigurations answer.
+    fn all(xml: &str) -> Vec<Enc2> {
+        elements(xml, "Configurations").into_iter().map(|(a, i)| Enc2::parse(a, i)).collect()
+    }
+
+    fn is(&self, enc: &str) -> bool {
+        self.encoding.eq_ignore_ascii_case(enc)
+    }
+
+    /// This configuration made right for the link, within what the camera offers for H.264 (the
+    /// attributes and content of its H.264 `Options`).
+    fn for_link(&self, oattrs: &str, oxml: &str) -> Enc2 {
+        let mut e = self.clone();
+        e.encoding = "H264".into();
+        let sizes: Vec<(u32, u32)> = elements(oxml, "ResolutionsAvailable")
+            .iter()
+            .filter_map(|(_, r)| Some((text(r, "Width")?.parse().ok()?, text(r, "Height")?.parse().ok()?)))
+            .collect();
+        let fits = |s: &(u32, u32)| s.0 <= AUTO_MAX.0 && s.1 <= AUTO_MAX.1;
+        if !sizes.is_empty() && !(sizes.contains(&(e.w, e.h)) && fits(&(e.w, e.h))) {
+            let pick = sizes.iter().filter(|s| fits(s)).max_by_key(|s| s.0 * s.1).or_else(|| sizes.iter().min_by_key(|s| s.0 * s.1));
+            if let Some(&(w, h)) = pick {
+                (e.w, e.h) = (w, h);
+            }
+        }
+        let profiles: Vec<&str> = attr(oattrs, "ProfilesSupported").unwrap_or("").split_whitespace().collect();
+        if profiles.contains(&"Baseline") {
+            e.profile = Some("Baseline".into());
+        } else if let Some(p) = profiles.first()
+            && e.profile.as_deref().is_none_or(|cur| !profiles.contains(&cur))
+        {
+            e.profile = Some(p.to_string());
+        }
+        let fps = e.fps.parse::<f32>().unwrap_or(25.0).round().max(1.0) as u32;
+        let (lo, hi) = attr(oattrs, "GovLengthRange")
+            .and_then(|r| {
+                let mut it = r.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+                Some((it.next()?, it.next()?))
+            })
+            .unwrap_or((1, 300));
+        e.gov = Some(fps.clamp(lo, hi.max(lo)));
+        e
+    }
+
+    /// Worth setting the camera again: the codec, the size or the key frame spacing. Not the H.264
+    /// profile alone - an XM camera takes Baseline, keeps Main, says Main, and restarts itself (~40 s)
+    /// on every change, so asking again each time looped (14/11).
+    fn differs(&self, o: &Enc2) -> bool {
+        !self.encoding.eq_ignore_ascii_case(&o.encoding) || (self.w, self.h) != (o.w, o.h) || self.gov != o.gov
+    }
+
+    fn to_xml(&self) -> String {
+        let mut a = format!("token=\"{}\"", escape(&self.token));
+        if let Some(g) = self.gov {
+            a.push_str(&format!(" GovLength=\"{g}\""));
+        }
+        if let Some(p) = &self.profile {
+            a.push_str(&format!(" Profile=\"{}\"", escape(p)));
+        }
+        let mc = self.multicast.as_deref().unwrap_or("");
+        let ip = find(mc, "IPv4Address").map(|v| v.trim().to_string()).unwrap_or_else(|| "0.0.0.0".into());
+        format!(
+            "<tr2:Configuration {a}><tt:Name>{}</tt:Name><tt:UseCount>{}</tt:UseCount><tt:Encoding>{}</tt:Encoding>\
+             <tt:Resolution><tt:Width>{}</tt:Width><tt:Height>{}</tt:Height></tt:Resolution>\
+             <tt:RateControl ConstantBitRate=\"{}\"><tt:FrameRateLimit>{}</tt:FrameRateLimit><tt:BitrateLimit>{}</tt:BitrateLimit></tt:RateControl>\
+             <tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>{ip}</tt:IPv4Address></tt:Address>\
+             <tt:Port>{}</tt:Port><tt:TTL>{}</tt:TTL><tt:AutoStart>{}</tt:AutoStart></tt:Multicast>\
+             <tt:Quality>{}</tt:Quality></tr2:Configuration>",
+            escape(&self.name), self.use_count, self.encoding, self.w, self.h, self.cbr, self.fps, self.bitrate,
+            text(mc, "Port").unwrap_or_else(|| "0".into()),
+            text(mc, "TTL").unwrap_or_else(|| "0".into()),
+            text(mc, "AutoStart").unwrap_or_else(|| "false".into()),
+            self.quality
+        )
+    }
+}
+
+impl Camera {
+    /// Log in, set the main stream for the link and read its RTSP address (no login added to it).
+    fn make_ready(&mut self, device: &str, ip: std::net::Ipv4Addr) -> Result<AutoCam, String> {
+        let (mut media1, mut media2) = (String::new(), String::new());
+        if let Ok(r) = self.call(
+            device,
+            "http://www.onvif.org/ver10/device/wsdl/GetServices",
+            "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>",
+            true,
+        ) {
+            for (_, s) in elements(&r, "Service") {
+                let (Some(ns), Some(x)) = (text(s, "Namespace"), text(s, "XAddr")) else { continue };
+                if ns == MEDIA1 {
+                    media1 = same_host(device, &x);
+                } else if ns == MEDIA2 {
+                    media2 = same_host(device, &x);
+                }
+            }
+        }
+        if media1.is_empty() {
+            let caps = self.call(
+                device,
+                "http://www.onvif.org/ver10/device/wsdl/GetCapabilities",
+                "<tds:GetCapabilities><tds:Category>Media</tds:Category></tds:GetCapabilities>",
+                true,
+            )?;
+            media1 = find(&caps, "Media").and_then(|m| text(m, "XAddr")).map_or(device.to_string(), |x| same_host(device, &x));
+        }
+        // the first call that needs the login: a refused one ends here
+        let profiles = self.call(&media1, &format!("{MEDIA1}/GetProfiles"), "<trt:GetProfiles/>", true)?;
+        let mut changed = Vec::new();
+        let main = if media2.is_empty() {
+            self.h264_media1(&media1, &profiles, &mut changed)?
+        } else {
+            self.h264_media2(&media2, &mut changed)?
+        };
+        let profiles = if changed.is_empty() {
+            profiles
+        } else {
+            self.call(&media1, &format!("{MEDIA1}/GetProfiles"), "<trt:GetProfiles/>", true)?
+        };
+        // the profile on the main encoder configuration, else the largest video one
+        let mut pick: Option<(u64, String)> = None;
+        for (attrs, inner) in elements(&profiles, "Profiles") {
+            let Some(token) = attr(attrs, "token") else { continue };
+            let Some((ea, enc)) = elements(inner, "VideoEncoderConfiguration").into_iter().next() else { continue };
+            let cfg = EncoderConfig::parse(attr(ea, "token").unwrap_or(""), enc);
+            if cfg.encoding.eq_ignore_ascii_case("JPEG") {
+                continue;
+            }
+            let score = if !main.is_empty() && cfg.token == main { u64::MAX } else { u64::from(cfg.width) * u64::from(cfg.height) };
+            if pick.as_ref().is_none_or(|p| score > p.0) {
+                pick = Some((score, token.to_string()));
+            }
+        }
+        let (_, profile) = pick.ok_or("no video profile")?;
+        let body = format!(
+            "<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol>\
+             </tt:Transport></trt:StreamSetup><trt:ProfileToken>{}</trt:ProfileToken></trt:GetStreamUri>",
+            escape(&profile)
+        );
+        let r = self.call(&media1, &format!("{MEDIA1}/GetStreamUri"), &body, true)?;
+        let uri = text(&r, "Uri").ok_or("no stream address in the GetStreamUri answer")?;
+        let model = self
+            .call(device, "http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", "<tds:GetDeviceInformation/>", true)
+            .ok()
+            .map(|r| format!("{} {}", text(&r, "Manufacturer").unwrap_or_default(), text(&r, "Model").unwrap_or_default()).trim().to_string())
+            .unwrap_or_default();
+        Ok(AutoCam { rtsp: on_host(&uri, ip), model, changed: changed.join("; "), ..Default::default() })
+    }
+
+    /// Media2: the main stream (the largest video encoder) made right for the link; its token.
+    fn h264_media2(&mut self, m2: &str, changed: &mut Vec<String>) -> Result<String, String> {
+        let get = format!("{MEDIA2}/GetVideoEncoderConfigurations");
+        let r = self.call(m2, &get, "<tr2:GetVideoEncoderConfigurations/>", true)?;
+        let main = Enc2::all(&r).into_iter().filter(|e| !e.is("JPEG")).max_by_key(|e| u64::from(e.w) * u64::from(e.h)).ok_or("no video encoder")?;
+        let body = format!(
+            "<tr2:GetVideoEncoderConfigurationOptions><tr2:ConfigurationToken>{}</tr2:ConfigurationToken></tr2:GetVideoEncoderConfigurationOptions>",
+            escape(&main.token)
+        );
+        let opts = self.call(m2, &format!("{MEDIA2}/GetVideoEncoderConfigurationOptions"), &body, true)?;
+        let Some((oa, oi)) =
+            elements(&opts, "Options").into_iter().find(|(_, i)| text(i, "Encoding").is_some_and(|e| e.eq_ignore_ascii_case("H264")))
+        else {
+            return if main.is("H264") { Ok(main.token) } else { Err(format!("the camera cannot send H.264 (it sends {})", main.encoding)) };
+        };
+        let want = main.for_link(oa, oi);
+        if want.differs(&main) {
+            self.call(
+                m2,
+                &format!("{MEDIA2}/SetVideoEncoderConfiguration"),
+                &format!("<tr2:SetVideoEncoderConfiguration>{}</tr2:SetVideoEncoderConfiguration>", want.to_xml()),
+                true,
+            )
+            .map_err(|e| format!("setting the main stream to H.264: {e}"))?;
+            changed.push(format!(
+                "main stream {} {}x{} {} key frame every {} -> H.264 {}x{} {} key frame every {}",
+                main.encoding, main.w, main.h, main.profile.as_deref().unwrap_or(""), main.gov.unwrap_or(0),
+                want.w, want.h, want.profile.as_deref().unwrap_or(""), want.gov.unwrap_or(0)
+            ));
+            // read back: some cameras answer the call and keep what they had
+            let r = self.call(m2, &get, "<tr2:GetVideoEncoderConfigurations/>", true)?;
+            if let Some(now) = Enc2::all(&r).into_iter().find(|e| e.token == main.token)
+                && !now.is("H264")
+            {
+                return Err(format!("the camera stays at {} after being set to H.264", now.encoding));
+            }
+        }
+        Ok(main.token)
+    }
+
+    /// Media (ver10) only: the main stream to H.264 with a key frame every second; its token.
+    fn h264_media1(&mut self, m1: &str, profiles: &str, changed: &mut Vec<String>) -> Result<String, String> {
+        let main = elements(profiles, "Profiles")
+            .into_iter()
+            .filter_map(|(_, inner)| {
+                elements(inner, "VideoEncoderConfiguration").into_iter().next().map(|(a, i)| EncoderConfig::parse(attr(a, "token").unwrap_or(""), i))
+            })
+            .filter(|c| !c.encoding.eq_ignore_ascii_case("JPEG"))
+            .max_by_key(|c| u64::from(c.width) * u64::from(c.height));
+        let Some(mut cfg) = main else { return Ok(String::new()) };
+        let fps = cfg.frame_rate_limit.parse::<f32>().unwrap_or(25.0).round().max(1.0) as u32;
+        let gov_ok = cfg.gov_length.as_deref().and_then(|g| g.parse::<u32>().ok()).is_some_and(|g| g <= fps * 3 / 2);
+        if cfg.encoding.eq_ignore_ascii_case("H264") && gov_ok {
+            return Ok(cfg.token);
+        }
+        let before = format!("{} {}x{}", cfg.encoding, cfg.width, cfg.height);
+        cfg.encoding = "H264".into();
+        cfg.gov_length = Some(fps.to_string());
+        if cfg.h264_profile.is_none() {
+            cfg.h264_profile = Some("Baseline".into());
+        }
+        let body = format!(
+            "<trt:SetVideoEncoderConfiguration><trt:Configuration token=\"{}\">{}</trt:Configuration>\
+             <trt:ForcePersistence>true</trt:ForcePersistence></trt:SetVideoEncoderConfiguration>",
+            escape(&cfg.token),
+            cfg.to_xml()
+        );
+        self.call(m1, &format!("{MEDIA1}/SetVideoEncoderConfiguration"), &body, true)
+            .map_err(|e| format!("setting the main stream to H.264: {e}"))?;
+        changed.push(format!("main stream {before} -> H.264, key frame every {fps}"));
+        Ok(cfg.token)
+    }
 }
 
 // ------------------------------------------------------------------ thread --
@@ -886,5 +1405,42 @@ mod tests {
         assert_eq!((d.as_str(), u.as_str(), p.as_str()), ("http://192.168.1.108/onvif/device_service", "admin", "pw"));
         assert_eq!(path_and_query("rtsp://h/cam/realmonitor?channel=1&subtype=1").1, vec!["channel=1", "subtype=1"]);
         assert_eq!(same_host("http://10.0.0.5/onvif/device_service", "http://192.168.1.1:8999/onvif/Media"), "http://10.0.0.5:8999/onvif/Media");
+    }
+
+    #[test]
+    fn logins_in_urls() {
+        let ip: std::net::Ipv4Addr = "172.31.77.187".parse().unwrap();
+        // the XM camera's own stream address (its login hash in the path), reported on another host
+        let uri = "rtsp://192.168.1.10:554/user=admin_password=tlJwpbo6_channel=0_stream=0&onvif=0.sdp?real_stream";
+        let on = on_host(uri, ip);
+        assert_eq!(on, "rtsp://172.31.77.187:554/user=admin_password=tlJwpbo6_channel=0_stream=0&onvif=0.sdp?real_stream");
+        assert_eq!(with_login(&on, "admin", ""), on.replace("rtsp://", "rtsp://admin@"));
+        let l = with_login("rtsp://u:old@10.0.0.2/live", "ad@m", "p:w/%");
+        assert_eq!(l, "rtsp://ad%40m:p%3Aw%2F%25@10.0.0.2/live");
+        let (_, u, p) = device_for(&l, "").unwrap();
+        assert_eq!((u.as_str(), p.as_str()), ("ad@m", "p:w/%"));
+        assert_eq!(on_host("rtsp://cam.local/x", ip), "rtsp://172.31.77.187/x");
+    }
+
+    #[test]
+    fn media2_for_the_link() {
+        // what the XM GK7205 answered on 14/11 (Media2): H.265 at 2560x1440, key frame every 40
+        let cfgs = r#"<tr2:GetVideoEncoderConfigurationsResponse><tr2:Configurations token="000" GovLength="40" Profile="Main"><tt:Name>V_ENC_000</tt:Name><tt:UseCount>1</tt:UseCount><tt:Encoding>H265</tt:Encoding><tt:Resolution><tt:Width>2560</tt:Width><tt:Height>1440</tt:Height></tt:Resolution><tt:RateControl ConstantBitRate="false"><tt:FrameRateLimit>20.0</tt:FrameRateLimit><tt:BitrateLimit>2560</tt:BitrateLimit></tt:RateControl><tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>239.0.1.0</tt:IPv4Address></tt:Address><tt:Port>32002</tt:Port><tt:TTL>2</tt:TTL><tt:AutoStart>false</tt:AutoStart></tt:Multicast><tt:Quality>4.00</tt:Quality></tr2:Configurations><tr2:Configurations token="002"><tt:Name>V_ENC_002</tt:Name><tt:UseCount>1</tt:UseCount><tt:Encoding>JPEG</tt:Encoding><tt:Resolution><tt:Width>704</tt:Width><tt:Height>576</tt:Height></tt:Resolution></tr2:Configurations></tr2:GetVideoEncoderConfigurationsResponse>"#;
+        let opts = r#"<tr2:Options GovLengthRange="1 300" FrameRatesSupported="19 18" ProfilesSupported="Baseline Main High" ConstantBitRateSupported="true"><tt:Encoding>H264</tt:Encoding><tt:ResolutionsAvailable><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:ResolutionsAvailable><tt:ResolutionsAvailable><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:ResolutionsAvailable><tt:ResolutionsAvailable><tt:Width>2560</tt:Width><tt:Height>1440</tt:Height></tt:ResolutionsAvailable></tr2:Options>"#;
+        let all = Enc2::all(cfgs);
+        assert_eq!(all.len(), 2);
+        let main = all.into_iter().filter(|e| !e.is("JPEG")).max_by_key(|e| e.w * e.h).unwrap();
+        assert_eq!((main.token.as_str(), main.encoding.as_str(), main.w, main.gov), ("000", "H265", 2560, Some(40)));
+        let (oa, oi) = elements(opts, "Options").into_iter().next().unwrap();
+        let want = main.for_link(oa, oi);
+        assert_eq!((want.encoding.as_str(), want.w, want.h, want.profile.as_deref(), want.gov), ("H264", 1920, 1080, Some("Baseline"), Some(20)));
+        assert!(want.differs(&main));
+        assert!(!want.differs(&want.for_link(oa, oi)));
+        let x = want.to_xml();
+        assert!(x.starts_with("<tr2:Configuration token=\"000\" GovLength=\"20\" Profile=\"Baseline\">"));
+        assert!(x.contains("<tt:Encoding>H264</tt:Encoding>") && x.contains("<tt:IPv4Address>239.0.1.0</tt:IPv4Address>"));
+        // what it writes reads back the same
+        let back = Enc2::parse("token=\"000\" GovLength=\"20\" Profile=\"Baseline\"", &x);
+        assert!(!back.differs(&want) && back.bitrate == "2560" && back.fps == "20.0");
     }
 }

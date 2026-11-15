@@ -97,6 +97,10 @@ pub struct TxConfig {
     /// The highest bitrate the camera is taken to (kbit/s); 0 = what the camera had when first
     /// reached (`set cammax <kbps>`).
     pub cam_max_kbps: u32,
+    /// The camera's login as the user gave it ("user:password", each percent-encoded; `set
+    /// camlogin`, or the pilot app's camera page over the link): tried first when the board's
+    /// camera port sets a camera up, for one whose factory login was changed. Empty = none.
+    pub cam_login: String,
     /// v40.53: the ceiling of our own encoder's bitrate, kbit/s (`set maxkbps <n>`); 0 = from the
     /// picture size (worker::AUTO_BPP bits per pixel and frame).
     pub max_kbps: u32,
@@ -242,6 +246,7 @@ impl Default for TxConfig {
             cam_adapt: true,
             onvif_url: String::new(),
             cam_max_kbps: 0,
+            cam_login: String::new(),
             max_kbps: 0,
             codec: Codec::H264,
             // v40.44z: the bench setting; at 480x360 the same camera and link gave 20 fps and a
@@ -400,6 +405,9 @@ pub struct Shared {
     /// tlm_rx = datagrams pushed out.
     pub tlm_out: Mutex<Option<(std::net::UdpSocket, std::net::SocketAddr)>>,
     pub tlm_rx: AtomicU64,
+    /// Datagrams taken in on --tlm-in (a flight controller's MAVLink going up): the board's camera
+    /// app keeps the transmit port while they come, camera or not (14/11).
+    pub tlm_in_n: AtomicU64,
     /// v40.31: the video channel the daemon says it is transmitting on (Hz, 0 =
     /// unknown) and how many times it changed - minstrel keeps memory per channel.
     pub chan_hz: AtomicU64,
@@ -441,6 +449,10 @@ pub struct Shared {
     pub port_off: AtomicBool,
     /// One line on what the host process is doing, shown as `mode=` in `stats`.
     pub mode_note: Mutex<String>,
+    /// What the board's camera port is doing, for the far app (`air_camport`): none (no camera
+    /// heard), setup, ready, login (the camera refuses the logins tried: the user's is needed),
+    /// fail (no ONVIF, or no H.264); empty = this board has no camera port.
+    pub cam_port: Mutex<String>,
     /// Slowest spacing the conv transmit path may use between air frames (µs, 0 = only the
     /// config's gap). camera pass-through 17/9: the board app raises it while the daemon's raw queue fills, so
     /// a camera stream that outruns the air backs up here, where whole frames are dropped,
@@ -579,6 +591,7 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         ctl_stream: Mutex::new(None),
         tlm_out: Mutex::new(tlm_out),
         tlm_rx: AtomicU64::new(0),
+        tlm_in_n: AtomicU64::new(0),
         chan_hz: AtomicU64::new(0),
         chan_rates: Mutex::new(None),
         chan_changes: AtomicU64::new(0),
@@ -595,6 +608,7 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
         standby: AtomicBool::new(opts.flag("--standby")),
         port_off: AtomicBool::new(opts.flag("--standby")),
         mode_note: Mutex::new(String::new()),
+        cam_port: Mutex::new(String::new()),
         pace_floor_us: AtomicU64::new(0),
     });
 
@@ -669,6 +683,8 @@ pub fn setup(opts: &Opts) -> Arc<Shared> {
                                     }
                                 }
                                 q.push(buf[..n].to_vec());
+                                drop(q);
+                                sh.tlm_in_n.fetch_add(1, Ordering::Relaxed);
                                 n_ok += 1;
                                 if n_ok == 1 {
                                     nyx_common::logging::log(
@@ -833,7 +849,7 @@ fn board_console(host: &str, cmd: &str) -> Option<String> {
 /// <value>`, the pilot app's Video and Link pages): the video's, and the board's transmit power -
 /// never the transport, the radio's channels (those the ground sets on its own board) or anything
 /// that could cut the link from here.
-const REMOTE_KEYS: &[&str] = &["source", "pause", "res", "fps", "maxkbps", "quality", "autores", "cammax", "camadapt", "txpower", "tpc"];
+const REMOTE_KEYS: &[&str] = &["source", "pause", "res", "fps", "maxkbps", "quality", "autores", "cammax", "camadapt", "camlogin", "txpower", "tpc"];
 
 /// The ground's last command per key (its session and number): a text goes up three times and an
 /// older one can come after a newer (the ground daemon's repeats), so a key takes only numbers
@@ -881,10 +897,15 @@ pub fn remote_state(shared: &Shared) -> String {
     let mut out: String = lines
         .lines()
         .filter_map(|l| l.split_once(' '))
-        .filter(|(k, _)| REMOTE_KEYS.contains(k) || *k == "pass")
+        // (the camera's login is not said back)
+        .filter(|(k, _)| (REMOTE_KEYS.contains(k) && *k != "camlogin") || *k == "pass")
         .map(|(k, v)| format!("air_{k}={}\n", v.trim()))
         .collect();
     out.push_str(&format!("air_pause={}\n", u8::from(paused)));
+    let cp = shared.cam_port.lock().unwrap().clone();
+    if !cp.is_empty() {
+        out.push_str(&format!("air_camport={cp}\n"));
+    }
     out.push_str(&format!("air_sources={}\n", shared.sources.lock().unwrap().join(",")));
     // the camera as it comes (pass-through): its own picture size, rate and bitrate, and the
     // ceiling it may be taken to
@@ -956,10 +977,10 @@ pub fn remote_set(shared: &Shared, s: &str) {
     };
     match r {
         Ok(()) => {
-            log(&format!("remote: the ground set {key} {val}"));
+            log(&format!("remote: the ground set {key} {}", if key == "camlogin" { "(hidden)" } else { val }));
             save_config(shared);
         }
-        Err(e) => log(&format!("remote: the ground's {key} {val} refused: {e}")),
+        Err(e) => log(&format!("remote: the ground's {key} refused: {e}")),
     }
 }
 
@@ -1056,6 +1077,12 @@ fn apply_set(c: &mut TxConfig, key: &str, val: &str) -> Result<(), String> {
             true
         }
         "cammax" => val.parse::<u32>().map(|v| c.cam_max_kbps = v.min(50_000)).is_ok(),
+        // ("-" clears it)
+        "camlogin" => {
+            let v = val.trim();
+            c.cam_login = if v == "-" { String::new() } else { v.to_string() };
+            true
+        }
         "maxkbps" => val.parse::<u32>().map(|v| c.max_kbps = v.min(50_000)).is_ok(),
         "source" => match val.to_ascii_lowercase().as_str() {
             "pattern" => { c.source = SourceKind::Pattern; true }
@@ -1096,6 +1123,9 @@ pub fn config_lines(c: &TxConfig) -> String {
     out.push_str(&format!("pass {}\n", b(c.rtsp_pass)));
     out.push_str(&format!("camadapt {}\nonvif {}\ncammax {}\n",
         b(c.cam_adapt), if c.onvif_url.is_empty() { "auto" } else { &c.onvif_url }, c.cam_max_kbps));
+    if !c.cam_login.is_empty() {
+        out.push_str(&format!("camlogin {}\n", c.cam_login));
+    }
     out.push_str(&format!("maxkbps {}\n", c.max_kbps));
     out.push_str(&format!("codec {}\n", if c.codec == Codec::H264 { "h264" } else { "mjpeg" }));
     out.push_str(&format!("res {}x{}\nfps {}\nquality {}\n", c.width, c.height, c.fps, c.jpeg_quality));

@@ -191,7 +191,8 @@ pub enum Msg {
     /// an optical flow sensor (OPTICAL_FLOW_RAD): its quality 0..255 and the flow over the
     /// integration time (rad about x, y; microseconds)
     Flow { quality: u8, x: f32, y: f32, dt_us: u32 },
-    Text { severity: u8, text: String },
+    /// STATUSTEXT: a long one comes in 50-byte chunks sharing an `id` (0: whole in one)
+    Text { severity: u8, text: String, id: u16 },
     /// a parameter: its name, its value as on the wire (param_num), MAV_PARAM_TYPE
     ParamValue { id: String, value: f32, ptype: u8 },
 }
@@ -233,7 +234,7 @@ fn decode(id: u32, p: &[u8]) -> Option<Msg> {
         253 => {
             let t = &p[1..51];
             let end = t.iter().position(|&b| b == 0).unwrap_or(t.len());
-            Msg::Text { severity: p[0], text: String::from_utf8_lossy(&t[..end]).into_owned() }
+            Msg::Text { severity: p[0], text: String::from_utf8_lossy(&t[..end]).into_owned(), id: u16::from_le_bytes([p[51], p[52]]) }
         }
         _ => return None,
     })
@@ -731,7 +732,7 @@ impl Vehicle {
                 self.flow = Some((Instant::now(), quality, fx, fy));
             }
             Msg::VfrHud { throttle, .. } => self.throttle_pct = throttle,
-            Msg::Text { severity, ref text } => {
+            Msg::Text { severity, ref text, .. } => {
                 if text.starts_with("[cal]") {
                     self.cal.feed(text);
                 }
