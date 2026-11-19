@@ -10,6 +10,9 @@
 * NyxHop board (`fc/`): the board on a Mark4 7-inch drone, in `fc/aircraft/`: the parts, the
   wiring, the printed mounts for the board and the camera, and the aircraft's PX4 parameters.
   `fc/install.py params` puts a parameter file on the board.
+* NyxHop board (`fc/`): its USB-C port plugged into a computer is a network card there, with
+  nothing to install on Windows or Linux, and the board answers at 172.31.78.1. A USB device in
+  the port works as before. Run `fc/install.py install` again.
 * The link, its boards and the apps are unchanged.
 
 ## 2.0.14

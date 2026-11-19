@@ -15,6 +15,9 @@ the upload, reboots the board and reads back what runs. A file it replaces stays
 with .pre-fc added to its name, and uninstall puts it back. Nothing is built here, and the radio's
 settings (channels, pairing, licence, antenna port) are left as they are.
 
+From then on the board's USB-C port plugged into a computer is a network card there, and the board
+answers at 172.31.78.1: install.py, nyx_flash.py and ssh work through the cable.
+
 uninstall keeps PX4's parameters and logs in /home/root/px4 unless you add --all.
 
 params sets PX4's parameters from a file (NAME VALUE on a line, # starts a comment; the one of an
@@ -40,6 +43,10 @@ UNIT = "/etc/systemd/system/px4.service"
 DROPIN = "/etc/systemd/system/nyx-ipcam.service.d/px4-tlm.conf"
 # the board's Ethernet jack given to the camera (the camera app finds and sets up the camera there)
 CAMPORT = "/etc/systemd/system/nyx-ipcam.service.d/camport.conf"
+# the USB-C port as a network card to a computer: the board answers at USB_ADDR there
+USBNET = "/etc/systemd/system/nyx-usbnet.service"
+USB_ADDR = "172.31.78.1"
+USB_FILES = ["nyx-usbnet.sh", "nyx-usbdhcp.py"]
 # the files the image replaces on the board; each one's old version is kept as <name>.pre-fc
 REPLACED = [
     ("BOOT.BIN", "/boot/BOOT.BIN"),
@@ -236,6 +243,12 @@ def show(host, st, want_fcio=None):
                 bad.append("PX4 does not write the motor outputs")
     ports = (st.get("ports") or "").split()
     print(f"  ports          {' '.join(ports) or 'none'}")
+    if st.get("usbnet") == "active":
+        role = st.get("usb_role")
+        line = (f"a computer is plugged in: the board is at {USB_ADDR} there" if st.get("usbnet_link") == "1" else
+                "a USB device is plugged in" if role == "host" else
+                f"nothing plugged in (a computer finds the board at {USB_ADDR})")
+        print(f"  USB-C port     {line}")
     if st.get("mode") == "bb":
         missing = [n for n in ("imu", "rc", "telem1", "gps2", "gps1") if not any(p.startswith(n + ":") for p in ports)]
         if missing:
@@ -329,6 +342,21 @@ def install(a):
     print("  px4.service enabled; the camera app hands the link's MAVLink to PX4"
           + ("; the Ethernet jack is the camera's" if "camport.conf" in p.files else ""))
 
+    # the USB-C port as a network card to a computer
+    if "nyx-usbnet.service" in p.files:
+        for name in USB_FILES:
+            b.put(p.files[name], f"{PX4}/{name}", "755")
+        b.put(p.files["nyx-usbnet.service"], USBNET)
+        # (dhcpcd would ask for an address on that network and add a route through it; the line goes
+        # first in its file, where no "interface" block takes it for its own)
+        b.sh("grep -q '^denyinterfaces usb0$' /etc/dhcpcd.conf || sed -i "
+             "'1i # the USB network to a computer has its own address (nyx-usbnet)\\ndenyinterfaces usb0' "
+             "/etc/dhcpcd.conf")
+        out = b.sh("systemctl daemon-reload && systemctl enable nyx-usbnet 2>&1 && sync && echo done")
+        if not out.endswith("done"):
+            sys.exit(f"enabling nyx-usbnet.service failed: {out}")
+        print(f"  the USB-C port plugged into a computer is a network card: the board at {USB_ADDR}")
+
     b = reboot(b)
     if b is None:
         sys.exit(1)
@@ -360,6 +388,8 @@ def uninstall(a):
     print(f"{host}: removing the flight controller")
     # (the camera app wrote "denyinterfaces eth0" for dhcpcd when it took the jack: the jack is the
     # board's own Ethernet again from the next boot)
+    b.sh(f"systemctl disable nyx-usbnet 2>/dev/null; rm -f {USBNET}; "
+         "sed -i '/has its own address (nyx-usbnet)/d; /^denyinterfaces usb0$/d' /etc/dhcpcd.conf")
     b.sh(f"systemctl disable --now px4 2>/dev/null; rm -f {UNIT} {DROPIN} {CAMPORT}; "
          f"rmdir {os.path.dirname(DROPIN)} 2>/dev/null; "
          "sed -i '/is the camera port (nyx-ipcam)/d; /^denyinterfaces eth0$/d' /etc/dhcpcd.conf; "
@@ -381,7 +411,7 @@ def uninstall(a):
         b.sh(f"rm -rf {PX4}")
         print(f"  {PX4} removed")
     else:
-        b.sh(f"cd {PX4} && rm -rf bin etc nyxhop-*.config {' '.join(SCRIPTS)} *.dtbo mode fc-bootbin.md5 "
+        b.sh(f"cd {PX4} && rm -rf bin etc nyxhop-*.config {' '.join(SCRIPTS + USB_FILES)} *.dtbo mode fc-bootbin.md5 "
              f"{os.path.basename(RECORD)} px4.tar.gz; cd / && rmdir {PX4} 2>/dev/null")
         if b.ok(f"test -d {PX4}"):
             print(f"  PX4's parameters and logs stay in {PX4} (uninstall --all removes them too)")

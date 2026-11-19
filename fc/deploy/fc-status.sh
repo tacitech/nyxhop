@@ -34,6 +34,10 @@ for c in /sys/class/net/can*; do
 	[ -e $c ] && P="$P ${c##*/}"
 done
 echo "ports=${P# }"
+# the USB-C port: host (a device plugged in) or gadget (a computer: the board is its network card)
+echo "usb_role=$(cat /sys/kernel/debug/usb/ci_hdrc.0/role 2>/dev/null)"
+echo "usbnet=$(systemctl is-active nyx-usbnet 2>/dev/null)"
+echo "usbnet_link=$(cat /sys/class/net/usb0/carrier 2>/dev/null)"
 
 # the radio: packets sent and control frames heard from the ground station, over two seconds
 ctl() {

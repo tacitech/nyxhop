@@ -11,11 +11,14 @@ kernel: Linux 6.1.70, github.com/analogdevicesinc/linux 2e8908932dfd9faf40ec9220
 files:
 474dd04eb5ad3994effd14bd56255d54   4680672  BOOT.BIN
 3bcdd018cc1b616ec029d6b4854063a3       224  camport.conf
-8393421a93506a29b4e896fcbe358e80     24263  devicetree.dtb
+db337ff21da8fb97028c55a66ec68c77     24259  devicetree.dtb
 96f14e92da0a1eae2a8df35e23c9fdf4      3272  fc-start.sh
-4d3f2101d37a32341e584977e28b8b7d      2422  fc-status.sh
+aadd9554b14f8babba3f8a570bcfb021      2719  fc-status.sh
 d5190d0acf5b8235aed234a208c2e31b       355  fcio-spi.dtbo
 084a5d9ce46d8bfe1f626357ee1cacd3    170296  kernel.config
+3d2766db1459d5bceb5be6a8a0e98544      1919  nyx-usbdhcp.py
+3f09064bf23836cc7685a41352f2515c       277  nyx-usbnet.service
+8948ad99bd1e5691d6a32e5b7c71d821      2528  nyx-usbnet.sh
 0bb831b456bc10575fa2633a953b270c      1414  nyxbb-can.dtbo
 7782209615dab4291003309d9f0c6551      1191  nyxbb-io.dtbo
 8c9df39629e22a9ff377923e3a372188      1604  nyxbb-ps.dtbo

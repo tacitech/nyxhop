@@ -1,0 +1,12 @@
+[Unit]
+Description=NyxHop board: the USB-C port as a network card to a computer (the board at 172.31.78.1)
+After=sys-kernel-config.mount
+
+[Service]
+Type=simple
+ExecStart=/bin/sh /home/root/px4/nyx-usbnet.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

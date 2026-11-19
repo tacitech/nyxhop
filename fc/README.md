@@ -28,13 +28,16 @@ and sets it up for the link, with nothing to type. A camera whose factory passwo
 asks for it on NyxHop Pilot's video page. A computer plugged into the jack instead gets an address
 and finds the board at 172.31.77.1.
 
-With a camera in the jack, the board's USB-C port is the way in. Plug a USB Ethernet adapter into
-it and into your network: the board takes an address from your router, and
+With a camera in the jack, the board's USB-C port is your computer's way in. Plug a USB cable from
+it into the computer: the board shows up there as a network card, with nothing to install on
+Windows or Linux, the computer gets its address by itself, and the board answers at 172.31.78.1:
 
-    python link/scripts/nyx_flash.py --scan
+    python fc/install.py status 172.31.78.1
 
-finds it. `nyx_flash.py`, `install.py` and ssh then work through the adapter as they do through the
-jack. The board has the drivers for ASIX (AX88772, AX88179) and CDC (ECM, NCM) adapters.
+`nyx_flash.py`, `install.py` and ssh work through the cable as they do through the jack.
+
+A USB Ethernet adapter in that port works too (ASIX AX88772 or AX88179, or a CDC one): the board
+takes an address from your router, and `python link/scripts/nyx_flash.py --scan` finds it.
 
 ## Fly
 
