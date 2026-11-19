@@ -1,7 +1,7 @@
 From f3881f8ac3cda94e7ba36053cd8b7663c31ae584 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sun, 15 Nov 2026 21:52:54 +0700
-Subject: [PATCH 18/18] nyxhop-bb.config: the IMU pitch 180 (was roll 180), so
+Subject: [PATCH 18/20] nyxhop-bb.config: the IMU pitch 180 (was roll 180), so
  the board's front is its Ethernet/USB edge: the Mark4 build has that edge at
  the nose and flies with SENS_BOARD_ROT 0 (tilted by hand: roll 180 alone had
  the nose at the opposite edge)

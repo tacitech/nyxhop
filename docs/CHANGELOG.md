@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.15
+
+* NyxHop board (`fc/`): an aircraft that takes its height from a downward range finder (the
+  board has no barometer) holds it from the take-off on. PX4 took a sensor that reads the same
+  while the aircraft sits on the ground for a stuck one and ignored it, so the height drifted
+  from arming. PX4 also keeps a log of every flight in `/home/root/px4/log` on the board. Run
+  `fc/install.py install` again.
+* The link, its boards and the apps are unchanged.
+
 ## 2.0.14
 
 * Aircraft camera: plug an IP camera into the NyxHop board's Ethernet jack and it just works. The

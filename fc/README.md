@@ -52,13 +52,15 @@ The map is OpenStreetMap, cached on disk,
 so places you have looked at once still show without a network. Run it instead of the ground app,
 not beside it: both talk to the same board.
 
+PX4 keeps a log of every flight, from arming to disarming, in `/home/root/px4/log` on the board.
+
 ## What's here
 
 | | |
 |---|---|
 | `install.py` | installs, removes and checks the flight controller on a board |
 | `deploy/` | the board image: the link with the flight-controller I/O, PX4, the kernel and their start files |
-| `px4-patches/` | PX4 v1.17.0: the board `nyxhop/zynq`, the `nyx_dshot` motor driver, a config for the NyxHop baseboard, and serial ports at rates Linux has no constant for (CRSF 420000) |
+| `px4-patches/` | PX4 v1.17.0: the board `nyxhop/zynq`, the `nyx_dshot` motor driver, a config for the NyxHop baseboard, serial ports at rates Linux has no constant for (CRSF 420000), and a fix for taking off on a range finder's height (PX4 took a sensor that reads the same while the aircraft sits on the ground for a stuck one and ignored it through the take-off) |
 | `ardupilot-patches/` | ArduCopter 4.7.2: two fixes for the Zynq's ARM. GCC 10 at -O3 broke LOITER and POSHOLD through strict aliasing |
 | `docker/` | the build image: Debian bullseye armhf, GCC 10 and glibc 2.31, the same as the board's Linux |
 | `hardware/` | the NyxHop baseboard v0.2: schematic and ports |

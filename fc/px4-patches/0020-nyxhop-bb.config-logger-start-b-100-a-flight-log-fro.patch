@@ -1,0 +1,24 @@
+From c43a033ae66d4a7a855440431a8c07a45385ce43 Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Thu, 19 Nov 2026 08:07:00 +0700
+Subject: [PATCH 20/20] nyxhop-bb.config: logger start -b 100, a flight log
+ from arming to disarming (SDLOG_MODE 0) in /home/root/px4/log
+
+---
+ boards/nyxhop/zynq/nyxhop-bb.config | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/boards/nyxhop/zynq/nyxhop-bb.config b/boards/nyxhop/zynq/nyxhop-bb.config
+index b1299bc..2f431d4 100644
+--- a/boards/nyxhop/zynq/nyxhop-bb.config
++++ b/boards/nyxhop/zynq/nyxhop-bb.config
+@@ -94,4 +94,6 @@ navigator start
+ 
+ mavlink start -x -u 14556 -o 14557 -t 127.0.0.1 -r 20000
+ mavlink start -d /dev/ttyS1 -b 115200
++# flight logs from arming to disarming (SDLOG_MODE 0) in /home/root/px4/log, read over MAVLink
++logger start -b 100
+ mavlink boot_complete
+-- 
+2.53.0.windows.2
+

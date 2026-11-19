@@ -1,0 +1,134 @@
+From f054867f61eb3637f915db15815e7f53763e752a Mon Sep 17 00:00:00 2001
+From: tacitech <contact@tacitek.com>
+Date: Thu, 19 Nov 2026 08:07:00 +0700
+Subject: [PATCH 19/20] ekf2: the range finder's stuck check runs in the air
+ only (setInAir from control_status.in_air): on the ground a working sensor
+ reads the same all the time, and the check, latched from the boot (no valid
+ sample for 10 s), kept the range rejected through the arming and the
+ take-off, so a vehicle with the range finder as its height reference (the
+ NyxHop baseboard has no barometer) took off with no height source and its
+ height drifted from arming; test rangeNotStuckOnGround
+
+---
+ .../range_finder/range_height_control.cpp     |  1 +
+ .../range_finder/sensor_range_finder.cpp      | 10 ++++
+ .../range_finder/sensor_range_finder.hpp      |  4 ++
+ .../ekf2/test/test_SensorRangeFinder.cpp      | 47 +++++++++++++++++++
+ 4 files changed, 62 insertions(+)
+
+diff --git a/src/modules/ekf2/EKF/aid_sources/range_finder/range_height_control.cpp b/src/modules/ekf2/EKF/aid_sources/range_finder/range_height_control.cpp
+index 3e092e8..1b22a27 100644
+--- a/src/modules/ekf2/EKF/aid_sources/range_finder/range_height_control.cpp
++++ b/src/modules/ekf2/EKF/aid_sources/range_finder/range_height_control.cpp
+@@ -56,6 +56,7 @@ void Ekf::controlRangeHaglFusion(const imuSample &imu_sample)
+ 		_range_sensor.setCosMaxTilt(_params.range_cos_max_tilt);
+ 		_range_sensor.setQualityHysteresis(_params.ekf2_rng_qlty_t);
+ 		_range_sensor.setMaxFogDistance(_params.ekf2_rng_fog);
++		_range_sensor.setInAir(_control_status.flags.in_air);
+ 
+ 		_range_sensor.runChecks(imu_sample.time_us, _R_to_earth);
+ 
+diff --git a/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.cpp b/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.cpp
+index 3d7f462..c80b0ff 100644
+--- a/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.cpp
++++ b/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.cpp
+@@ -125,6 +125,16 @@ void SensorRangeFinder::updateStuckCheck()
+ 		return;
+ 	}
+ 
++	if (!_in_air) {
++		// On the ground the reading stays the same, so nothing here tells a stuck sensor from a working one.
++		// Left latched from the boot (no valid sample yet for 10 s), the range would stay rejected through the
++		// arming and the take-off: no height source at all with the range finder as the height reference.
++		_stuck_min_val = 0.0f;
++		_stuck_max_val = 0.0f;
++		_is_stuck = false;
++		return;
++	}
++
+ 	// Check for "stuck" range finder measurements when range was not valid for certain period
+ 	// This handles a failure mode observed with some lidar sensors
+ 	if (((_sample.time_us - _time_last_valid_us) > (uint64_t)10e6)) {
+diff --git a/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.hpp b/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.hpp
+index 0442614..23e8262 100644
+--- a/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.hpp
++++ b/src/modules/ekf2/EKF/aid_sources/range_finder/sensor_range_finder.hpp
+@@ -100,6 +100,9 @@ public:
+ 
+ 	void setMaxFogDistance(float max_fog_dist) { _max_fog_dist = max_fog_dist; }
+ 
++	// The stuck check only runs in the air: on the ground a reading that does not change is what a working sensor gives
++	void setInAir(bool in_air) { _in_air = in_air; }
++
+ 	void setQualityHysteresis(float valid_quality_threshold_s)
+ 	{
+ 		_quality_hyst_us = uint64_t(valid_quality_threshold_s * 1e6f);
+@@ -142,6 +145,7 @@ private:
+ 	 * Stuck check
+ 	 */
+ 	bool _is_stuck{};
++	bool _in_air{true};		///< false on the ground, where the stuck check is skipped
+ 	float _stuck_threshold{0.1f};	///< minimum variation in range finder reading required to declare a range finder 'unstuck' when readings recommence after being out of range (m), set to zero to disable
+ 	float _stuck_min_val{};		///< minimum value for new rng measurement when being stuck
+ 	float _stuck_max_val{};		///< maximum value for new rng measurement when being stuck
+diff --git a/src/modules/ekf2/test/test_SensorRangeFinder.cpp b/src/modules/ekf2/test/test_SensorRangeFinder.cpp
+index ecf69d8..8ade5eb 100644
+--- a/src/modules/ekf2/test/test_SensorRangeFinder.cpp
++++ b/src/modules/ekf2/test/test_SensorRangeFinder.cpp
+@@ -267,6 +267,53 @@ TEST_F(SensorRangeFinderTest, rangeStuck)
+ 	EXPECT_TRUE(_range_finder.isHealthy());
+ }
+ 
++TEST_F(SensorRangeFinderTest, rangeNotStuckOnGround)
++{
++	const Dcmf attitude{Eulerf(0.f, 0.f, 0.f)};
++
++	// WHEN: on the ground the data is first not valid and then
++	// constantly the same (a vehicle that sits still)
++	rangeSample new_sample = _good_sample;
++	const uint64_t dt = 3e5;
++	const uint64_t stuck_timeout = 11e6;
++	new_sample.quality = 0;
++	_range_finder.setInAir(false);
++
++	for (int i = 0; i < int(stuck_timeout / dt); i++) {
++		_range_finder.setSample(new_sample);
++		_range_finder.runChecks(new_sample.time_us, attitude);
++		new_sample.time_us += dt;
++	}
++
++	EXPECT_FALSE(_range_finder.isDataHealthy());
++
++	new_sample.quality = 100;
++
++	// we need a few sample to pass the hysteresis check
++	for (int i = 0; i < int(2e6 / dt); i++) {
++		_range_finder.setSample(new_sample);
++		_range_finder.runChecks(new_sample.time_us, attitude);
++		new_sample.time_us += dt;
++	}
++
++	// THEN: the data is healthy, the stuck check does not run on the ground
++	EXPECT_TRUE(_range_finder.isDataHealthy());
++	EXPECT_TRUE(_range_finder.isHealthy());
++
++	// AND WHEN: the vehicle is in the air with the same reading
++	_range_finder.setInAir(true);
++
++	for (int i = 0; i < int(2e6 / dt); i++) {
++		_range_finder.setSample(new_sample);
++		_range_finder.runChecks(new_sample.time_us, attitude);
++		new_sample.time_us += dt;
++	}
++
++	// THEN: it stays healthy, the data never stopped being valid
++	EXPECT_TRUE(_range_finder.isDataHealthy());
++	EXPECT_TRUE(_range_finder.isHealthy());
++}
++
+ TEST_F(SensorRangeFinderTest, qualityHysteresis)
+ {
+ 	const Dcmf attitude{Eulerf(0.f, 0.f, 0.f)};
+-- 
+2.53.0.windows.2
+

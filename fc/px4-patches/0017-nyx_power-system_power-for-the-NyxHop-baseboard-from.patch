@@ -1,7 +1,7 @@
 From 8cae6c2377f0a464812c72ec34b3f25608ad1412 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Sat, 14 Nov 2026 19:50:31 +0700
-Subject: [PATCH 17/18] nyx_power: system_power for the NyxHop baseboard from
+Subject: [PATCH 17/20] nyx_power: system_power for the NyxHop baseboard from
  its ADS1115 (AIN3 = 5V_PER / 2 through R43/R44 10k / 10k as voltage5v_v, the
  battery input AIN0 / 11 as brick 1 from 5 V, usb_connected 0), started in
  nyxhop-bb.config after battery_status; Linux has no board_adc, so commander's

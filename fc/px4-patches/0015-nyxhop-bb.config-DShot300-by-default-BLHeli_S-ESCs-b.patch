@@ -1,7 +1,7 @@
 From c0abd2d97afd12e87c1b1f7c786fae387fa25006 Mon Sep 17 00:00:00 2001
 From: tacitech <contact@tacitek.com>
 Date: Thu, 12 Nov 2026 21:27:56 +0700
-Subject: [PATCH 15/18] nyxhop-bb.config: DShot300 by default (BLHeli_S ESCs
+Subject: [PATCH 15/20] nyxhop-bb.config: DShot300 by default (BLHeli_S ESCs
  beeped as with no signal on DShot600 through the baseboard's level shifter,
  quiet and spinning on 300); TELEM1 /dev/ttyS1 at 115200 for a MicoAir MTF-01
  in Mav_PX4 (OPTICAL_FLOW_RAD + DISTANCE_SENSOR)

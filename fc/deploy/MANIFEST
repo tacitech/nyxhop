@@ -4,7 +4,7 @@ install.py checks every file against this list before and after it uploads.
 link: 2.0.12
 link-daemon: 41229c54ac654e62cfb9008ad3fce4a6
 fc-io: 0x46430003
-px4: v1.17.0 with px4-patches 0001-0018
+px4: v1.17.0 with px4-patches 0001-0020
 kernel-release: 6.1.70-284114-g2e8908932dfd
 kernel: Linux 6.1.70, github.com/analogdevicesinc/linux 2e8908932dfd9faf40ec9220a508aa1ce02699a8, configuration in kernel.config (GPLv2)
 
@@ -21,6 +21,6 @@ d5190d0acf5b8235aed234a208c2e31b       355  fcio-spi.dtbo
 8c9df39629e22a9ff377923e3a372188      1604  nyxbb-ps.dtbo
 fa108eb07c572f3db430b2f75f6c870f        78  px4-tlm.conf
 edff699315a9e8d95f0342d92d17ff19       596  px4.service
-d5c14d41d4ba63bcbe8a2422d0f86d47   1062810  px4.tar.gz
+96584519851991b9bf64e8abdc90b784   1062825  px4.tar.gz
 cfeca078907382084b6302a3aa7b1fd5     53812  u-dma-buf.ko
 7edda556e6bfe996b4390d63400520ce   8467328  uImage
