@@ -26,6 +26,7 @@ the PX4 configuration.
 | Screws | 6 × M3 × 10 button head, 6 × M2 × 6 self-tapping | the board and the cage use the radio module's own eight M3 × 6 |
 | Foam | two soft pads, 14 × 14 mm, 5 mm and 8 mm thick | under and over the IMU |
 | Leads | XT30 lead 15 cm, JST-SH 8-pin, JST-GH 6-pin and 4-pin | power, ESC port, TELEM1, ETH |
+| USB-C Ethernet adapter | | your computer's way into the board: the camera has the Ethernet jack |
 
 With the battery it weighs 1.1 kg.
 
@@ -114,6 +115,10 @@ accelerometer reads, enough to spoil the height the flight controller works out.
 faces keeps the wind off; nothing hard should touch that part of the board.
 
 ## Configuration
+
+The camera has the board's Ethernet jack, so the computer reaches the board through its USB-C
+port: a USB Ethernet adapter in that port and in your network, and
+`python link/scripts/nyx_flash.py --scan` gives the board's address.
 
 1. The flight controller, as in [fc/](../../README.md):
 

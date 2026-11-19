@@ -28,6 +28,14 @@ and sets it up for the link, with nothing to type. A camera whose factory passwo
 asks for it on NyxHop Pilot's video page. A computer plugged into the jack instead gets an address
 and finds the board at 172.31.77.1.
 
+With a camera in the jack, the board's USB-C port is the way in. Plug a USB Ethernet adapter into
+it and into your network: the board takes an address from your router, and
+
+    python link/scripts/nyx_flash.py --scan
+
+finds it. `nyx_flash.py`, `install.py` and ssh then work through the adapter as they do through the
+jack. The board has the drivers for ASIX (AX88772, AX88179) and CDC (ECM, NCM) adapters.
+
 ## Fly
 
 NyxHop Pilot is the app for it: video, the flight data, a map and the sticks, all over the link.
