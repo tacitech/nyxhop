@@ -12,7 +12,9 @@ runs in an FPGA; the channels are yours, anywhere from 70 MHz to 6 GHz.**
 
 <img src="docs/img/nyxhop-board.jpg" width="380" alt="NyxHop board"> <img src="docs/img/nyxhop-stack.jpg" width="380" alt="NyxHop board with the radio module">
 
-*The NyxHop board, 100 × 62 mm, with the radio module plugged in: the link and a flight controller in one Zynq chip.*
+<img src="docs/img/nyxhop-aircraft.jpg" width="764" alt="The NyxHop board on a Mark4 7-inch drone">
+
+*The NyxHop board, 100 × 62 mm, with the radio module plugged in, and on a Mark4 7-inch drone: the link and a flight controller in one Zynq chip.*
 
 [![NyxHop demo: the two links on a spectrum analyser, live video, an LTE jammer, 48 Mbit/s and the IP bridge](docs/img/nyxhop-demo.jpg)](docs/img/nyxhop-demo.mp4)
 
@@ -157,10 +159,6 @@ with no separate flight-controller board: its own IMU, a 2S–6S battery input, 
 autopilot ports (telemetry, GPS, RC, CAN, I2C, SPI), eight PWM/DShot motor outputs, a 4-in-1 ESC
 port, Ethernet, USB-C and microSD, 100 × 62 mm. Its flight-controller image, the install script,
 the PX4 patches and the board's schematic are in [fc/](fc/).
-
-<img src="docs/img/nyxhop-aircraft.jpg" width="760" alt="The NyxHop board on a Mark4 7-inch drone">
-
-*The NyxHop board on a Mark4 7-inch drone.*
 
 NyxHop Pilot flies it over the link: video, the flight data, a map and the sticks in one window.
 
