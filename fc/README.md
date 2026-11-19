@@ -21,6 +21,7 @@ replaces, and reboots. The link runs as before, with PX4's MAVLink going over it
 station, and the board's licence covers the flight controller too. `status` shows what runs;
 `uninstall` puts the board back as it was and keeps PX4's parameters unless you add `--all`.
 Flashing the link again takes the flight controller off: run `install` once more after it.
+`params` sets an aircraft's PX4 parameters from a file.
 
 The board's Ethernet jack is the camera's from then on: plug an IP camera in and the board finds it
 and sets it up for the link, with nothing to type. A camera whose factory password was changed
@@ -64,6 +65,7 @@ PX4 keeps a log of every flight, from arming to disarming, in `/home/root/px4/lo
 | `ardupilot-patches/` | ArduCopter 4.7.2: two fixes for the Zynq's ARM. GCC 10 at -O3 broke LOITER and POSHOLD through strict aliasing |
 | `docker/` | the build image: Debian bullseye armhf, GCC 10 and glibc 2.31, the same as the board's Linux |
 | `hardware/` | the NyxHop baseboard v0.2: schematic and ports |
+| `aircraft/` | the board on a Mark4 7-inch drone: parts, wiring, the printed mounts for the board and the camera, PX4 parameters |
 
 ## Build PX4 yourself
 

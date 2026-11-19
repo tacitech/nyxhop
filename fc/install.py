@@ -4,6 +4,7 @@
     python install.py install <board address>
     python install.py uninstall <board address> [--all]
     python install.py status <board address>
+    python install.py params <board address> <file>
 
 The board must already run the NyxHop link (link/scripts/nyx_flash.py) and the camera app
 (link/scripts/nyx_ipcam_install.py), which carries PX4's MAVLink over the link.
@@ -16,6 +17,9 @@ settings (channels, pairing, licence, antenna port) are left as they are.
 
 uninstall keeps PX4's parameters and logs in /home/root/px4 unless you add --all.
 
+params sets PX4's parameters from a file (NAME VALUE on a line, # starts a comment; the one of an
+aircraft is in aircraft/), restarts PX4 and reads every one back. The motors must be stopped.
+
 Needs Python 3 and paramiko (python -m pip install paramiko). It logs in as root with the key
 ~/.ssh/nyx_board if you have one (BOARD_KEY names another), else with the password in BOARD_PW
 (set BOARD_PW=analog; PowerShell: $env:BOARD_PW = "analog").
@@ -23,6 +27,7 @@ Needs Python 3 and paramiko (python -m pip install paramiko). It logs in as root
 import argparse
 import hashlib
 import os
+import re
 import socket
 import sys
 import time
@@ -414,17 +419,101 @@ def status(a):
         sys.exit(1)
 
 
+def read_params(path):
+    """the parameters of a file as (name, value text): NAME VALUE on a line, # starts a comment"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        sys.exit(f"{path}: {e.strerror}")
+    out = []
+    for n, line in enumerate(lines, 1):
+        parts = line.split("#", 1)[0].split()
+        if not parts:
+            continue
+        try:
+            good = len(parts) == 2 and re.fullmatch(r"[A-Z][A-Z0-9_]{0,15}", parts[0]) and float(parts[1]) is not None
+        except ValueError:
+            good = False
+        if not good:
+            sys.exit(f"{path}, line {n}: expected NAME VALUE, got '{line.strip()}'")
+        out.append((parts[0], parts[1]))
+    if not out:
+        sys.exit(f"{path}: no parameters in it")
+    return out
+
+
+def px4_param(b, name):
+    """a PX4 parameter's value as the running PX4 prints it (floats to 4 decimals); None: no such one"""
+    out = b.sh(f"cd {PX4} && PATH={PX4}/bin:$PATH timeout 10 px4-param show {name} 2>&1")
+    m = re.search(rf"\b{name} \[\d+,\d+\] : (\S+)", out)
+    return m.group(1) if m else None
+
+
+def same_value(shown, wanted):
+    try:
+        return shown is not None and abs(float(shown) - float(wanted)) <= 6e-5 + 1e-7 * abs(float(wanted))
+    except ValueError:
+        return False
+
+
+def px4_answers(b):
+    return b.sh(f"cd {PX4} && PATH={PX4}/bin:$PATH timeout 10 px4-commander status 2>&1")
+
+
+def params(a):
+    if not a.file:
+        sys.exit("which file?  install.py params <board address> <file>")
+    want = read_params(a.file)
+    b = connect(a.host)
+    if b.sh("systemctl is-active px4") != "active":
+        sys.exit(f"{a.host}: PX4 does not run there. 'install.py install' first, or see 'install.py status'.")
+    if "Disarmed" not in px4_answers(b):
+        sys.exit(f"{a.host}: the motors are armed, or PX4 does not answer. Nothing was changed.")
+    print(f"{a.host}: {len(want)} parameters from {os.path.basename(a.file)}")
+    before = {}
+    for name, value in want:
+        before[name] = px4_param(b, name)
+        if before[name] is None:
+            b.close()
+            sys.exit(f"  PX4 has no parameter {name}. Nothing was changed.")
+    for name, value in want:
+        if not same_value(before[name], value):
+            b.sh(f"cd {PX4} && PATH={PX4}/bin:$PATH timeout 10 px4-param set {name} {value} 2>&1")
+    b.sh(f"cd {PX4} && PATH={PX4}/bin:$PATH timeout 20 px4-param save 2>&1")
+    # PX4 restarted: some of them are read when it starts only, and what it shows then is what it saved
+    b.sh("systemctl restart px4", timeout=60)
+    t0 = time.time()
+    while "isarmed" not in px4_answers(b) and time.time() - t0 < 90:
+        time.sleep(2)
+    bad = []
+    for name, value in want:
+        now = px4_param(b, name)
+        if same_value(now, value):
+            was = "" if same_value(before[name], value) else f"   (was {before[name]})"
+            print(f"  {name:17s}{now:>12s}{was}")
+        else:
+            print(f"  {name:17s}{str(now):>12s}   WANTED {value}")
+            bad.append(name)
+    b.close()
+    if bad:
+        print("\nNOT SET:\n  " + "\n  ".join(bad))
+        sys.exit(1)
+    print("PX4 restarted with them.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["install", "uninstall", "status"])
+    ap.add_argument("command", choices=["install", "uninstall", "status", "params"])
     ap.add_argument("host", metavar="board-address")
+    ap.add_argument("file", nargs="?", help="params: the parameter file")
     ap.add_argument("--payload", default=os.path.join(HERE, "deploy"),
                     help="the board image (default: deploy/ beside this file)")
     ap.add_argument("--force", action="store_true",
                     help="install on a board whose link release or Linux is not the image's")
     ap.add_argument("--all", action="store_true", help="uninstall: PX4's parameters and logs too")
     a = ap.parse_args()
-    {"install": install, "uninstall": uninstall, "status": status}[a.command](a)
+    {"install": install, "uninstall": uninstall, "status": status, "params": params}[a.command](a)
 
 
 if __name__ == "__main__":

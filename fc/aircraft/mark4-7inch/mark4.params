@@ -1,0 +1,51 @@
+# NyxHop board on a Mark4 7-inch quad: the PX4 parameters of this aircraft, on top of the board's
+# own (nyxhop-bb.config). README.md beside this file says why each one is what it is.
+#
+#   python fc/install.py params <board address> fc/aircraft/mark4-7inch/mark4.params
+#
+# NAME VALUE on a line; # starts a comment.
+
+# Motors, numbered as the ESC port's M1..M4 are wired: 1 front left, 2 front right, 3 rear left,
+# 4 rear right. Position from the centre in metres (PX forward, PY to the right); KM is negative
+# for a motor that turns clockwise seen from above.
+CA_ROTOR0_PX      0.0965
+CA_ROTOR0_PY     -0.1115
+CA_ROTOR0_KM     -0.05
+CA_ROTOR1_PX      0.0965
+CA_ROTOR1_PY      0.1115
+CA_ROTOR1_KM      0.05
+CA_ROTOR2_PX     -0.0965
+CA_ROTOR2_PY     -0.1115
+CA_ROTOR2_KM      0.05
+CA_ROTOR3_PX     -0.0965
+CA_ROTOR3_PY      0.1115
+CA_ROTOR3_KM     -0.05
+
+# Thrust: it hovers at a quarter of full throttle on 4S; the take-off climbs at 2 m/s.
+MPC_THR_HOVER     0.25
+MPC_TKO_SPEED     2
+
+# Battery: warn at 25 %, critical at 15 %, emergency at 8 %.
+BAT_LOW_THR       0.25
+BAT_CRIT_THR      0.15
+BAT_EMERGEN_THR   0.08
+
+# Compass of the GPS module (arrow to the nose): its chip sits rolled 180 and yawed 90 degrees.
+CAL_MAG0_ROT      10
+
+# Height: the board has no barometer, the MTF-01's range finder is the height reference.
+SYS_HAS_BARO      0
+EKF2_BARO_CTRL    0
+EKF2_HGT_REF      2
+EKF2_RNG_CTRL     2
+EKF2_MIN_RNG      0.09
+EKF2_RNG_FOG      0
+
+# Optical flow: on the ground only over a surface it sees well.
+EKF2_OF_QMIN_GND  60
+
+# Estimator: the accelerometer's offset moves with the board's temperature, and the aircraft
+# stands with its motors running for a few seconds before it lifts off.
+EKF2_ACC_B_NOISE  0.01
+EKF2_ABL_LIM      0.8
+EKF2_NOAID_TOUT   10000000

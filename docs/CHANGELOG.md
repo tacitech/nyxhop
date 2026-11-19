@@ -7,6 +7,9 @@
   while the aircraft sits on the ground for a stuck one and ignored it, so the height drifted
   from arming. PX4 also keeps a log of every flight in `/home/root/px4/log` on the board. Run
   `fc/install.py install` again.
+* NyxHop board (`fc/`): the board on a Mark4 7-inch drone, in `fc/aircraft/`: the parts, the
+  wiring, the printed mounts for the board and the camera, and the aircraft's PX4 parameters.
+  `fc/install.py params` puts a parameter file on the board.
 * The link, its boards and the apps are unchanged.
 
 ## 2.0.14
