@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.17
+
+* NyxHop board (`fc/`): the board's system kept a login prompt on the serial port of the RC
+  jack. It took the port from PX4 at every start, and PX4 then kept the processor busy enough
+  for the video to come late and with fewer pictures. The installer turns that prompt off and
+  the port is PX4's alone. Run `fc/install.py install` again.
+* The link, its boards and the apps are unchanged.
+
 ## 2.0.16
 
 * PlutoSky R2 (untested): NyxHop on the PlutoSky R2, a Zynq-7020 board that installs like a PlutoSDR.

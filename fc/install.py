@@ -47,6 +47,9 @@ CAMPORT = "/etc/systemd/system/nyx-ipcam.service.d/camport.conf"
 USBNET = "/etc/systemd/system/nyx-usbnet.service"
 USB_ADDR = "172.31.78.1"
 USB_FILES = ["nyx-usbnet.sh", "nyx-usbdhcp.py"]
+# the image keeps a login prompt on the serial port that the flight controller makes the RC jack
+RC_GETTY = "serial-getty@ttyS0.service"
+RC_GETTY_WAS = PX4 + "/rc-getty.was-on"
 # the files the image replaces on the board; each one's old version is kept as <name>.pre-fc
 REPLACED = [
     ("BOOT.BIN", "/boot/BOOT.BIN"),
@@ -342,6 +345,13 @@ def install(a):
     print("  px4.service enabled; the camera app hands the link's MAVLink to PX4"
           + ("; the Ethernet jack is the camera's" if "camport.conf" in p.files else ""))
 
+    # the image's login prompt on the RC jack's serial port takes the port from PX4's RC driver at
+    # every boot: the driver then spins (half a processor core gone, the link starved of it), and a
+    # receiver's bytes would be typed at that prompt. Off, and noted for uninstall to turn it on again
+    b.sh(f"systemctl is-enabled -q {RC_GETTY} 2>/dev/null && touch {RC_GETTY_WAS}; "
+         f"systemctl disable --now {RC_GETTY} 2>/dev/null; systemctl mask {RC_GETTY} 2>/dev/null; sync")
+    print("  the image's login prompt on the RC jack's serial port is off")
+
     # the USB-C port as a network card to a computer
     if "nyx-usbnet.service" in p.files:
         for name in USB_FILES:
@@ -395,6 +405,8 @@ def uninstall(a):
          "sed -i '/is the camera port (nyx-ipcam)/d; /^denyinterfaces eth0$/d' /etc/dhcpcd.conf; "
          "systemctl daemon-reload; systemctl restart nyx-ipcam 2>/dev/null")
     print("  PX4 stopped, px4.service removed, the camera app as it was")
+    b.sh(f"systemctl unmask {RC_GETTY} 2>/dev/null; "
+         f"test -e {RC_GETTY_WAS} && systemctl enable {RC_GETTY} 2>/dev/null; rm -f {RC_GETTY_WAS}")
     ours = {tuple(l.split()) for l in b.sh(f"cat {RECORD} 2>/dev/null").splitlines() if len(l.split()) == 2}
     for name, path in REPLACED:
         short = os.path.basename(path)
