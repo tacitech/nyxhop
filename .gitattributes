@@ -17,6 +17,9 @@
 *.gz -text
 *.ko -text
 *.frm -text
+*.pdf -text
+*.bat text eol=crlf
+*.ps1 text eol=crlf
 *.mp4 -text
 *.jpg -text
 *.apk -text

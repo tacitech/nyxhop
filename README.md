@@ -48,13 +48,13 @@ and an IP network over the radio.*
 
 ## Getting started
 
-You need two boards (ADRV9364-Z7020 or PlutoSDR, in any mix), antennas for your band, and a PC
+You need two boards (ADRV9364-Z7020, PlutoSDR or PlutoSky R2, in any mix), antennas for your band, and a PC
 on the same network with Python 3 (`pip install paramiko`) and Rust 1.85 or newer. For a first
 test, put the boards 1 to 3 m apart.
 
 **1. An OS on the board.** ADRV9364: write ADI's *Kuiper Linux 2023_r2* to a microSD card
 (configuration `adrv9364z7020_lvds`), boot it with Ethernet plugged in, and find its address on
-your router (user `root`, password `analog`). PlutoSDR: nothing to do.
+your router (user `root`, password `analog`). PlutoSDR and PlutoSky R2: nothing to do.
 
 **2. NyxHop on the board.** From the repository root:
 
@@ -67,6 +67,9 @@ python link/scripts/nyx_pluto.py --pair                            # or: two Plu
 
 The board restarts and runs NyxHop at every power-up from then on. Run the same command again
 to update it; tables, pairing and licence are kept. `nyx_flash.py --scan` finds your boards.
+
+PlutoSky R2 (untested): plug its USB port into the PC and run `deploy/plutosky-r2/install.bat`
+(Windows) or `install.sh` (Linux, Mac). `deploy/plutosky-r2/Install guide.pdf` has every step.
 
 **3. The app.** `cargo build --release`, then run `nyxhop` on each computer. It asks which end
 this computer is (**Ground station** or **Aircraft**) and the board's address. In the ground
@@ -135,6 +138,9 @@ A licence for your first ten boards is free, commercial use included, and never 
 Each board needs its own licence. More boards or later feature generations:
 **contact@tacitek.com**. Details in [docs/license.md](docs/license.md).
 
+**PlutoSky R2 (untested): 20 running hours free, then a licence from contact@tacitek.com.** The free
+licences and the licence page are for the ADRV9364.
+
 ## Tailored to your system
 
 This repository is where we start. Write to **contact@tacitek.com** and we fit the link to what
@@ -152,6 +158,7 @@ you are building:
 | NyxHop board | Zynq-7020 | AD9364 | current radio and flight controller, 2S–6S battery |
 | ADRV9364-Z7020 | Zynq-7020 | AD9364 | current radio |
 | PlutoSDR | Zynq-7010 | AD9363 | current radio, free |
+| PlutoSky R2 | Zynq-7020 | AD9361 or AD9363 | current radio, **untested** |
 | ANTSDR E200 | Zynq-7020 | AD9361 | previous radio: pairs with another E200 |
 
 The NyxHop board runs the link and a PX4 or ArduPilot flight controller in the same Zynq chip,
@@ -162,7 +169,11 @@ the PX4 patches and the board's schematic are in [fc/](fc/).
 
 NyxHop Pilot flies it over the link: video, the flight data, a map and the sticks in one window.
 
-An ADRV9364 and a PlutoSDR pair in any mix, and any board can be either end. Range depends on
+The PlutoSky R2 image is ported from the ADRV9364 and has not run on an R2 board yet. It is the
+same link, on a board that installs like a PlutoSDR (`deploy/plutosky-r2/`). If you have one,
+tell us how it runs: **contact@tacitek.com**.
+
+An ADRV9364, a PlutoSDR and a PlutoSky R2 pair in any mix, and any board can be either end. Range depends on
 the amplifiers and antennas at each end:
 
 | RF chain at each end | band | video | link held |

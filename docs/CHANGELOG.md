@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.16
+
+* PlutoSky R2 (untested): NyxHop on the PlutoSky R2, a Zynq-7020 board that installs like a PlutoSDR.
+  Plug its USB port into the computer and run `deploy/plutosky-r2/install.bat` (or `install.sh`);
+  `Install guide.pdf` next to it has every step. It runs the same link as the ADRV9364 and pairs
+  with an ADRV9364, a PlutoSDR or another R2. 20 running hours, then a licence from
+  contact@tacitek.com. Ported from the ADRV9364 and not yet run on an R2 board: if you have one,
+  tell us how it runs.
+* `nyx_pluto.py` leaves a Zynq-7020 board that shows up as a PlutoSDR alone: the PlutoSDR's
+  firmware does not start on it.
+* `nyx_ip.py` also works with boards that have no `nc`.
+* The ADRV9364 and PlutoSDR images are unchanged.
+
 ## 2.0.15
 
 * NyxHop board (`fc/`): an aircraft that takes its height from a downward range finder (the

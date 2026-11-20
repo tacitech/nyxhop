@@ -202,9 +202,13 @@ def main():
     on(a.ground, "ground", data)
     c = connect(a.ground)
     try:
-        sh(c, "nc -w 2 127.0.0.1 7202 </dev/null >/dev/null 2>&1; true")
-        _, o, _ = c.exec_command("echo 'uplink mcs auto' | nc -w 2 127.0.0.1 7202", timeout=10)
-        o.read()
+        # `uplink mcs auto` to the ground daemon: the firmware's nyxctl where there is one (some
+        # boards' busybox has no nc), else nc; the answer is looked at, not dropped
+        r = sh(c, "if [ -x /opt/nyxhop/nyxctl ]; then /opt/nyxhop/nyxctl --wait 3 'uplink mcs auto'; "
+                  "elif command -v nc >/dev/null 2>&1; then echo 'uplink mcs auto' | nc -w 2 127.0.0.1 7202; "
+                  "else echo 'neither nyxctl nor nc on the board'; fi")
+        if "ok" not in r:
+            print(f"ground: 'uplink mcs auto' not taken ({r.strip()})")
         p = sh(c, "ping -c 4 -i 0.3 -W 2 -I 192.168.20.1 192.168.10.1 | tail -1")
     finally:
         c.close()

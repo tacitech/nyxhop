@@ -108,10 +108,17 @@ def find_plutos():
             continue
         if "PlutoSDR" not in html:
             continue
+        model = info_field(html, "Model")
+        # a Zynq-7020 board that shows up as a PlutoSDR (the PlutoSky R2 and other clones): the
+        # firmware here is the Pluto's (Zynq-7010) and would not start on it
+        if "Z7020" in model:
+            print(f"{root}: {model} is not a PlutoSDR, left alone"
+                  " (a PlutoSky R2 takes deploy/plutosky-r2)")
+            continue
         found.append({
             "drive": root,
             "serial": info_field(html, "Serial"),
-            "model": info_field(html, "Model"),
+            "model": model,
             "build": info_field(html, "Build"),
             "ip": ini_get(text, "NETWORK", "ipaddr"),
             "host": ini_get(text, "NETWORK", "ipaddr_host"),

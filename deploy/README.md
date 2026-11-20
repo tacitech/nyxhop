@@ -14,10 +14,17 @@ source locations in `../docs/THIRD-PARTY.md`.
     deploy/e200/       nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-A-e200.cfg  nyx-radio-B-e200.cfg
     deploy/ipcam/      nyx-ipcam  nyx-ipcam.service  e200/   (the camera app for the board's ARM)
     deploy/pluto/      pluto.frm   (the PlutoSDR's whole firmware: ADI's, with NyxHop inside)
+    deploy/plutosky-r2/ pluto.frm  install.bat  install.ps1  install.sh  Install guide.pdf  README.txt   (untested)
     deploy/bridge/     nyx-bridge  (the IP bridge for the ADRV9364: link/scripts/nyx_ip.py)
 
-`adrv9364/` and `pluto/` run the current radio and pair with each other in any mix. `e200/` is
-the previous generation: an E200 pairs with another E200.
+`adrv9364/`, `pluto/` and `plutosky-r2/` run the current radio and pair with each other in any
+mix. `e200/` is the previous generation: an E200 pairs with another E200.
+
+`plutosky-r2/` is ported from the ADRV9364 and has not run on an R2 board yet. The PlutoSky R2
+is a Zynq-7020 board that shows up as a PlutoSDR. Plug its USB port in and run `install.bat` (Windows) or `install.sh`
+(Linux, Mac), or copy its `pluto.frm` onto the board's drive and eject it; `Install guide.pdf` has
+every step, from the wiring to going back to the maker's firmware. `nyx_pluto.py` leaves it
+alone. The R2 runs 20 hours, then needs a licence: contact@tacitek.com.
 
 The PlutoSDR takes `pluto/pluto.frm` through its own USB drive: `../link/scripts/nyx_pluto.py`
 does it for every Pluto plugged in (firmware, a network of its own, `--pair` for two), or copy

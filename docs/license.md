@@ -7,6 +7,10 @@ Every other NyxHop board (ADRV9364-Z7020, ANTSDR E200) needs a licence. The firs
 commercial use included; past that, and for the coming feature generations, write to us and we
 will quote you. A licence never expires, and the board never contacts us.
 
+**PlutoSky R2 (untested): a licence from the first board.** It runs 20 hours first, like the others;
+then send its DNA to **contact@tacitek.com** for a licence. The free licences and the licence
+page below are for the ADRV9364 and the E200.
+
 ## Tiers
 
 | | PlutoSDR | ADRV9364 / E200, free | anything beyond that |
