@@ -100,7 +100,8 @@ For ArduCopter:
 ## Licence
 
 - `deploy/`: the EULA (`../docs/EULA.md`), as the other board images. PX4 in it is BSD 3-Clause;
-  the Linux kernel is GPLv2, built from ADI's kernel with `deploy/kernel.config`.
+  the Linux kernel is GPLv2, built from ADI's kernel with `deploy/kernel.config` and the patches
+  `deploy/kernel-*.patch`.
 - `px4-patches/`: BSD 3-Clause, as PX4. `ardupilot-patches/`: GPLv3, as ArduPilot.
 - The schematic is here so you can wire the board into your system.
 - Everything else: public domain, as the rest of this repository.

@@ -58,7 +58,7 @@ REPLACED = [
     ("u-dma-buf.ko", HOME + "/u-dma-buf.ko"),
 ]
 SCRIPTS = ["fc-start.sh", "fc-status.sh"]
-TEXT = (".sh", ".service", ".conf", ".config")
+TEXT = (".sh", ".service", ".conf", ".config", ".patch")
 
 
 def md5(data):

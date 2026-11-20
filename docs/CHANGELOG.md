@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.18
+
+* NyxHop board (`fc/`): with PX4, the link and the camera running, the board's processor has
+  more than a third of its time free, up from a twentieth. The kernel's SPI driver took an
+  interrupt for every byte past the first 128 of a transfer, 65 000 a second for the IMU; the
+  image's kernel has that fixed, and the patch is in `fc/deploy` beside the kernel's
+  configuration. Run `fc/install.py install` again.
+* The link, its boards and the apps are unchanged.
+
 ## 2.0.17
 
 * NyxHop board (`fc/`): the board's system kept a login prompt on the serial port of the RC

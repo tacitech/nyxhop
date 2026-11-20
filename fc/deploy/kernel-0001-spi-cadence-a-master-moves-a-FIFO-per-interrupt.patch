@@ -1,0 +1,36 @@
+spi: cadence: a master moves a FIFO per interrupt, not one byte
+
+After the first FIFO (128 bytes) of a transfer the interrupt handler moved
+THLD bytes for every "TX FIFO under the threshold" interrupt. That is right
+for a slave, whose threshold is half the FIFO, but a master keeps the
+threshold at 1: every byte past the first 128 took an interrupt of its own.
+PX4 reads the ICM-42688 FIFO 204 bytes at a time, 800 times a second: about
+65 000 interrupts a second, half of one Cortex-A9 core.
+
+For a master that interrupt means the TX FIFO is empty: every byte written so
+far has left it, and all but the one that may still be in the shift register
+are in the RX FIFO. Take those and put as many new ones in.
+
+Applies to ADI linux 2e8908932dfd (6.1.70).
+---
+diff --git a/drivers/spi/spi-cadence.c b/drivers/spi/spi-cadence.c
+index aacc9b382..7ed7262e3 100644
+--- a/drivers/spi/spi-cadence.c
++++ b/drivers/spi/spi-cadence.c
+@@ -402,6 +402,16 @@ static irqreturn_t cdns_spi_irq(int irq, void *dev_id)
+ 		if (trans_cnt > 1 && xspi->tx_bytes < xspi->tx_fifo_depth >> 1)
+ 			cdns_spi_write(xspi, CDNS_SPI_THLD, 1);
+ 
++		/* A master keeps the threshold at one: the TX FIFO is empty
++		 * here, so every byte written so far has left it and all but
++		 * the one that may still be in the shift register are in the
++		 * RX FIFO. Take those and put as many new ones in, instead of
++		 * one byte for each interrupt.
++		 */
++		if (!spi_controller_is_slave(ctlr) &&
++		    xspi->rx_bytes - xspi->tx_bytes > 2)
++			trans_cnt = xspi->rx_bytes - xspi->tx_bytes - 1;
++
+ 		while (trans_cnt) {
+ 			cdns_spi_read_rx_fifo(xspi, 1);
+ 
