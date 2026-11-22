@@ -406,12 +406,12 @@ pub fn link_section(ui: &mut egui::Ui, st: &BoardState, role: Role, board: &Boar
                 if ui
                     .add(egui::Button::new(t("Link aircraft", "Link máy bay")).min_size(egui::vec2(150.0, 40.0)))
                     .on_hover_text(t(
-                        "New pair key, sent on the link channel for 20 s. The aircraft takes it when unlinked, or while Accept link runs on it.",
-                        "Khoá ghép cặp mới, phát trên kênh link trong 20 s. Máy bay nhận khi chưa link, hoặc khi đang bật Nhận link.",
+                        "New pair key, sent on the link channel for 30 s. The aircraft takes it when unlinked, or while Accept link runs on it.",
+                        "Khoá ghép cặp mới, phát trên kênh link trong 30 s. Máy bay nhận khi chưa link, hoặc khi đang bật Nhận link.",
                     ))
                     .clicked()
                 {
-                    board.send("link bind 20".to_string());
+                    board.send("link bind 30".to_string());
                 }
                 if action(ui, t("Unlink", "Bỏ link")) {
                     board.send("link unbind".to_string());
@@ -433,6 +433,41 @@ pub fn link_section(ui: &mut egui::Ui, st: &BoardState, role: Role, board: &Boar
                 }
             }
         });
+        // The link channel, where the two ends meet for the pair key: the first control channel
+        // of each end's own table unless set here. An end taking a link listens over its whole
+        // control table as well, so two tables need one channel in common - or the same number
+        // typed here on both ends. Only a board that reports it.
+        if let Some(cur) = st.kv.get("hop_link_chan").cloned() {
+            let by_hand = st.kv.get("hop_link_chan_set").map(String::as_str) == Some("1");
+            let id = ui.id().with("link_chan_edit");
+            let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
+            th::row(ui, t("Link channel", "Kênh link"), |ui| {
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let r = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(90.0).hint_text(cur.as_str()));
+                ui.label(egui::RichText::new("MHz").size(12.5).color(th::DIM));
+                if (r.lost_focus() && enter) || ui.button(t("Set", "Đặt")).clicked() {
+                    if let Some(m) = buf.trim().replace(',', ".").parse::<f64>().ok().filter(|m| (70.0..=6000.0).contains(m)) {
+                        board.send(format!("link chan {m}"));
+                        buf.clear();
+                    }
+                }
+                if by_hand && ui.button(t("First control channel", "Kênh điều khiển đầu")).clicked() {
+                    board.send("link chan 0".to_string());
+                    buf.clear();
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(id, buf));
+            ui.label(
+                egui::RichText::new(crate::tf!(
+                    "Now {} MHz{}. The two ends meet on it for the pair key. The end taking a link also listens over the rest of its control table; two tables with no channel in common need the same link channel set on both ends.",
+                    "Hiện là {} MHz{}. Hai đầu gặp nhau trên kênh này để trao khoá ghép cặp. Đầu nhận link còn nghe cả các kênh còn lại trong bảng điều khiển của nó; hai bảng không có kênh nào chung thì đặt cùng một kênh link ở cả hai đầu.",
+                    cur,
+                    if by_hand { t(" (set here)", " (đặt ở đây)") } else { t(" (the first control channel)", " (kênh điều khiển đầu tiên)") }
+                ))
+                .small()
+                .color(th::DIM),
+            );
+        }
     });
 }
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.21
+
+* ADRV9364, NyxHop board: linking an aircraft whose control table begins with another channel
+  than the ground station's. The ground sends the pair key on its link channel, the first
+  channel of its control table. An aircraft that kept another table listened on the first
+  channel of its own, and the two never met, with nothing on the screen to say why. An aircraft
+  taking a link now listens over its whole control table as well: with a channel in common the
+  two link in 2 to 7 seconds (12 with a table of 64 channels). It only listens; nothing is sent
+  off anyone's table.
+* Apps: Link shows the link channel of the board connected to, and sets it. Two tables with no
+  channel in common link once both ends have the same link channel. "Link aircraft" sends the
+  key for 30 seconds, up from 20.
+* PlutoSky R2 (untested): the firmware has the radio of this version, the fixes of 2.0.20
+  included.
+* Run `nyx_flash.py` again on both ends: the role, the channel tables, the pairing and the
+  licence are kept (on a NyxHop board run `fc/install.py install` once more after it). The two
+  ends work together whichever is updated first; this fix is the aircraft's.
+* The boards' FPGA images and the PlutoSDR firmware are unchanged.
+
 ## 2.0.20
 
 * ADRV9364, NyxHop board: with the control link hopping, an aircraft lost part of what the
