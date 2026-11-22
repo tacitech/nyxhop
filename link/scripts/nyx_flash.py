@@ -238,6 +238,23 @@ ADRV_FLAG = "/home/root/nyx-phy64"
 ADRV_STATE = "/home/root/o64"
 
 
+# The image's desktop login. A board has no screen: the display server dies and is started again
+# without end, and that takes processor time from the radio daemon - on a card that still ran it,
+# two thirds of both cores with video alone, and data through the link several times slower.
+# Every board that runs NyxHop has it off, no option to keep it: the installer switches it off
+# here and the start script (nyxhop-start.py) does the same at every start.
+ADRV_DESKTOP = "lightdm"
+
+
+def desktop_state(b):
+    """'' when the image has no desktop login, else 'enabled' / 'active' / 'enabled active' / 'off'"""
+    if not b.sh(f"systemctl list-unit-files {ADRV_DESKTOP}.service 2>/dev/null | grep -c '^{ADRV_DESKTOP}'").startswith("1"):
+        return ""
+    st = [w for w, q in (("enabled", "is-enabled"), ("active", "is-active"))
+          if b.sh(f"systemctl {q} {ADRV_DESKTOP} 2>/dev/null") == w]
+    return " ".join(st) or "off"
+
+
 def flash_adrv(a, host, role):
     d = need(a.payload, "adrv9364",
              ["BOOT.BIN", "devicetree.dtb", "nyx-radio-node", "fir10MHz.ftr",
@@ -249,6 +266,7 @@ def flash_adrv(a, host, role):
               f"{os.path.basename(ADRV_FLAG)}")
         print(f"  {ADRV_STATE}/: nyx-radio.cfg, nyx-radio-A.cfg, nyx-radio-B.cfg, nyx-role")
         print(f"  /etc/systemd/system/nyxhop.service; enable; reboot if boot changed")
+        print("  desktop login (lightdm): switched off if the image runs it (it takes the processor from the radio)")
         return
     b = Board(host)
     krn = b.sh("uname -r")
@@ -296,6 +314,9 @@ def flash_adrv(a, host, role):
         print("  /boot/uEnv.txt: added uio_pdrv_genirq.of_id=generic-uio")
     b.sh("systemctl daemon-reload && systemctl enable nyxhop >/dev/null 2>&1; true")
     print(f"  service nyxhop enabled (role {role})")
+    if desktop_state(b) not in ("", "off"):
+        b.sh(f"systemctl disable --now {ADRV_DESKTOP} >/dev/null 2>&1; true")
+        print(f"  desktop login ({ADRV_DESKTOP}): switched off, it took the processor from the radio")
     if a.mac:
         b.put_text(f"[Match]\nOriginalName=eth0\n\n[Link]\nMACAddress={a.mac}\n",
                    "/etc/systemd/network/10-nyxhop-eth0.link")
@@ -326,12 +347,19 @@ def verify_adrv(host):
         print("  ssh not up"); return
     ver = ""
     for _ in range(12):
-        ver = " ".join(l for l in console(host, "o64", timeout=4).splitlines() if l.startswith(("rx ver", "tx ver", "rx run", "tx run")))
+        ver = " ".join(l for l in console(host, "o64", timeout=4).splitlines() if l.startswith(("rx run", "tx run")))
         if ver:
             break
         time.sleep(5)
     print("  radio      :", ver[:200] or f"no answer (see {ADRV_STATE}.out)")
+    # the console's `o64` has no version: the daemon logs it once at start
+    print("  bitstream  :", b.sh(f"grep -a 'o64_rx running' {ADRV_STATE}.out | tail -1 | sed 's/.*running, //'")
+          or "no 'o64_rx running' line yet")
     print("  service    :", b.sh("systemctl is-active nyxhop"))
+    ds = desktop_state(b)
+    if ds not in ("", "off"):
+        print(f"  desktop    : {ADRV_DESKTOP} {ds} - it takes the processor from the radio; flash again, "
+              f"or on the board: systemctl disable --now {ADRV_DESKTOP}")
     print("  uio        :", b.sh("for u in /sys/class/uio/uio*; do printf '%s=%s ' $(basename $u) $(cat $u/name); done"))
     print("  control    :", b.sh("python3 /home/root/nyxctl.py get 2>&1 | tr '\\n' ' ' | cut -c1-200"))
     b.close()

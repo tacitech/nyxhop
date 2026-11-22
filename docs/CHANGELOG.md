@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.19
+
+* ADRV9364, NyxHop board: the board's system image starts a desktop login at every boot. With
+  no screen on the board its display server is started over and over, and that takes processor
+  time from the radio, on some cards most of it; data sent through the link was then several
+  times slower. `nyx_flash.py` turns the desktop login off when it installs, and NyxHop turns
+  it off at every start. Run `nyx_flash.py` again: the role, the channel tables, the pairing and
+  the licence are kept (on a NyxHop board run `fc/install.py install` once more after it).
+  `nyx_flash.py --verify-only` says so when a board still runs it.
+* `nyx_flash.py --verify-only` prints the version of the FPGA image the board runs.
+* The link, the boards' FPGA images and the apps are unchanged.
+
 ## 2.0.18
 
 * NyxHop board (`fc/`): with PX4, the link and the camera running, the board's processor has

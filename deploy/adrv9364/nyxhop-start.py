@@ -2,6 +2,8 @@
 """nyxhop-start - start the NyxHop radio daemon on ADI's stock Kuiper Linux image.
 
 Run by systemd (nyxhop.service). It:
+  0. switches the image's desktop login (lightdm) off for good if it is still on: a board has no
+     screen, and its display server, started over and over, takes the processor from the daemon
   1. waits for eth0 to have an address; reads the role from /home/root/nyx-role
      (written by the installer), falling back to the address (.10 = A, .11 = B)
   2. waits for the AD9361 phy (the iio device with in_voltage_rf_bandwidth), then
@@ -49,6 +51,24 @@ RESTART_CMD = "systemd-run --on-active=2 --timer-property=AccuracySec=100ms /bin
 
 def log(s):
     print(f"nyxhop: {s}", flush=True)
+
+
+def desktop_off():
+    """The image's desktop login off, now and at every boot from here on. No board that runs NyxHop
+    keeps it: with no screen its display server dies and is started again without end, and on a
+    card that still ran it that took two thirds of both cores from the radio with video alone.
+    An image without it: nothing to do."""
+    def ask(what):
+        try:
+            return subprocess.run(["systemctl", what, "lightdm"], capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    if ask("is-enabled") == "enabled" or ask("is-active") in ("active", "activating"):
+        try:
+            subprocess.run(["systemctl", "disable", "--now", "--no-block", "lightdm"], capture_output=True, timeout=20)
+            log("desktop login (lightdm) switched off - a board has no screen and it took the processor from the radio")
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"desktop login (lightdm): could not switch it off ({e})")
 
 
 def eth_ip(timeout=40):
@@ -115,6 +135,7 @@ def cfg(line):
 
 
 def main():
+    desktop_off()
     ip = eth_ip()
     phy64 = os.path.exists(PHY64_FLAG)
     role_file = f"{O64_DIR}/nyx-role" if phy64 and os.path.exists(f"{O64_DIR}/nyx-role") else ROLE_FILE
