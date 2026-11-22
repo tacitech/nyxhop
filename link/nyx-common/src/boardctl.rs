@@ -51,6 +51,16 @@ impl BoardCtl {
     }
 }
 
+/// Replies the board ends without the closing "ok": the command, and how its last line begins.
+/// `tpc` alone has answered so since it came, on every board's daemon; waiting for an "ok"
+/// there runs into the read timeout, the connection is dropped and the rest of the poll with it.
+const OPEN_ENDED: &[(&str, &str)] = &[("tpc", "tpc_fb_age_ms=")];
+
+/// the line that ends the reply to `cmd`
+fn reply_done(cmd: &str, line: &str) -> bool {
+    line == "ok" || line.starts_with("err") || OPEN_ENDED.iter().any(|(c, last)| *c == cmd && line.starts_with(last))
+}
+
 /// Send one command and read up to the closing "ok"/"err…" line.
 fn transact(stream: &mut TcpStream, cmd: &str) -> std::io::Result<Vec<String>> {
     stream.write_all(format!("{cmd}\n").as_bytes())?;
@@ -65,7 +75,7 @@ fn transact(stream: &mut TcpStream, cmd: &str) -> std::io::Result<Vec<String>> {
             ));
         }
         let t = line.trim().to_string();
-        let done = t == "ok" || t.starts_with("err");
+        let done = reply_done(cmd, &t);
         out.push(t);
         if done {
             return Ok(out);
@@ -164,6 +174,49 @@ fn absorb(state: &Mutex<BoardState>, cmd: &str, lines: &[String]) {
         } else if cmd == "capstat" {
             st.verdict = l.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    /// The poll's last command is `tpc`, whose reply has no "ok": the worker must take its
+    /// fields and keep the connection (22/11/2026: it waited out the read timeout, dropped the
+    /// connection every second, and the power ceiling never reached the panel).
+    #[test]
+    fn a_reply_without_ok_keeps_the_connection() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut w = s.try_clone().unwrap();
+            for line in BufReader::new(s).lines() {
+                let Ok(line) = line else { break };
+                let r = match line.trim() {
+                    "get" => "txgain=-10.000000\nok\n".to_string(),
+                    "tpc" => "tpc_on=0\ntpc_max_db=-10\ntpc_att=\ntpc_fb_age_ms=12\n".to_string(),
+                    "tpc max -6" => "tpc_on=0\ntpc_max_db=-6\ntpc_att=\ntpc_fb_age_ms=12\nok\n".to_string(),
+                    _ => "err unknown\n".to_string(),
+                };
+                if w.write_all(r.as_bytes()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(1500))).unwrap();
+        let state = Mutex::new(BoardState::default());
+        let t0 = Instant::now();
+        for cmd in ["get", "tpc", "get", "tpc max -6", "nope", "tpc"] {
+            let lines = transact(&mut s, cmd).expect(cmd);
+            absorb(&state, cmd, &lines);
+        }
+        assert!(t0.elapsed() < Duration::from_millis(1000), "a reply ran into the read timeout");
+        let st = state.lock().unwrap();
+        assert_eq!(st.kv.get("tpc_max_db").map(String::as_str), Some("-10"));
+        assert_eq!(st.kv.get("txgain").map(String::as_str), Some("-10.000000"));
     }
 }
 

@@ -1443,7 +1443,7 @@ impl Pilot {
         let console = format!("{board}:7202");
         let board_ctl = nyx_common::boardctl::BoardCtl::spawn(
             Arc::new(move || console.clone()),
-            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range", "chbw"],
+            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range", "chbw", "tpc"],
         );
         let cfg_file = dir.join("nyxhop-pilot.cfg");
         let cfg = AppCfg::load(&cfg_file);

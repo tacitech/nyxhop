@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.20
+
+* ADRV9364, NyxHop board: with the control link hopping, an aircraft lost part of what the
+  ground sent it, a few percent on one pair of boards and up to a third on another. Its clock
+  for the hops ran up to 12 ms early, so it left each control channel while the ground was
+  still sending there. The aircraft now keeps that clock within a millisecond of the ground's.
+  On a pair that got 71 to 91 % of the ground's frames before, it gets 92 to 100 %; commands,
+  telemetry and data sent up to the aircraft arrive sooner for it.
+* ADRV9364, NyxHop board: an aircraft waiting to be linked listens on each bandwidth in turn.
+  Before, a ground station set on another bandwidth than the aircraft's last one could not
+  link it: none of five tries went through; now each does within seven seconds.
+* ADRV9364, NyxHop board: a ground station keeps its own channel tables. With two ground
+  stations of one pair switched on, one could take the other's control channels.
+* Apps: Radio has "Max transmit power", the most the board connected to ever sends. Lower it
+  when an amplifier follows the board and raise it again when the amplifier changes; the board
+  keeps it. It was a console command only (`tpc max`).
+* ADRV9364, NyxHop board: a transmit gain set by hand, the Radio sliders included, stays under
+  that ceiling. Before, a slider pulled up to 0 dB drove the amplifier after the board into
+  compression, and nothing brought the gain back.
+* Run `nyx_flash.py` again on both ends: the role, the channel tables, the pairing and the
+  licence are kept (on a NyxHop board run `fc/install.py install` once more after it). The two
+  ends work together whichever is updated first; the first fix is the aircraft's.
+* The boards' FPGA images are unchanged, and so are the PlutoSDR and PlutoSky R2 firmware.
+
 ## 2.0.19
 
 * ADRV9364, NyxHop board: the board's system image starts a desktop login at every boot. With

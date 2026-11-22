@@ -681,7 +681,7 @@ impl RxApp {
                 let host = addr.split(':').next().unwrap_or("192.168.0.10");
                 format!("{host}:7202")
             }),
-            &["get", "trig", "softagc", "hop status", "license", "role", "range"],
+            &["get", "trig", "softagc", "hop status", "license", "role", "range", "tpc"],
         );
         let addr_buf = sh.addr.lock().unwrap().clone();
         RxApp {

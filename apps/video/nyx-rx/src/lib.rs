@@ -2983,7 +2983,7 @@ impl RxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.11");
                 format!("{host}:7202")
             }),
-            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range", "chbw"],
+            &["get", "capstat", "rssi", "trig", "softagc", "hop status", "license", "role", "range", "chbw", "tpc"],
         );
         RxApp {
             shared,

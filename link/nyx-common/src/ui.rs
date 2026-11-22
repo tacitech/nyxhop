@@ -335,6 +335,20 @@ pub struct RadioForm {
     pub ctl_gain: f32,
     pub rmin: String,
     pub seeded: bool,
+    /// the board's power ceiling as its slider shows it, and when the slider was last touched: it
+    /// keeps its own value for a moment (the drag, then the board's answer on its way) and follows
+    /// the board the rest of the time
+    pub max_power: f32,
+    pub max_touched: Option<std::time::Instant>,
+}
+
+/// A transmit gain as the board will take it: under its power ceiling (`tpc max`, 0 = none), so
+/// the slider shows what the board sends and not what was dragged.
+fn under_ceiling(gain: f32, cmd: &str, ceiling: Option<f32>) -> f32 {
+    match ceiling {
+        Some(m) if cmd == "txgain" && m < 0.0 => gain.min(m),
+        _ => gain,
+    }
 }
 
 impl RadioForm {
@@ -620,6 +634,7 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
             ),
         };
         let g = |k: &str| st.kv.get(k).cloned().unwrap_or_else(|| "—".into());
+        let ceiling = st.kv.get("tpc_max_db").and_then(|s| num(s));
         ui.label(
             egui::RichText::new(crate::tf!(
                 "rms {}   peak {}   rssi {}",
@@ -647,6 +662,7 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
         th::row(ui, t("gain dB", "độ lợi dB"), |ui| {
             let r = ui.add(egui::Slider::new(&mut f.video_gain, vrange));
             if r.drag_stopped() {
+                f.video_gain = under_ceiling(f.video_gain, vgcmd, ceiling);
                 board.send(format!("{vgcmd} {}", f.video_gain.round() as i32));
             }
             if role == Role::Ground {
@@ -674,6 +690,7 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
         th::row(ui, t("gain dB", "độ lợi dB"), |ui| {
             let r = ui.add(egui::Slider::new(&mut f.ctl_gain, crange));
             if r.drag_stopped() {
+                f.ctl_gain = under_ceiling(f.ctl_gain, cgcmd, ceiling);
                 board.send(format!("{cgcmd} {}", f.ctl_gain.round() as i32));
             }
             if role == Role::Aircraft {
@@ -683,6 +700,42 @@ pub fn radio_section(ui: &mut egui::Ui, st: &BoardState, role: Role, f: &mut Rad
                 }
             }
         });
+        // The board's power ceiling (`tpc max`, kept on the board): the most this end ever sends.
+        // Lowered for an amplifier after the board and raised again when the amplifier changes -
+        // here, with no console. Only a board that reports one.
+        if let Some(m) = ceiling {
+            th::row(ui, t("Max transmit power", "Công suất phát tối đa"), |ui| {
+                if !f.max_touched.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(2500)) {
+                    f.max_power = m;
+                }
+                let r = ui.add(egui::Slider::new(&mut f.max_power, -40.0..=0.0).suffix(" dB"));
+                if r.changed() || r.dragged() {
+                    f.max_touched = Some(std::time::Instant::now());
+                }
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    let db = f.max_power.round() as i32;
+                    board.send(format!("tpc max {db}"));
+                    // the level itself too while nothing lowers it on its own: `tpc max` moves the
+                    // radio only when the power control's own number differs, and a gain set by
+                    // hand or by the boot config leaves that number behind
+                    if st.kv.get("tpc_on").map(String::as_str) != Some("1") {
+                        board.send(format!("txgain {db}"));
+                        match role {
+                            Role::Ground => f.ctl_gain = db as f32,
+                            Role::Aircraft => f.video_gain = db as f32,
+                        }
+                    }
+                }
+            });
+            ui.label(
+                egui::RichText::new(t(
+                    "0 dB is the most the board has. Lower it when an amplifier follows the board; it is kept on the board.",
+                    "0 dB là mức cao nhất của mạch. Hạ xuống khi gắn bộ khuếch đại sau mạch; giá trị lưu trên mạch.",
+                ))
+                .small()
+                .color(th::DIM),
+            );
+        }
         // Antenna ports: only a board that reports them (2R2T bitstream).
         if st.kv.contains_key("txsel") || st.kv.contains_key("rxsel") {
             let txs = st.kv.get("txsel").cloned().unwrap_or_default();

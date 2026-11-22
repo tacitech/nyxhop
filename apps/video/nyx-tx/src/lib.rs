@@ -1341,7 +1341,7 @@ impl TxApp {
                 let host = a.split(':').next().unwrap_or("192.168.0.10");
                 format!("{host}:7202")
             }),
-            &["get", "stats", "hop status", "license", "role"],
+            &["get", "stats", "hop status", "license", "role", "tpc"],
         );
         TxApp {
             shared,
