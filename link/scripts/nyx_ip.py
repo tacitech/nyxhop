@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nyx_ip - an IP network over the NyxHop link (two ADRV9364 boards).
+"""nyx_ip - an IP network over the NyxHop link (two ADRV9364 or ADRV9361 boards, in any mix).
 
 Each board becomes the router of a small network of its own: the aircraft side 192.168.10.0/24
 (gateway 192.168.10.1, the aircraft board) and the ground side 192.168.20.0/24 (gateway

@@ -11,14 +11,15 @@ source locations in `../docs/THIRD-PARTY.md`.
 
     deploy/adrv9364/   BOOT.BIN  devicetree.dtb  nyx-radio-node  nyxhop-start.py  nyxctl.py
                        nyxhop.service  u-dma-buf.ko  fir10MHz.ftr  nyx-radio-A.cfg  nyx-radio-B.cfg
+    deploy/adrv9361/   the same files, for the ADRV9361-Z7035 (two receive antennas)
     deploy/e200/       nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-A-e200.cfg  nyx-radio-B-e200.cfg
     deploy/ipcam/      nyx-ipcam  nyx-ipcam.service  e200/   (the camera app for the board's ARM)
     deploy/pluto/      pluto.frm   (the PlutoSDR's whole firmware: ADI's, with NyxHop inside)
     deploy/plutosky-r2/ pluto.frm  install.bat  install.ps1  install.sh  Install guide.pdf  README.txt   (untested)
-    deploy/bridge/     nyx-bridge  (the IP bridge for the ADRV9364: link/scripts/nyx_ip.py)
+    deploy/bridge/     nyx-bridge  (the IP bridge for the ADRV9364 and ADRV9361: link/scripts/nyx_ip.py)
 
-`adrv9364/`, `pluto/` and `plutosky-r2/` run the current radio and pair with each other in any
-mix. `e200/` is the previous generation: an E200 pairs with another E200.
+`adrv9364/`, `adrv9361/`, `pluto/` and `plutosky-r2/` run the current radio and pair with each
+other in any mix. `e200/` is the previous generation: an E200 pairs with another E200.
 
 `plutosky-r2/` is ported from the ADRV9364 and has not run on an R2 board yet. The PlutoSky R2
 is a Zynq-7020 board that shows up as a PlutoSDR. Plug its USB port in and run `install.bat` (Windows) or `install.sh`
@@ -40,6 +41,7 @@ Usage (from the repository root):
     set BOARD_PW=analog                  # PowerShell: $env:BOARD_PW = "analog"
     python link/scripts/nyx_flash.py --host <ip> --role tx            # ADRV9364 aircraft
     python link/scripts/nyx_flash.py --host <ip> --role rx            # ADRV9364 ground
+    python link/scripts/nyx_flash.py --host <ip> --role tx --board adrv9361   # ADRV9361-Z7035
     python link/scripts/nyx_flash.py --host 192.168.0.12 --role rx --board e200
     python link/scripts/nyx_ipcam_install.py <ip>                     # the camera app, either board
     python link/scripts/nyx_pluto.py --pair                           # two PlutoSDRs plugged in here

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.22
+
+* ADRV9361-Z7035: NyxHop runs on it (`deploy/adrv9361/`; `nyx_flash.py --board adrv9361`, the
+  same steps as the ADRV9364 with ADI's Kuiper configuration `adrv9361z7035_lvds`). Its receiver
+  takes both receive antennas, so the link holds through a fade at one of them. It pairs with the
+  ADRV9364, the PlutoSDR and the PlutoSky R2 in any mix, and it can be either end. 20 running
+  hours free, then a licence; the free licences cover it.
+* `nyx_flash.py` checks the board's Zynq before it writes the boot image: an ADRV9364 payload on
+  an ADRV9361, or the other way round, stops with a message and writes nothing.
+* ADRV9364, ADRV9361, NyxHop board: pairing hands the ground station's channel tables to the
+  aircraft. An aircraft that kept other tables than the ground's, a replacement aircraft for
+  example, took the pair key and then never found the ground: no control, no video. Now it has
+  the ground's tables a few seconds after the key, and the link comes up as the pairing window
+  closes. Both ends need this version for it; either end alone pairs as before.
+* The IP bridge (`nyx_ip.py`) runs on the ADRV9361 as on the ADRV9364.
+* Run `nyx_flash.py` again on the ADRV9364 boards: the role, the channel tables, the pairing and
+  the licence are kept (on a NyxHop board run `fc/install.py install` once more after it).
+* The boards' FPGA images for the ADRV9364, the PlutoSDR and PlutoSky R2 firmware and the apps
+  are unchanged.
+
 ## 2.0.21
 
 * ADRV9364, NyxHop board: linking an aircraft whose control table begins with another channel

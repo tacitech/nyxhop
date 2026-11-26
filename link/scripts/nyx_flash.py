@@ -9,16 +9,18 @@ any build tool: the boot image, the FPGA design and the daemon are binaries in t
   set BOARD_PW=analog                 # ssh password (PowerShell: $env:BOARD_PW = "analog")
   python nyx_flash.py --host <ip> --role tx            # ADRV9364 as the transmitting end
   python nyx_flash.py --host <ip> --role rx            # ADRV9364 as the receiving end
+  python nyx_flash.py --host <ip> --role tx --board adrv9361      # ADRV9361-Z7035 (2x2)
   python nyx_flash.py --host 192.168.0.12 --role rx --board e200
   python nyx_flash.py --host 192.168.0.10 --role tx --verify-only
   python nyx_flash.py --scan                          # find boards, address forgotten
-  (options: --board adrv9364|e200, --payload <dir> (default ./bin),
+  (options: --board adrv9364|adrv9361|e200, --payload <dir> (default ./deploy),
    --mac <MAC>, --dry-run)
 
 Payload layout (the committed deploy/ folder of the repository, per board type):
   deploy/adrv9364/  BOOT.BIN  devicetree.dtb  nyx-radio-node  fir10MHz.ftr
                     nyxhop-start.py  nyxctl.py  [u-dma-buf.ko]  nyxhop.service
                     nyx-radio-A.cfg  nyx-radio-B.cfg
+  deploy/adrv9361/  the same files, for the ADRV9361-Z7035
   deploy/e200/      nyx.bit  uEnv.txt  uramdisk.image.gz  nyxhop/  nyx-radio-B-e200.cfg
 """
 import argparse
@@ -229,7 +231,32 @@ def need(payload, board, files):
     return d
 
 
-# ---------------------------------------------------------------- ADRV9364 (Kuiper) ----
+# ------------------------------------------------- ADRV9364 / ADRV9361 (Kuiper) ----
+# The boards on ADI's Kuiper Linux: the same install, each its own payload folder and Zynq.
+# The Zynq's device code (PS IDCODE, bits 16:12, at 0xF8000530): a boot image is made for one.
+KUIPER = {
+    "adrv9364": ("ADRV9364-Z7020", "Zynq-7020", 0x07),
+    "adrv9361": ("ADRV9361-Z7035", "Zynq-7035", 0x12),
+}
+ZYNQ_NAMES = {0x02: "Zynq-7010", 0x07: "Zynq-7020", 0x0C: "Zynq-7030", 0x12: "Zynq-7035", 0x11: "Zynq-7045", 0x16: "Zynq-7100"}
+
+
+def check_zynq(b, board):
+    """stop before /boot is written when the board's Zynq is not the one the payload is for"""
+    name, chip, code = KUIPER[board]
+    raw = b.sh("busybox devmem 0xF8000530 32 2>/dev/null || devmem 0xF8000530 32 2>/dev/null")
+    try:
+        got = (int(raw.split()[-1], 16) >> 12) & 0x1F
+    except (ValueError, IndexError):
+        print(f"  (could not read the board's Zynq type; going on as {name})")
+        return
+    if got == code:
+        print(f"  {chip}: {name} payload")
+        return
+    other = next((k for k, v in KUIPER.items() if v[2] == got), None)
+    hint = f" - use --board {other}" if other else ""
+    sys.exit(f"this board has a {ZYNQ_NAMES.get(got, f'Zynq (device code {got:#x})')}, the {name} payload is for a {chip}{hint}. Nothing written.")
+
 ADRV_HOME = [("fir10MHz.ftr", None), ("nyxhop-start.py", "0755"), ("nyxctl.py", "0755")]
 # The radio (bitstream B in BOOT.BIN): the start script runs the daemon below with its state in
 # O64 (cfgs, role, tables, pairing) when the flag file is there (nyxhop-start.py)
@@ -256,11 +283,12 @@ def desktop_state(b):
 
 
 def flash_adrv(a, host, role):
-    d = need(a.payload, "adrv9364",
+    name = KUIPER[a.board][0]
+    d = need(a.payload, a.board,
              ["BOOT.BIN", "devicetree.dtb", "nyx-radio-node", "fir10MHz.ftr",
               "nyxhop-start.py", "nyxctl.py", "nyxhop.service", "nyx-radio-A.cfg", "nyx-radio-B.cfg"])
     if a.dry_run:
-        print(f"[dry-run] ADRV9364 {host} role {role}")
+        print(f"[dry-run] {name} {host} role {role}")
         print(f"  /boot/BOOT.BIN, /boot/devicetree.dtb   (from {d})")
         print(f"  /home/root/: {', '.join(n for n, _ in ADRV_HOME)}, u-dma-buf.ko?, {os.path.basename(ADRV_DAEMON)}, "
               f"{os.path.basename(ADRV_FLAG)}")
@@ -272,7 +300,8 @@ def flash_adrv(a, host, role):
     krn = b.sh("uname -r")
     print(f"== {host}: kernel {krn}")
     if b.sh("mount | grep -c ' /boot '") == "0":
-        sys.exit("/boot (FAT) not mounted — not a Kuiper ADRV9364 board?")
+        sys.exit(f"/boot (FAT) not mounted — not a Kuiper {name} board?")
+    check_zynq(b, a.board)
     # boot image (backup the vendor originals once)
     changed = False
     for f in ("BOOT.BIN", "devicetree.dtb"):
@@ -435,10 +464,10 @@ def main():
     ap.add_argument("--role", help="tx (transmitting) | rx (receiving); A/B also work")
     ap.add_argument("--scan", nargs="?", const="", metavar="NETWORK",
                     help="find boards on the network, e.g. --scan or --scan 192.168.1.0/24")
-    ap.add_argument("--board", default="adrv9364", choices=["adrv9364", "e200"])
+    ap.add_argument("--board", default="adrv9364", choices=["adrv9364", "adrv9361", "e200"])
     ap.add_argument("--payload", default=os.path.join(os.getcwd(), "deploy"),
                     help="board images to flash (default ./deploy)")
-    ap.add_argument("--mac", help="eth0 MAC (ADRV9364; the two boards must differ)")
+    ap.add_argument("--mac", help="eth0 MAC (ADRV9364 / ADRV9361; the two boards must differ)")
     ap.add_argument("--verify-only", action="store_true")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, touch nothing")
@@ -453,9 +482,9 @@ def main():
         sys.exit("--host and --role are required (or use --scan to find a board)")
     role = norm_role(a.role)
     if a.verify_only:
-        (verify_adrv if a.board == "adrv9364" else verify_e200)(a.host)
+        (verify_adrv if a.board in KUIPER else verify_e200)(a.host)
         return
-    (flash_adrv if a.board == "adrv9364" else flash_e200)(a, a.host, role)
+    (flash_adrv if a.board in KUIPER else flash_e200)(a, a.host, role)
     if not a.dry_run:
         print(f"\nDone: {a.host} is role {a.role} ({role}); it starts NyxHop on every power-up.")
 

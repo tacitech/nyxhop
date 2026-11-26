@@ -1,0 +1,16 @@
+[Unit]
+Description=NyxHop OFDM radio daemon (nyx-radio-node) - vai A/B theo /home/root/nyx-role
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/root/nyxhop-start.py
+ExecStopPost=/usr/bin/killall -q nyx-radio-node
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+WorkingDirectory=/home/root
+
+[Install]
+WantedBy=multi-user.target

@@ -44,17 +44,20 @@ and an IP network over the radio.*
 * **Distance without GPS**: the link measures the distance between its two ends from its own
   signal.
 * **Non-Chinese if you need it**: Analog Devices radios, AMD (Xilinx) FPGAs, our own software.
+* **Two receive antennas on the ADRV9361-Z7035**: its receiver takes both, so the link holds
+  through a fade at one of them.
 * **Free on a PlutoSDR**: no licence, no time limit, no sign-up.
 
 ## Getting started
 
-You need two boards (ADRV9364-Z7020, PlutoSDR or PlutoSky R2, in any mix), antennas for your band, and a PC
+You need two boards (ADRV9364-Z7020, ADRV9361-Z7035, PlutoSDR or PlutoSky R2, in any mix), antennas for your band, and a PC
 on the same network with Python 3 (`pip install paramiko`) and Rust 1.85 or newer. For a first
 test, put the boards 1 to 3 m apart.
 
-**1. An OS on the board.** ADRV9364: write ADI's *Kuiper Linux 2023_r2* to a microSD card
-(configuration `adrv9364z7020_lvds`), boot it with Ethernet plugged in, and find its address on
-your router (user `root`, password `analog`). PlutoSDR and PlutoSky R2: nothing to do.
+**1. An OS on the board.** ADRV9364 and ADRV9361: write ADI's *Kuiper Linux 2023_r2* to a microSD
+card (configuration `adrv9364z7020_lvds`, or `adrv9361z7035_lvds` for the ADRV9361), boot it with
+Ethernet plugged in, and find its address on your router (user `root`, password `analog`).
+PlutoSDR and PlutoSky R2: nothing to do.
 
 **2. NyxHop on the board.** From the repository root:
 
@@ -65,8 +68,9 @@ python link/scripts/nyx_flash.py --host 192.168.0.11 --role rx     # ground (scr
 python link/scripts/nyx_pluto.py --pair                            # or: two PlutoSDRs on this PC's USB
 ```
 
-The board restarts and runs NyxHop at every power-up from then on. Run the same command again
-to update it; tables, pairing and licence are kept. `nyx_flash.py --scan` finds your boards.
+For an ADRV9361-Z7035 add `--board adrv9361`. The board restarts and runs NyxHop at every
+power-up from then on. Run the same command again to update it; tables, pairing and licence are
+kept. `nyx_flash.py --scan` finds your boards.
 
 PlutoSky R2 (untested): plug its USB port into the PC and run `deploy/plutosky-r2/install.bat`
 (Windows) or `install.sh` (Linux, Mac). `deploy/plutosky-r2/Install guide.pdf` has every step.
@@ -124,7 +128,7 @@ antennas, your band and your distance.
 
 **PlutoSDR: free.** No licence, no time limit, commercial use included.
 
-**ADRV9364-Z7020: 20 running hours free, then a licence.** Only the time the board is switched on
+**ADRV9364-Z7020 and ADRV9361-Z7035: 20 running hours free, then a licence.** Only the time the board is switched on
 and running NyxHop counts; a board that is switched off counts nothing, so a board left in a
 drawer for a month has used none of its hours. 20 hours is, for example, ten two-hour sessions.
 
@@ -139,7 +143,7 @@ Each board needs its own licence. More boards or later feature generations:
 **contact@tacitek.com**. Details in [docs/license.md](docs/license.md).
 
 **PlutoSky R2 (untested): 20 running hours free, then a licence from contact@tacitek.com.** The free
-licences and the licence page are for the ADRV9364.
+licences and the licence page are for the ADRV9364 and the ADRV9361.
 
 ## Tailored to your system
 
@@ -157,6 +161,7 @@ you are building:
 |---|---|---|---|
 | NyxHop board | Zynq-7020 | AD9364 | current radio and flight controller, 2S–6S battery |
 | ADRV9364-Z7020 | Zynq-7020 | AD9364 | current radio |
+| ADRV9361-Z7035 | Zynq-7035 | AD9361 | current radio, two receive antennas |
 | PlutoSDR | Zynq-7010 | AD9363 | current radio, free |
 | PlutoSky R2 | Zynq-7020 | AD9361 or AD9363 | current radio, **untested** |
 | ANTSDR E200 | Zynq-7020 | AD9361 | previous radio: pairs with another E200 |
@@ -173,7 +178,7 @@ The PlutoSky R2 image is ported from the ADRV9364 and has not run on an R2 board
 same link, on a board that installs like a PlutoSDR (`deploy/plutosky-r2/`). If you have one,
 tell us how it runs: **contact@tacitek.com**.
 
-An ADRV9364, a PlutoSDR and a PlutoSky R2 pair in any mix, and any board can be either end. Range depends on
+An ADRV9364, an ADRV9361, a PlutoSDR and a PlutoSky R2 pair in any mix, and any board can be either end. Range depends on
 the amplifiers and antennas at each end:
 
 | RF chain at each end | band | video | link held |
